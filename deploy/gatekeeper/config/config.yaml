@@ -1,0 +1,47 @@
+# Gatekeeper's own configuration: which namespaces it never judges, and which objects it copies
+# into its cache for policies that compare one object with another. Gatekeeper only reads a Config
+# named "config" in its own namespace.
+#
+# The CRD comes from the chart in the same Argo CD Application, so the dry run at the start of the
+# first sync can't know this kind yet.
+apiVersion: config.gatekeeper.sh/v1alpha1
+kind: Config
+metadata:
+  name: config
+  namespace: gatekeeper-system
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  # "*" = admission webhook, audit, cache sync and mutation: these namespaces are invisible to
+  # every policy. Each entry and its reason is listed in docs/compliance/controls.md; keep the two
+  # in step. Everything else, istio-ingress and boutique included, is judged.
+  match:
+    - excludedNamespaces:
+        # GKE's own system workloads (kube-dns, konnectivity, Dataplane V2, logging and metrics
+        # agents, CSI drivers). Google configures and upgrades them, several need host access by
+        # design, and a policy that ever blocked them could break the cluster.
+        - kube-system
+        # GKE-managed add-on namespaces (for example gke-managed-system, gke-gmp-system).
+        - gke-*
+        # Managed Service for Prometheus: GKE runs its operator and collectors in gmp-system and
+        # keeps their settings in gmp-public.
+        - gmp-*
+        # istiod, the mesh control plane, from Istio's chart. If it could not start, no pod in the
+        # mesh could get a sidecar. Its settings are reviewed in deploy/istio/istiod-values.yaml.
+        - istio-system
+        # Argo CD is how a wrong policy gets fixed. It must never be blocked by one.
+        - argocd
+        # The policy engine does not judge itself: a deny here could stop Gatekeeper from starting.
+        # The chart also keeps this namespace out of the webhook.
+        - gatekeeper-system
+        # Chaos Mesh (M3): its chaos-daemon must run privileged with the host's PID and network
+        # namespaces to inject faults. That is its job, so every finding here would be permanent.
+        - chaos-mesh
+      processes: ["*"]
+  # k8spoddisruptionbudget (PR-14) compares a Deployment with the PodDisruptionBudgets that
+  # select it, so Gatekeeper must keep a copy of every PodDisruptionBudget.
+  sync:
+    syncOnly:
+      - group: policy
+        version: v1
+        kind: PodDisruptionBudget

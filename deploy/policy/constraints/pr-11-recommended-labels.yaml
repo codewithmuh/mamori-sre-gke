@@ -1,0 +1,27 @@
+# PR-11: pods carry the Kubernetes recommended labels that say what they are and what they belong
+# to. Dashboards, cost reports and the incident agent group by them.
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequiredLabels
+metadata:
+  name: pr-11-recommended-labels
+  labels:
+    app.kubernetes.io/part-of: mamori
+  annotations:
+    # After the ConstraintTemplates (wave 0 of this Application); the dry run at the start of the
+    # first sync can't know this kind until Gatekeeper has made its CRD from the template.
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    mamori.dev/control-id: PR-11
+    mamori.dev/checklist-item: "Recommended labels: app.kubernetes.io/name, app.kubernetes.io/part-of"
+    mamori.dev/source: "https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/"
+spec:
+  enforcementAction: dryrun
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+  parameters:
+    message: "Pods need the labels app.kubernetes.io/name and app.kubernetes.io/part-of (Kubernetes recommended labels)"
+    labels:
+      - key: app.kubernetes.io/name
+      - key: app.kubernetes.io/part-of

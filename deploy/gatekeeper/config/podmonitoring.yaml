@@ -1,0 +1,23 @@
+# Managed Service for Prometheus scrapes Gatekeeper's own metrics: violations per enforcement
+# action, the time of the last audit run, webhook request counts and latency. They show that audit
+# is still running and how the number of findings changes week to week. Only gatekeeper_* series
+# are kept (about a hundred, estimate), which costs cents a month at one sample a minute.
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: gatekeeper
+  namespace: gatekeeper-system
+  labels:
+    app.kubernetes.io/name: gatekeeper
+    app.kubernetes.io/part-of: mamori
+spec:
+  selector:
+    matchLabels:
+      gatekeeper.sh/system: "yes"
+  endpoints:
+    - port: metrics
+      interval: 60s
+      metricRelabeling:
+        - sourceLabels: [__name__]
+          regex: gatekeeper_.+
+          action: keep

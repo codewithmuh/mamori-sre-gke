@@ -1,0 +1,72 @@
+# Breaks the rule on purpose: PR-14, 2 replicas against a PDB with minAvailable 2
+# (inventory-pdb-min-available-2.yaml), so no pod may ever be evicted.
+# Written as the AdmissionReview request the API server sends to Gatekeeper: it is a test
+# input, not a manifest to deploy, and repo scanners such as Trivy don't read it as one.
+apiVersion: admission.k8s.io/v1
+kind: AdmissionReview
+request:
+  uid: ar-pr14-deployment-blocks-drain
+  kind:
+    group: apps
+    version: v1
+    kind: Deployment
+  resource:
+    group: apps
+    version: v1
+    resource: deployments
+  namespace: boutique
+  name: frontend
+  operation: CREATE
+  userInfo:
+    username: gator-test
+  object:
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: frontend
+      namespace: boutique
+      labels:
+        app.kubernetes.io/name: frontend
+        app.kubernetes.io/part-of: mamori
+    spec:
+      replicas: 2
+      selector:
+        matchLabels:
+          app: frontend
+      template:
+        metadata:
+          labels:
+            app: frontend
+            app.kubernetes.io/name: frontend
+            app.kubernetes.io/part-of: mamori
+        spec:
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: server
+              image: asia-northeast1-docker.pkg.dev/PROJECT_ID/mamori/frontend:0.1.0
+              ports:
+                - containerPort: 8080
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 64Mi
+              readinessProbe:
+                httpGet:
+                  path: /healthz
+                  port: 8080
+              livenessProbe:
+                httpGet:
+                  path: /healthz
+                  port: 8080
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL

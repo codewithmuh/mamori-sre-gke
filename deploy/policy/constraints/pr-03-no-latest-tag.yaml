@@ -1,0 +1,27 @@
+# PR-03: no image uses the latest tag, and every image names a tag or a digest.
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sDisallowedTags
+metadata:
+  name: pr-03-no-latest-tag
+  labels:
+    app.kubernetes.io/part-of: mamori
+  annotations:
+    # After the ConstraintTemplates (wave 0 of this Application); the dry run at the start of the
+    # first sync can't know this kind until Gatekeeper has made its CRD from the template.
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    mamori.dev/control-id: PR-03
+    mamori.dev/checklist-item: "Avoid the :latest tag; use a meaningful tag and/or a digest"
+    mamori.dev/source: "https://kubernetes.io/docs/concepts/containers/images/"
+spec:
+  enforcementAction: dryrun
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+  parameters:
+    tags: ["latest"]
+    # "auto" is the placeholder Istio's gateway chart writes into the Deployment. istiod's
+    # injection webhook replaces it with the pinned proxy image before the Pod exists, so only a
+    # check of the Git manifests (gator test) ever sees it.
+    exemptImages: ["auto"]

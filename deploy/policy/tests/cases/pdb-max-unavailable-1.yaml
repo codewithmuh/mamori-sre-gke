@@ -1,0 +1,11 @@
+# Passes PR-14: one pod of the set may be evicted at a time.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: frontend
+  namespace: boutique
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: frontend

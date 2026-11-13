@@ -1,0 +1,109 @@
+# Values for the OPA Gatekeeper chart (D10), pinned in deploy/apps/gatekeeper.yaml.
+# Chart defaults are sized for a large, multi-tenant cluster (3 webhook replicas at 100m / 512 MiB
+# each, plus audit). This lab has about 550m CPU left for everything after M1, and every policy
+# starts in dryrun, so Gatekeeper runs small and fails open. docs/compliance/controls.md says what
+# to change before any policy moves to deny.
+
+# Same version as the chart, pinned by the image index digest so the tag can't move under us.
+image:
+  release: v3.23.1@sha256:dfc6fc78753f5564303429c1c1fdfe611df17be224ab22c09ce9d2a73c468a8d
+
+# One webhook pod. With failurePolicy Ignore a missing webhook blocks nothing, so a second replica
+# would only buy availability for checks that are dryrun anyway.
+replicas: 1
+
+# With one replica, the chart's default PodDisruptionBudget (minAvailable: 1) would block every
+# node drain, and GKE waits up to an hour before it gives up on a PDB during an upgrade.
+pdb:
+  controllerManager:
+    minAvailable: 0
+
+# Fail open. If the webhook is down or slow, the API server lets the request through, so Argo CD
+# syncs, Istio sidecar injection and Spot node recovery never wait on Gatekeeper. The same for the
+# check that guards the admission.gatekeeper.sh/ignore namespace label (chart default: Fail),
+# which would otherwise block every namespace create or update while the single pod is away.
+validatingWebhookFailurePolicy: Ignore
+validatingWebhookCheckIgnoreFailurePolicy: Ignore
+validatingWebhookTimeoutSeconds: 3
+
+# Validation only. No mutation policies are planned, and a mutating webhook would sit in the path
+# of every create in the cluster. No external data providers either.
+disableMutation: true
+enableExternalData: false
+
+# Evaluate every template with its Rego code. Six of the library templates we use also carry
+# CEL, and Gatekeeper prefers CEL when this is on (the default). At the pinned library commit the
+# CEL code of two of them is weaker than their Rego: host-network-ports misses a hostPort on a
+# container whose other ports have none (PR-07), and requiredlabels reports a missing label twice,
+# once as "regex mismatch" (PR-11). gator showed both (deploy/policy/check.sh runs gator the same
+# way). All 14 templates have Rego, so nothing is lost.
+enableK8sNativeValidation: false
+
+# Since 3.20 Gatekeeper also writes Kubernetes ValidatingAdmissionPolicies and bindings for
+# templates that carry CEL. Off as well, so every decision stays on one path (this webhook and
+# audit), the namespace exemptions in config/config.yaml apply everywhere, and nothing appears in
+# the cluster that Argo CD does not manage. Revisit both when moving to deny: in-process policies
+# have no webhook that can be down.
+defaultCreateVAPForTemplates: false
+defaultCreateVAPBindingForConstraints: false
+
+# Audit re-checks everything already running every 60 s (chart default). Only list the kinds that
+# some constraint matches (Pods, Services, PodDisruptionBudgets, Deployments, StatefulSets), not
+# every kind in the cluster. Keep up to 50 violations per constraint in its status (default 20);
+# totalViolations always counts all of them.
+auditInterval: 60
+auditMatchKindOnly: true
+constraintViolationsLimit: 50
+
+# Log each admission request that breaks a constraint as a JSON line in Cloud Logging, dryrun
+# included (the line says "denied admission" even then; its constraint_action field says dryrun).
+# Audit logs each finding it sees as event_type violation_audited either way. Both feed the weekly
+# evidence bundle.
+logDenies: true
+
+# Argo CD applies the chart's CRDs itself (Helm crds/ directory), so the pre-install Job that
+# re-applies them is not needed. The post-install Jobs that label the namespace and probe the
+# webhook are replaced by managedNamespaceMetadata in deploy/apps/gatekeeper.yaml and by Argo CD's
+# health checks. Fewer hook Jobs, fewer images to pull.
+upgradeCRDs:
+  enabled: false
+postInstall:
+  labelNamespace:
+    enabled: false
+  probeWebhook:
+    enabled: false
+
+# The chart runs both pods at system-cluster-critical, with a ResourceQuota that allows it outside
+# kube-system. While every policy is dryrun and the webhook fails open, Gatekeeper must not preempt
+# the shop when a Spot preemption leaves too little room. Raise this together with the failure
+# policy.
+resourceQuota: false
+
+# The chart already sets app.kubernetes.io/name; this adds the project label to its objects and pods.
+commonLabels:
+  app.kubernetes.io/part-of: mamori
+
+# Requests follow the base's style (deploy/README.md): CPU and memory requests, a memory limit, no
+# CPU limit. Gatekeeper idles at a few millicores; OPA compiles the templates at start-up and audit
+# runs every minute, both short bursts. Memory sizes are estimates for about 14 templates on a
+# 3-node cluster; measure with `kubectl top` and adjust.
+controllerManager:
+  # The API server calls the webhook pod on this port directly, not through the Service, so private
+  # nodes need infra/envs/lab/firewall_gatekeeper.tf to open it. Change both together.
+  port: 8443
+  priorityClassName: ""
+  resources:
+    requests:
+      cpu: 25m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+audit:
+  priorityClassName: ""
+  resources:
+    requests:
+      cpu: 25m
+      memory: 256Mi
+    limits:
+      memory: 512Mi

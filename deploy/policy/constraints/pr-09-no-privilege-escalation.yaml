@@ -1,0 +1,21 @@
+# PR-09: every container sets allowPrivilegeEscalation: false.
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sPSPAllowPrivilegeEscalationContainer
+metadata:
+  name: pr-09-no-privilege-escalation
+  labels:
+    app.kubernetes.io/part-of: mamori
+  annotations:
+    # After the ConstraintTemplates (wave 0 of this Application); the dry run at the start of the
+    # first sync can't know this kind until Gatekeeper has made its CRD from the template.
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    mamori.dev/control-id: PR-09
+    mamori.dev/checklist-item: "Pod Security Standards, Restricted: Privilege Escalation"
+    mamori.dev/source: "https://kubernetes.io/docs/concepts/security/pod-security-standards/"
+spec:
+  enforcementAction: dryrun
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]

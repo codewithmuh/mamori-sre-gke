@@ -1,0 +1,25 @@
+# PR-07: no pod uses the node's network namespace or binds a port on the node.
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sPSPHostNetworkingPorts
+metadata:
+  name: pr-07-no-host-network-ports
+  labels:
+    app.kubernetes.io/part-of: mamori
+  annotations:
+    # After the ConstraintTemplates (wave 0 of this Application); the dry run at the start of the
+    # first sync can't know this kind until Gatekeeper has made its CRD from the template.
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    mamori.dev/control-id: PR-07
+    mamori.dev/checklist-item: "Pod Security Standards, Baseline: Host Namespaces (hostNetwork) and Host Ports"
+    mamori.dev/source: "https://kubernetes.io/docs/concepts/security/pod-security-standards/"
+spec:
+  enforcementAction: dryrun
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+  parameters:
+    hostNetwork: false
+    # Any hostPort above 0 is a violation; 0 means "not set" (the Baseline profile's rule).
+    max: 0

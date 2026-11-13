@@ -1,0 +1,41 @@
+# Test input only; not synced to the cluster. The Pod policies match Pods, and in Git there are
+# only Deployments, StatefulSets, DaemonSets, Jobs and CronJobs. These ExpansionTemplates let
+# `gator test` (../check.sh) turn each pod template into the Pod it would create, so the rendered
+# manifests are judged offline the way audit judges the running Pods.
+#
+# Not deployed in the dryrun phase: on the cluster, audit already sees the real Pods, Istio's
+# injected containers included, and an expansion would report every finding twice. It becomes
+# useful with warn/deny (docs/compliance/controls.md): then a rejection reaches Argo CD on the
+# Deployment instead of hiding in a ReplicaSet that can't create Pods.
+apiVersion: expansion.gatekeeper.sh/v1beta1
+kind: ExpansionTemplate
+metadata:
+  name: expand-workloads
+spec:
+  applyTo:
+    - groups: ["apps"]
+      kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+      versions: ["v1"]
+    - groups: ["batch"]
+      kinds: ["Job"]
+      versions: ["v1"]
+  templateSource: "spec.template"
+  generatedGVK:
+    kind: "Pod"
+    group: ""
+    version: "v1"
+---
+apiVersion: expansion.gatekeeper.sh/v1beta1
+kind: ExpansionTemplate
+metadata:
+  name: expand-cronjobs
+spec:
+  applyTo:
+    - groups: ["batch"]
+      kinds: ["CronJob"]
+      versions: ["v1"]
+  templateSource: "spec.jobTemplate.spec.template"
+  generatedGVK:
+    kind: "Pod"
+    group: ""
+    version: "v1"

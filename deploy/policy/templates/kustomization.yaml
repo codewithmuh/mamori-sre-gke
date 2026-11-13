@@ -1,0 +1,27 @@
+# ConstraintTemplates copied from the OPA gatekeeper-library (Apache-2.0),
+# https://github.com/open-policy-agent/gatekeeper-library, commit
+# a8d4799d8dafd47ec5fafe945ef277d329e2cceb (2026-10-21; library/ unchanged since 2026-02-12).
+# Each file is the upstream template.yaml with only trailing spaces removed; the comment gives its
+# upstream path and template version. Copied rather than fetched so the policy text that runs is
+# reviewed in this repo and the tests in ../tests run offline. To update: copy the new file over,
+# bump the commit here, run the tests (docs/compliance/controls.md, "Test").
+#
+# Synced in wave 6 by deploy/apps/policy.yaml, before the Constraints in ../constraints.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - k8srequiredresources.yaml # library/general/containerresources 1.0.1
+  - k8srequiredprobes.yaml # library/general/requiredprobes 1.0.1
+  - k8sdisallowedtags.yaml # library/general/disallowedtags 1.0.2
+  - k8sallowedreposv2.yaml # library/general/allowedreposv2 1.0.0
+  - k8spspprivilegedcontainer.yaml # library/pod-security-policy/privileged-containers 1.1.3
+  - k8spsphostnamespace.yaml # library/pod-security-policy/host-namespaces 1.1.1
+  - k8spsphostnetworkingports.yaml # library/pod-security-policy/host-network-ports 1.1.5
+  - k8spspallowedusers.yaml # library/pod-security-policy/users 1.0.3
+  - k8spspallowprivilegeescalationcontainer.yaml # library/pod-security-policy/allow-privilege-escalation 1.1.1
+  - k8spspcapabilities.yaml # library/pod-security-policy/capabilities 1.1.3
+  - k8srequiredlabels.yaml # library/general/requiredlabels 1.1.2
+  - k8sblockloadbalancer.yaml # library/general/block-loadbalancer-services 1.0.0
+  - k8sblocknodeport.yaml # library/general/block-nodeport-services 1.0.0
+  - k8spoddisruptionbudget.yaml # library/general/poddisruptionbudget 1.0.4
