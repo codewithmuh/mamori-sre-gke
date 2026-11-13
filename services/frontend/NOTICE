@@ -1,0 +1,12 @@
+mamori-sre-gke: frontend (a modified copy of the Online Boutique frontend)
+
+This directory is a copy of src/frontend from Online Boutique
+(https://github.com/GoogleCloudPlatform/microservices-demo) at commit
+5b608cb1dfe317d05e4f1bb8c99b7618452fde87, the commit tag v0.10.7 points to.
+Copyright 2018-2020 Google LLC. Licensed under the Apache License, Version 2.0; see LICENSE
+(copied unchanged from the upstream repository's root).
+
+The mamori-sre-gke project changed some of these files. CHANGES.md lists every change, and
+each changed file says so in its header. Files the project added (currency_fallback.go,
+currency_fallback_test.go, currency_fallback_handlers_test.go, NOTICE, CHANGES.md) are
+Copyright 2026 The mamori-sre-gke authors, under the same license.
