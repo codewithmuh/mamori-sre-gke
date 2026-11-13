@@ -1,0 +1,104 @@
+# SLO targets for the critical user journeys (CUJs), and how they are measured and alerted on.
+#
+# tools/slo-gen reads this file and the CUJ map (slo/cuj-map.yaml, written by tools/cuj-discovery) and
+# generates the recording rules (deploy/slo/), the Cloud Monitoring SLOs and alerts
+# (infra/envs/lab/slo_generated.tf.json), the Datadog SLOs and monitors
+# (infra/envs/datadog/slo_generated.tf.json) and a catalog (slo/generated/slo-catalog.md).
+# Change this file, then run `make slo-generate` and commit the result; CI fails if they drift apart.
+#
+# Design and reasons: docs/slo/slo-design.md. Targets are the provisional starting values from
+# docs/prd.md; M2 resets them from measured baselines and records each change in the error-budget policy.
+apiVersion: mamori/v1
+kind: SLOSpec
+
+# Rolling compliance window of every SLO. Cloud Monitoring allows 1 to 30 days.
+window: 28d
+
+journeys:
+  - {id: browse, availability: {target: 0.995}, latency: {thresholdMs: 500, target: 0.95}}
+  - {id: add-to-cart, availability: {target: 0.995}, latency: {thresholdMs: 500, target: 0.95}}
+  - {id: view-cart, availability: {target: 0.995}, latency: {thresholdMs: 500, target: 0.95}}
+  - {id: checkout, availability: {target: 0.99}, latency: {thresholdMs: 1000, target: 0.95}}
+
+gcp:
+  cluster: mamori
+  # How often Managed Service for Prometheus evaluates the recording rules.
+  ruleInterval: 1m
+
+# Black-box signal: tools/prober runs every journey once a minute (source="scheduled").
+prober:
+  namespace: prober
+  # Prober steps whose duration counts for the journey's latency SLI: the journey's own frontend
+  # requests (docs/prd.md), not the setup steps that come before them. Failed steps record no duration,
+  # so latency is measured over successful steps; failures count against availability.
+  latencySteps:
+    browse: [home, product]
+    add-to-cart: [add-to-cart]
+    view-cart: [view-cart]
+    checkout: [place-order]
+  # Rate windows of the recorded prober SLIs (for dashboards, runbooks and the incident agent). The
+  # Cloud Monitoring SLOs read the raw prober counters, not these.
+  recordWindows: [5m, 1h]
+
+# White-box signal: Istio request metrics of the journey's critical services (D4).
+mesh:
+  namespace: boutique
+  # Never in a journey's composite even when the CUJ map lists them: the entry serves every journey's
+  # routes and Istio's metrics carry no route, so its ratio would let a checkout-only fault burn the
+  # other journeys. The prober covers the entry.
+  excludedServices: [frontend]
+  # Plain TCP to Istio, so no request metrics. A redis-cart failure shows up as cartservice errors.
+  tcpServices: [redis-cart]
+  # gRPC statuses that count as good besides OK (0): INVALID_ARGUMENT (3) and NOT_FOUND (5) answer
+  # bad input, such as junk /product/<id> requests from the public internet, not a broken service.
+  goodGrpcStatuses: ["0", "3", "5"]
+  # The composite SLIs feed windows-based SLOs: a window is good when the composite meets the target.
+  windowPeriod: 1m
+  # Rate window of the gauge those SLOs read. Needs the sidecars scraped at least every minute.
+  sloRateWindow: 2m
+  recordWindows: [5m, 1h]
+
+# Multiwindow, multi-burn-rate alerts from the Google SRE workbook ("Alerting on SLOs"). The burn rate
+# is budgetConsumed x window / longWindow, so it is recomputed for 28 days. The workbook's ticket tier
+# looks back 3 days; Cloud Monitoring burn-rate alerts look back at most 24 hours, so that tier uses
+# 24 hours and 2 hours.
+alerting:
+  # Proposal for the maintainer's ADR on D4: only the prober pages (one signal per journey), so one
+  # fault opens few pages (PagerDuty's free plan has 100 phone/SMS a month). A page tier of any other
+  # signal opens a ticket instead.
+  pageSignals: [prober]
+  # The workbook's budget shares: 2 % in 1 h, 5 % in 6 h, 10 % (here in 24 h).
+  availabilityTiers:
+    - {name: fast, severity: page, budgetConsumed: 0.02, longWindow: 1h, shortWindow: 5m}
+    - {name: medium, severity: page, budgetConsumed: 0.05, longWindow: 6h, shortWindow: 30m}
+    - {name: slow, severity: ticket, budgetConsumed: 0.10, longWindow: 24h, shortWindow: 2h}
+  # A 95 % latency target allows a burn rate of at most 20 (every request slow), so the availability
+  # rates (13.44 needs 67 % slow) would miss partial slowdowns. Half the budget shares instead.
+  latencyTiers:
+    - {name: fast, severity: page, budgetConsumed: 0.01, longWindow: 1h, shortWindow: 5m}
+    - {name: medium, severity: page, budgetConsumed: 0.025, longWindow: 6h, shortWindow: 30m}
+    - {name: slow, severity: ticket, budgetConsumed: 0.05, longWindow: 24h, shortWindow: 2h}
+  # Alert when a whole signal has sent no data for this long: prober silent (page), recorded mesh
+  # composites missing (ticket).
+  noDataAfter: 10m
+  # Close an incident once its condition has had no new violating data for this long.
+  autoClose: 30m
+  runbookBaseURL: https://github.com/codewithmuh/mamori-sre-gke/blob/main/docs/runbooks
+
+# Third signal, for the 14-day Datadog window only (M3): synthetics from outside Google Cloud.
+datadog:
+  # Datadog SLOs offer 7, 30 or 90 days, not 28. The first one is the SLO's main timeframe.
+  timeframes: [7d, 30d]
+  # One run every 5 minutes from one location: a 5-minute window holds 0 or 1 runs and flaps, so
+  # only the slower tiers, with short windows of at least 15 minutes.
+  tiers: [medium, slow]
+  minShortWindow: 15m
+  # Datadog allows no burn-rate alerts on monitor-based SLOs built from Synthetics monitors, so each
+  # journey also gets a metric-based SLO on synthetics.test_runs that carries them.
+  # UNVERIFIED: the tag names on synthetics.test_runs. Check them in Metrics Explorer before the
+  # window starts; with a wrong goodFilter the SLO reads 0 % and every burn-rate monitor fires.
+  burnRate:
+    enabled: true
+    metric: synthetics.test_runs
+    testTag: test_public_id
+    goodFilter: status:passed
