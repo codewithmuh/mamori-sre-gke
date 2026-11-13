@@ -1,0 +1,101 @@
+# EXAMPLE ONLY. NOT MEASURED. Nothing here comes from a fault-injection run.
+#
+# This file has the exact schema of slo/cuj-map.yaml (the build contract's CUJMap) so that other
+# work (the SLO generator, runbooks, the agent evaluation) can be built and tested before a cluster
+# exists. Replace it with the real map from `make discovery-run` (docs/slo/cuj-discovery.md) and
+# never quote these numbers as results. Every failureRate is 1.0 or 0.0 because it is a guess about
+# which way each case goes, not a measured rate.
+#
+# How the guesses were made (2026-11-13), from Online Boutique v0.10.7 (commit 5b608cb) and the
+# prober's journey steps (#16):
+#
+# - The prober starts every run on the home page (GET /), so the home page's fatal calls are in
+#   every journey. In src/frontend/handlers.go, homeHandler returns HTTP 500 when any of these
+#   fail: currency (GetSupportedCurrencies, Convert per product), productcatalog (ListProducts),
+#   cart (GetCart). cartservice answers FailedPrecondition when it can't reach redis-cart, and its
+#   health check pings Redis, so redis-cart counts as critical wherever cartservice does.
+# - Errors ignored on purpose, so not critical: ads (chooseAd logs "failed to retrieve ads" and
+#   renders without one) and recommendations (product, cart and order pages log a warning, or
+#   drop the error with `_`).
+# - browse: home, then GET /product/{id}: getProduct, getCurrencies, getCart, convertCurrency are
+#   fatal; recommendations and ads are ignored.
+# - add-to-cart: home, then POST /cart (the prober checks the 302 and does not follow it):
+#   getProduct and insertCart (AddItem) are fatal.
+# - view-cart: home, add-to-cart, then GET /cart: getCurrencies, getCart, getShippingQuote
+#   (shipping GetQuote, then currency Convert), and getProduct + convertCurrency per item are
+#   fatal; recommendations are ignored.
+# - checkout: the three steps above, then POST /cart/checkout. The frontend calls PlaceOrder and
+#   then getCurrencies (both fatal; recommendations ignored). In src/checkoutservice/main.go,
+#   PlaceOrder fails if the cart, product catalog, currency, shipping (quote and ShipOrder) or
+#   payment (Charge) call fails; emptying the cart is ignored (`_ =`) and a failed confirmation
+#   email is only logged as a warning, so emailservice is not critical.
+#
+# Two guesses worth checking first in the real run: (1) currencyservice is critical for every
+# journey, although prices could fall back to USD (a hardening candidate, PLAN.md section 4);
+# (2) the ad call has a 100 ms timeout, so a slow (not failing) adservice should stay harmless.
+apiVersion: mamori/v1
+kind: CUJMap
+metadata:
+  generatedAt: "2026-11-13T00:00:00Z"
+  generator: cuj-discovery/0.0.0-example
+  onlineBoutique: v0.10.7
+  runsPerCase: 20
+  failureThreshold: 0.5
+  fault: "EXAMPLE, NOT MEASURED: expected outcome of breaking one service at a time (Istio abort with gRPC UNAVAILABLE; redis-cart scaled to 0), guessed from the v0.10.7 source"
+journeys:
+  - id: add-to-cart
+    critical: [cartservice, currencyservice, productcatalogservice, redis-cart]
+    nonCritical: [adservice, checkoutservice, emailservice, paymentservice, recommendationservice, shippingservice]
+    results:
+      adservice: {failureRate: 0.0, runs: 20}
+      cartservice: {failureRate: 1.0, runs: 20}
+      checkoutservice: {failureRate: 0.0, runs: 20}
+      currencyservice: {failureRate: 1.0, runs: 20}
+      emailservice: {failureRate: 0.0, runs: 20}
+      paymentservice: {failureRate: 0.0, runs: 20}
+      productcatalogservice: {failureRate: 1.0, runs: 20}
+      recommendationservice: {failureRate: 0.0, runs: 20}
+      redis-cart: {failureRate: 1.0, runs: 20}
+      shippingservice: {failureRate: 0.0, runs: 20}
+  - id: browse
+    critical: [cartservice, currencyservice, productcatalogservice, redis-cart]
+    nonCritical: [adservice, checkoutservice, emailservice, paymentservice, recommendationservice, shippingservice]
+    results:
+      adservice: {failureRate: 0.0, runs: 20}
+      cartservice: {failureRate: 1.0, runs: 20}
+      checkoutservice: {failureRate: 0.0, runs: 20}
+      currencyservice: {failureRate: 1.0, runs: 20}
+      emailservice: {failureRate: 0.0, runs: 20}
+      paymentservice: {failureRate: 0.0, runs: 20}
+      productcatalogservice: {failureRate: 1.0, runs: 20}
+      recommendationservice: {failureRate: 0.0, runs: 20}
+      redis-cart: {failureRate: 1.0, runs: 20}
+      shippingservice: {failureRate: 0.0, runs: 20}
+  - id: checkout
+    critical: [cartservice, checkoutservice, currencyservice, paymentservice, productcatalogservice, redis-cart, shippingservice]
+    nonCritical: [adservice, emailservice, recommendationservice]
+    results:
+      adservice: {failureRate: 0.0, runs: 20}
+      cartservice: {failureRate: 1.0, runs: 20}
+      checkoutservice: {failureRate: 1.0, runs: 20}
+      currencyservice: {failureRate: 1.0, runs: 20}
+      emailservice: {failureRate: 0.0, runs: 20}
+      paymentservice: {failureRate: 1.0, runs: 20}
+      productcatalogservice: {failureRate: 1.0, runs: 20}
+      recommendationservice: {failureRate: 0.0, runs: 20}
+      redis-cart: {failureRate: 1.0, runs: 20}
+      shippingservice: {failureRate: 1.0, runs: 20}
+  - id: view-cart
+    critical: [cartservice, currencyservice, productcatalogservice, redis-cart, shippingservice]
+    nonCritical: [adservice, checkoutservice, emailservice, paymentservice, recommendationservice]
+    results:
+      adservice: {failureRate: 0.0, runs: 20}
+      cartservice: {failureRate: 1.0, runs: 20}
+      checkoutservice: {failureRate: 0.0, runs: 20}
+      currencyservice: {failureRate: 1.0, runs: 20}
+      emailservice: {failureRate: 0.0, runs: 20}
+      paymentservice: {failureRate: 0.0, runs: 20}
+      productcatalogservice: {failureRate: 1.0, runs: 20}
+      recommendationservice: {failureRate: 0.0, runs: 20}
+      redis-cart: {failureRate: 1.0, runs: 20}
+      shippingservice: {failureRate: 1.0, runs: 20}
