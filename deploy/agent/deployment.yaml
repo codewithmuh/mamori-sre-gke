@@ -1,0 +1,151 @@
+# One replica: the agent pulls from one Pub/Sub subscription and deduplicates in memory, and an
+# investigation is a few minutes of mostly waiting on APIs. Recreate, so two pods never pull at
+# once during a rollout.
+#
+# Requests (budget: about 550m CPU left under the 70 % line for M2-M6, deploy/README.md):
+# 20m CPU / 160Mi memory. Idle it polls Pub/Sub; during an investigation it waits on the model
+# and the read APIs. Estimates; measure with `kubectl top` and Managed Prometheus once running.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent
+  namespace: mamori-agent
+  labels:
+    app.kubernetes.io/name: agent
+    app.kubernetes.io/part-of: mamori
+    app.kubernetes.io/component: incident-agent
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agent
+        app.kubernetes.io/part-of: mamori
+        app.kubernetes.io/component: incident-agent
+    spec:
+      serviceAccountName: agent
+      # The service account token reaches the Kubernetes API; Google Cloud credentials come
+      # from the GKE metadata server (Workload Identity).
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent
+          # scripts/set-registry.sh (#28) replaces PROJECT_ID once the project exists.
+          image: asia-northeast1-docker.pkg.dev/PROJECT_ID/mamori/agent:0.1.0
+          imagePullPolicy: IfNotPresent
+          args: [serve]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # Claude on Vertex AI, global endpoint (D8). The project comes from the metadata server.
+            - name: AGENT_PROVIDER
+              value: vertex
+            - name: AGENT_VERTEX_REGION
+              value: global
+            - name: AGENT_MODEL
+              value: claude-opus-5-5
+            - name: AGENT_FALLBACK_MODEL
+              value: claude-opus-5
+            - name: AGENT_EFFORT
+              value: medium
+            # Guardrails (docs/agent.md has the reasoning behind each number).
+            - name: AGENT_MAX_TOOL_CALLS
+              value: "25"
+            - name: AGENT_MAX_MODEL_CALLS
+              value: "20"
+            - name: AGENT_MAX_TOTAL_TOKENS
+              value: "800000"
+            - name: AGENT_MAX_COST_USD
+              value: "1.50"
+            - name: AGENT_DAILY_COST_LIMIT_USD
+              value: "15"
+            - name: AGENT_INVESTIGATION_TIMEOUT_SECONDS
+              value: "600"
+            # Trigger and outputs.
+            - name: AGENT_SUBSCRIPTION
+              value: mamori-agent-incidents
+            - name: AGENT_EXECUTOR_URL
+              value: http://executor.mamori-agent.svc:8080
+            - name: AGENT_EXECUTOR_TOKEN_FILE
+              value: /var/run/secrets/executor/token
+            - name: AGENT_SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agent-slack
+                  key: bot-token
+                  optional: true
+            - name: AGENT_SLACK_CHANNEL
+              valueFrom:
+                secretKeyRef:
+                  name: agent-slack
+                  key: channel
+                  optional: true
+            # Knowledge files from the public repo (allow-list; never chaos/).
+            - name: AGENT_KNOWLEDGE_SOURCE
+              value: github
+            # Evaluation switches (EVALS.md, #26): exclude, true and false for blind runs.
+            - name: AGENT_POSTMORTEMS_GAMEDAYS
+              value: include
+            - name: AGENT_HIDE_FAULT_LABELS
+              value: "false"
+            - name: AGENT_CHAOS_TOOL
+              value: "true"
+          resources:
+            requests:
+              cpu: 20m
+              memory: 160Mi
+            limits:
+              cpu: 500m
+              memory: 384Mi
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: executor-token
+              mountPath: /var/run/secrets/executor
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi
+        # Short-lived token for the executor only (audience "executor"); the executor checks it
+        # with a TokenReview and expects system:serviceaccount:mamori-agent:agent.
+        - name: executor-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: executor
+                  expirationSeconds: 600
+                  path: token

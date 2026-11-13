@@ -1,0 +1,18 @@
+# Managed Service for Prometheus scrapes the agent's metrics (mamori_agent_*: investigations,
+# duration, tokens, cost, tool calls, guardrail stops, proposals).
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: agent
+  namespace: mamori-agent
+  labels:
+    app.kubernetes.io/name: agent
+    app.kubernetes.io/part-of: mamori
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s

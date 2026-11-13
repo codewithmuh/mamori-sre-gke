@@ -1,0 +1,126 @@
+# Read-only RBAC for the agent: get and list on named resources, nothing else.
+# - No write verbs (create, update, patch, delete, deletecollection), no watch, no exec, attach or
+#   port-forward, no impersonate, escalate or bind.
+# - No Secrets, and no ConfigMaps (they can hold credentials too).
+# - Pod logs only in boutique and istio-ingress; Argo CD Applications only in argocd.
+# The tools that use each rule are in agent/src/mamori_agent/tools/kube.py.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mamori-agent-read
+  labels:
+    app.kubernetes.io/name: agent
+    app.kubernetes.io/part-of: mamori
+rules:
+  - apiGroups: [""]
+    resources: [pods, events, nodes]
+    verbs: [get, list]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets]
+    verbs: [get, list]
+  # Istio config, including the fault rules injected for game days (#23).
+  - apiGroups: [networking.istio.io]
+    resources: [virtualservices, destinationrules, sidecars]
+    verbs: [get, list]
+  - apiGroups: [security.istio.io]
+    resources: [authorizationpolicies]
+    verbs: [get, list]
+  # The Chaos Mesh kinds the game-day faults use (#23); the executor's remove-fault needs their names.
+  - apiGroups: [chaos-mesh.org]
+    resources: [podchaos, networkchaos, stresschaos]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mamori-agent-read
+  labels:
+    app.kubernetes.io/name: agent
+    app.kubernetes.io/part-of: mamori
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mamori-agent-read
+subjects:
+  - kind: ServiceAccount
+    name: agent
+    namespace: mamori-agent
+---
+# Pod logs: a ClusterRole, bound per namespace below.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mamori-agent-pod-logs
+  labels:
+    app.kubernetes.io/name: agent
+    app.kubernetes.io/part-of: mamori
+rules:
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mamori-agent-pod-logs
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: agent
+    app.kubernetes.io/part-of: mamori
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mamori-agent-pod-logs
+subjects:
+  - kind: ServiceAccount
+    name: agent
+    namespace: mamori-agent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mamori-agent-pod-logs
+  namespace: istio-ingress
+  labels:
+    app.kubernetes.io/name: agent
+    app.kubernetes.io/part-of: mamori
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mamori-agent-pod-logs
+subjects:
+  - kind: ServiceAccount
+    name: agent
+    namespace: mamori-agent
+---
+# Argo CD Applications: sync status and deploy history. Applications don't hold repository
+# credentials (those are Secrets in argocd, which this Role can't read).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mamori-agent-applications-read
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: agent
+    app.kubernetes.io/part-of: mamori
+rules:
+  - apiGroups: [argoproj.io]
+    resources: [applications]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mamori-agent-applications-read
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: agent
+    app.kubernetes.io/part-of: mamori
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mamori-agent-applications-read
+subjects:
+  - kind: ServiceAccount
+    name: agent
+    namespace: mamori-agent

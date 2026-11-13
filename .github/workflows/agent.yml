@@ -1,0 +1,57 @@
+name: agent
+
+# The incident agent (agent/): ruff, strict mypy, and pytest with an 80 % coverage gate. A
+# workflow of its own so the Python checks run only when the agent changes (D13). It is not the
+# required check (that is ci.yml's "CI result"), so its path filter can't leave a pull request
+# waiting on a skipped check. The image is built by images.yml (#28).
+on:
+  pull_request:
+    paths:
+      - agent/**
+      - .github/workflows/agent.yml
+  push:
+    branches: [main]
+    paths:
+      - agent/**
+      - .github/workflows/agent.yml
+
+# Least privilege: the checks only read the repository and need no cloud credentials.
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash # adds -o pipefail to GitHub's default
+    working-directory: agent
+
+jobs:
+  checks:
+    name: Agent (ruff, mypy, pytest)
+    runs-on: ubuntu-24.04 # pinned: upgrade deliberately, not when GitHub moves "latest"
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # uv and Python are pinned to what agent/pyproject.toml and the image use.
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.6"
+          python-version: "3.13.18"
+          working-directory: agent
+          enable-cache: true
+          cache-dependency-glob: agent/uv.lock
+      - name: Install the locked environment
+        run: uv sync --frozen
+      - name: Format and lint (ruff)
+        run: |
+          uv run ruff format --check src tests
+          uv run ruff check src tests
+      - name: Type check (mypy --strict)
+        run: uv run mypy
+      - name: Test (fakes for every external call; 80 % coverage gate)
+        run: uv run pytest --cov --cov-report=term-missing --cov-fail-under=80

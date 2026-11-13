@@ -1,0 +1,91 @@
+# The incident agent (PLAN.md section 4, D8, D9, D13). Not a published package: uv manages the
+# environment from uv.lock and the code runs from src/ (PYTHONPATH in the image, pythonpath in
+# pytest), so no build backend is needed.
+[project]
+name = "mamori-agent"
+version = "0.1.0"
+description = "Read-only AI incident agent for the mamori lab: triage, ranked root cause, one proposed action."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13,<3.14"
+# Exact pins, each released at least two weeks before 2026-11-13 (checked on PyPI that day).
+# Transitive versions are pinned in uv.lock.
+dependencies = [
+  "anthropic[vertex]==2.3.0",  # 2026-10-23; API version 2026-10-21, AnthropicVertex
+  "google-auth[requests]==2.62.0",  # 2026-10-12; ADC / Workload Identity and REST calls
+  "requests==2.34.2",  # 2026-05-14
+  "pydantic==2.14.2",  # 2026-10-29
+  "pydantic-settings==2.16.2",  # 2026-10-28
+  "prometheus-client==0.26.0",  # 2026-07-24
+  "pyyaml==6.0.3",  # 2025-09-25
+]
+
+[dependency-groups]
+dev = [
+  "pytest==9.2.0",  # 2026-10-27
+  "pytest-cov==7.1.0",  # 2026-03-21
+  "ruff==0.17.3",  # 2026-10-27
+  "mypy==2.4.1",  # 2026-10-28
+  "types-requests==2.33.0.20261006",
+  "types-PyYAML==6.0.12.20260906",
+]
+
+[tool.uv]
+package = false
+required-version = "==0.13.6"
+# Resolve only releases at least two weeks old on the day of locking (transitive ones too).
+# Move this date forward when updating the lock.
+exclude-newer = "2026-10-30T00:00:00Z"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+[tool.coverage.run]
+source = ["src/mamori_agent"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = true
+exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError", "\\.\\.\\."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "PL", "PT", "RET", "C4", "DTZ", "TID", "BLE", "A",
+]
+ignore = [
+  "PLR0911",  # small dispatch functions return early on purpose
+  "PLR0912",
+  "PLR0913",
+  "PLR0915",
+  "PLR2004",  # HTTP status codes and limits read better inline
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "PLR2004", "PLC0415", "ARG", "PT018", "PLR0917", "SLF001"]
+
+[tool.mypy]
+python_version = "3.13"
+mypy_path = "src"
+packages = ["mamori_agent"]
+strict = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["google.*"]
+ignore_missing_imports = true
+
+# The SDK sits behind llm.ModelCaller and its responses are read as Any on purpose (fakes in the
+# tests return plain objects). Following its thousands of typed modules adds minutes and checks
+# nothing of ours.
+[[tool.mypy.overrides]]
+module = ["anthropic", "anthropic.*"]
+follow_imports = "skip"
