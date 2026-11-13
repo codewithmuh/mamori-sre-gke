@@ -1,11 +1,13 @@
-# Fast checks before every commit. Install once with `make setup` (runs `pre-commit install`).
+# Fast checks before every commit. Install once with `pre-commit install` (the dev container does it).
+# Revs are frozen to commit SHAs, like the GitHub Actions; the comment names the release.
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v6.0.0
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # frozen: v6.0.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+        args: [--allow-multiple-documents] # Kubernetes manifests hold several documents per file
       - id: check-json
       - id: check-merge-conflict
       - id: check-added-large-files
@@ -13,13 +15,16 @@ repos:
       - id: detect-private-key
 
   - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.30.1
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e # frozen: v8.30.1
     hooks:
       - id: gitleaks
 
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.17.0
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: 443ffdff1cc1663b701ae73e7459029fe883455a # frozen: v1.109.3
     hooks:
-      - id: ruff-check
-        args: [--fix]
-      - id: ruff-format
+      - id: terraform_fmt # needs terraform on PATH
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: 745eface02aef23e168a8afb6b5737818efbea95 # frozen: v0.11.0.1
+    hooks:
+      - id: shellcheck # installs its own pinned shellcheck binary; no Docker needed

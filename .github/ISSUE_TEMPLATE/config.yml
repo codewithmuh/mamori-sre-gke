@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Community Discussions
-    url: https://github.com/codewithmuh/three-tier-devsecops-project/discussions
-    about: Ask questions, share ideas, and discuss DevOps architectures with the community.
-  - name: Official YouTube Tutorials
+  - name: Report a security problem
+    url: https://github.com/codewithmuh/mamori-sre-gke/security/policy
+    about: Report vulnerabilities privately, never in a public issue.
+  - name: Video walkthroughs
     url: https://youtube.com/@codewithmuh
-    about: Watch video walkthroughs and system design breakdowns.
+    about: Videos about how this lab is built and run.
