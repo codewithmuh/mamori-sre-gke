@@ -1,0 +1,88 @@
+# Managed Service for Prometheus scrapes of the platform: istiod, Argo CD's application controller and
+# the trace collector. Every 60 s, and only the few series the dashboards and the incident agent
+# use (config pushes and rejects, which app is synced and healthy, are traces getting out).
+# Together about 5 million samples a month, about $0.30 (estimate, docs/observability.md).
+
+# istiod: is mesh config reaching the proxies, and did a config change just happen?
+# Names checked against Istio 1.31.4 (pilot/pkg/xds/monitoring.go, pilot/pkg/model/push_context.go
+# and the pilot dashboard in manifests/addons/dashboards).
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: istiod
+  namespace: istio-system
+  labels:
+    app.kubernetes.io/name: istiod
+    app.kubernetes.io/part-of: mamori
+spec:
+  selector:
+    matchLabels:
+      app: istiod
+  filterRunning: true
+  endpoints:
+    - port: 15014
+      path: /metrics
+      interval: 60s
+      timeout: 10s
+      metricRelabeling:
+        - action: keep
+          sourceLabels: [__name__]
+          # pilot_xds: connected proxies; pushes, push triggers and inbound updates: config
+          # changes flowing out; rejects and internal errors: config a proxy refused (a bad
+          # VirtualService shows up here); convergence time: how long a change takes to land;
+          # galley_validation_*: config refused at admission; sidecar_injection_*: pods that came
+          # up without a sidecar.
+          regex: pilot_xds|pilot_xds_pushes|pilot_push_triggers|pilot_inbound_updates|pilot_total_xds_rejects|pilot_total_xds_internal_errors|pilot_proxy_convergence_time_(bucket|sum|count)|pilot_virt_services|pilot_services|pilot_conflict_.+|galley_validation_(passed|failed)|sidecar_injection_(success|failure)_total
+---
+# Argo CD application controller: sync and health of every Application, and each sync as an
+# event (a deploy marker for "what changed before the burn started?").
+# Names from the Argo CD v3.5.6 metrics reference (docs/operator-manual/metrics.md).
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: argocd-application-controller
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-application-controller
+    app.kubernetes.io/part-of: mamori
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-application-controller
+  filterRunning: true
+  endpoints:
+    # Named port 8082 in the argo-cd chart; the chart's NetworkPolicy already admits it.
+    - port: metrics
+      path: /metrics
+      interval: 60s
+      timeout: 10s
+      metricRelabeling:
+        - action: keep
+          sourceLabels: [__name__]
+          regex: argocd_app_info|argocd_app_condition|argocd_app_sync_total|argocd_cluster_connection_status
+---
+# The trace collector's own counters: spans in, spans out, export failures, sampling decisions.
+# Checked against a local run of 0.164.0 (its counters have no _total suffix; the optional
+# suffix keeps the rule working if a later version adds one).
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: otel-collector
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/part-of: mamori
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: otel-collector
+  filterRunning: true
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 60s
+      timeout: 10s
+      metricRelabeling:
+        - action: keep
+          sourceLabels: [__name__]
+          regex: (otelcol_receiver_(accepted|refused|failed)_spans|otelcol_exporter_(sent|send_failed)_spans|otelcol_processor_tail_sampling_count_traces_sampled|otelcol_process_memory_rss|otelcol_process_cpu_seconds)(_total)?

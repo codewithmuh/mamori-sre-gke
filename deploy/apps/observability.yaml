@@ -1,0 +1,28 @@
+# Wave 5: observability (deploy/observability). The trace collector in namespace observability, and
+# Managed Service for Prometheus scrape configs (PodMonitoring, ClusterPodMonitoring) for the
+# Envoy sidecars, the ingress gateway, istiod and Argo CD. Those CRDs come with the cluster's
+# Managed Prometheus add-on (infra/envs/lab/gke.tf), not from Argo CD.
+# After the shop (wave 3): its services retry trace export in the background until the collector
+# is up, and the scrape configs find the sidecars as soon as they exist.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: observability
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/codewithmuh/mamori-sre-gke.git
+    targetRevision: main
+    path: deploy/observability
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

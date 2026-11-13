@@ -1,0 +1,27 @@
+# Observability that runs in the cluster (Argo CD Application deploy/apps/observability.yaml):
+#   - the OpenTelemetry Collector in namespace observability (traces -> Cloud Trace)
+#   - Managed Service for Prometheus scrape configs for the mesh and the platform
+# Objects carry their own namespaces (observability, istio-system, istio-ingress, argocd), so
+# there is no namespace: field here.
+#
+# online-boutique-tracing/ is a kustomize Component that deploy/online-boutique includes; it is
+# not part of this Application. What is collected, where it goes and what it costs:
+# docs/observability.md.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - otel-collector.yaml
+  - monitoring-mesh.yaml
+  - monitoring-platform.yaml
+
+configMapGenerator:
+  - name: otel-collector-config
+    namespace: observability
+    files:
+      - config.yaml=otel-collector-config.yaml
+    options:
+      labels:
+        app.kubernetes.io/name: otel-collector
+        app.kubernetes.io/part-of: mamori

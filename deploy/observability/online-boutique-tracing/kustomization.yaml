@@ -1,0 +1,151 @@
+# Turns on OpenTelemetry tracing in Online Boutique v0.10.7 and points it at our collector
+# (deploy/observability, namespace observability). deploy/online-boutique/kustomization.yaml lists
+# this directory under components (the change is requested in #19's report).
+#
+# Why not upstream's google-cloud-operations component: it also deploys its own collector in the
+# shop's namespace (with an init container that curls the metadata server for the project ID),
+# and turns on Cloud Profiler in checkoutservice and frontend, which needs another API and role.
+# We keep only its environment variables and send to one collector outside the mesh.
+#
+# What v0.10.7 reads (checked in the source at commit 5b608cb):
+#   ENABLE_TRACING=1          turns the exporter on (Go: main.go, Node: server.js/index.js,
+#                             Python: *_server.py)
+#   COLLECTOR_SERVICE_ADDR    host:port of an OTLP/gRPC receiver, plain text
+#   OTEL_SERVICE_NAME         service.name on the spans (read by each OTel SDK)
+# Not traced, because v0.10.7 has no exporter in them: adservice (Java) and shippingservice (Go),
+# whose initTracing is an empty TODO, cartservice (C#, no OpenTelemetry package), redis-cart and
+# the load generator. Their calls still appear as client spans of their callers,
+# and in the mesh metrics.
+#
+# Every service samples 100 % (AlwaysSample in Go). The collector's tail sampling decides what
+# reaches Cloud Trace, so the services need no sampler settings.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+patches:
+  # frontend (Go: otelhttp server spans and otelgrpc client spans)
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: frontend
+      spec:
+        template:
+          spec:
+            containers:
+              - name: server
+                env:
+                  - name: ENABLE_TRACING
+                    value: "1"
+                  - name: COLLECTOR_SERVICE_ADDR
+                    value: otel-collector.observability.svc.cluster.local:4317
+                  - name: OTEL_SERVICE_NAME
+                    value: frontend
+  # checkoutservice (Go)
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: checkoutservice
+      spec:
+        template:
+          spec:
+            containers:
+              - name: server
+                env:
+                  - name: ENABLE_TRACING
+                    value: "1"
+                  - name: COLLECTOR_SERVICE_ADDR
+                    value: otel-collector.observability.svc.cluster.local:4317
+                  - name: OTEL_SERVICE_NAME
+                    value: checkoutservice
+  # productcatalogservice (Go)
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: productcatalogservice
+      spec:
+        template:
+          spec:
+            containers:
+              - name: server
+                env:
+                  - name: ENABLE_TRACING
+                    value: "1"
+                  - name: COLLECTOR_SERVICE_ADDR
+                    value: otel-collector.observability.svc.cluster.local:4317
+                  - name: OTEL_SERVICE_NAME
+                    value: productcatalogservice
+  # currencyservice (Node.js)
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: currencyservice
+      spec:
+        template:
+          spec:
+            containers:
+              - name: server
+                env:
+                  - name: ENABLE_TRACING
+                    value: "1"
+                  - name: COLLECTOR_SERVICE_ADDR
+                    value: otel-collector.observability.svc.cluster.local:4317
+                  - name: OTEL_SERVICE_NAME
+                    value: currencyservice
+  # paymentservice (Node.js)
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: paymentservice
+      spec:
+        template:
+          spec:
+            containers:
+              - name: server
+                env:
+                  - name: ENABLE_TRACING
+                    value: "1"
+                  - name: COLLECTOR_SERVICE_ADDR
+                    value: otel-collector.observability.svc.cluster.local:4317
+                  - name: OTEL_SERVICE_NAME
+                    value: paymentservice
+  # emailservice (Python)
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: emailservice
+      spec:
+        template:
+          spec:
+            containers:
+              - name: server
+                env:
+                  - name: ENABLE_TRACING
+                    value: "1"
+                  - name: COLLECTOR_SERVICE_ADDR
+                    value: otel-collector.observability.svc.cluster.local:4317
+                  - name: OTEL_SERVICE_NAME
+                    value: emailservice
+  # recommendationservice (Python)
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: recommendationservice
+      spec:
+        template:
+          spec:
+            containers:
+              - name: server
+                env:
+                  - name: ENABLE_TRACING
+                    value: "1"
+                  - name: COLLECTOR_SERVICE_ADDR
+                    value: otel-collector.observability.svc.cluster.local:4317
+                  - name: OTEL_SERVICE_NAME
+                    value: recommendationservice

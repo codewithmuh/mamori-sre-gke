@@ -1,0 +1,157 @@
+# OpenTelemetry Collector (contrib distribution) that receives the shop's traces and exports a
+# sample to Cloud Trace. Config: otel-collector-config.yaml (rendered into a ConfigMap by
+# kustomization.yaml, with a hash suffix so a config change rolls the pod).
+#
+# Identity: Workload Identity Federation for GKE with a direct grant. The Kubernetes service
+# account below is itself the IAM principal that holds roles/cloudtrace.agent
+# (infra/bootstrap/observability_identity.tf). No Google service account, no annotation, no key.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-collector
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/part-of: mamori
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/part-of: mamori
+spec:
+  # Exactly one: tail sampling must see every span of a trace in one process. If the pod is
+  # down (a Spot preemption), the services drop spans until it is back; traces are a debugging
+  # aid, not an SLI, so that is accepted.
+  replicas: 1
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: otel-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: otel-collector
+        app.kubernetes.io/part-of: mamori
+    spec:
+      serviceAccountName: otel-collector
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: otel-collector
+          # contrib 0.164.0 (2026-10-26), multi-arch index digest.
+          image: otel/opentelemetry-collector-contrib:0.164.0@sha256:340c9ca6a36617084c6661bdc4f0fe92b7cda5a805d61673ec8db375fddc522b
+          args:
+            - --config=/conf/config.yaml
+          env:
+            # Receivers and the health check listen on the pod IP only.
+            - name: MY_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            # Let the Go garbage collector work harder before the 256 MiB limit is reached.
+            - name: GOMEMLIMIT
+              value: 200MiB
+          ports:
+            - name: grpc-otlp
+              containerPort: 4317
+              protocol: TCP
+            - name: metrics
+              containerPort: 8888
+              protocol: TCP
+            - name: health
+              containerPort: 13133
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /
+              port: health
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 3
+          # Measured locally (docker, 2026-11-13): about 100 MiB and well under 20m CPU with test
+          # traffic. Measure again on the cluster and adjust.
+          resources:
+            requests:
+              cpu: 20m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /conf
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+            items:
+              - key: config.yaml
+                path: config.yaml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/part-of: mamori
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: otel-collector
+  ports:
+    # The "grpc-" prefix tells the callers' Istio sidecars this is gRPC (HTTP/2).
+    - name: grpc-otlp
+      port: 4317
+      targetPort: grpc-otlp
+      protocol: TCP
+      appProtocol: grpc
+---
+# Only the shop sends traces; anyone in the cluster may read the collector's own metrics (Managed
+# Prometheus scrapes them). Health probes come from the kubelet; Kubernetes always allows traffic
+# from a pod's own node, whatever the policy says.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: otel-collector
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/part-of: mamori
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: otel-collector
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: boutique
+      ports:
+        - port: grpc-otlp
+          protocol: TCP
+    - ports:
+        - port: metrics
+          protocol: TCP
