@@ -1,0 +1,64 @@
+# The executor's allow-list, bounds and kill switch. It reads this ConfigMap on every check, so
+# a change counts from the next proposal or click; it can only read it, never change it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: executor-config
+  namespace: mamori-agent
+  labels:
+    app.kubernetes.io/name: executor
+    app.kubernetes.io/part-of: mamori
+data:
+  # Kill switch. Only the exact string "true" lets the executor act; anything else, or a
+  # missing or invalid ConfigMap, keeps it off. Git holds only the starting value: the Argo CD
+  # Application ignores this key (ignoreDifferences + RespectIgnoreDifferences), so
+  # `make executor-kill` and `make executor-enable` change it live and self-heal leaves it.
+  enabled: "false"
+  # Everything else changes through a reviewed PR, like any other config.
+  config.yaml: |
+    # Where proposals are posted and who may approve them. Slack ids, not names: they are
+    # stable when a channel or person is renamed. Ids are not secrets; the tokens are (Secret
+    # executor-slack, created by hand). Empty means nobody can approve: every proposal is
+    # refused with reason kill-switch.
+    slack:
+      channel: ""      # e.g. C0123ABCDEF
+      approvers: []    # e.g. [U0123ABCDEF]
+    # A proposal nobody decides on within this time expires (1m to 1h).
+    proposalTTL: 15m
+    # An action type is allowed only if its section is here. rollback cannot be enabled:
+    # Argo CD self-heal would undo it (docs/executor.md).
+    restart:
+      # Not redis-cart (its carts live in an emptyDir: a restart empties every cart) and not
+      # loadgenerator (not part of the shop).
+      deployments:
+        - adservice
+        - cartservice
+        - checkoutservice
+        - currencyservice
+        - emailservice
+        - frontend
+        - paymentservice
+        - productcatalogservice
+        - recommendationservice
+        - shippingservice
+    # Replica bounds, inclusive, each within the hard ceiling of 5. Only Deployments without
+    # an HPA: frontend, currencyservice, productcatalogservice and recommendationservice get
+    # HPAs in M4 (#27), and the executor refuses to fight an HPA anyway. Not redis-cart (two
+    # Redis pods would not share carts). Small on purpose: CPU is the lab's tight resource.
+    scale:
+      adservice: {min: 1, max: 2}
+      cartservice: {min: 1, max: 2}
+      checkoutservice: {min: 1, max: 2}
+      emailservice: {min: 1, max: 2}
+      paymentservice: {min: 1, max: 2}
+      shippingservice: {min: 1, max: 2}
+    # Kinds of injected fault objects that may be deleted, if labelled mamori.dev/fault=true.
+    removeFault:
+      kinds:
+        - virtualservice
+        - sidecar
+        - authorizationpolicy
+        - deployment
+        - podchaos
+        - networkchaos
+        - stresschaos

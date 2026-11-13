@@ -1,0 +1,19 @@
+# executor.mamori-agent.svc:8080, the API the agent calls (contract). Metrics and probes stay
+# on the pod's port 9090 and are not part of the Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: executor
+  namespace: mamori-agent
+  labels:
+    app.kubernetes.io/name: executor
+    app.kubernetes.io/part-of: mamori
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: executor
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP

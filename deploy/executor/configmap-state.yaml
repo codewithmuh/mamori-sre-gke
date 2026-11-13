@@ -1,0 +1,12 @@
+# What must survive a restart: recent proposals and which incidents already had an action.
+# The executor writes key state.json (get and update on this one ConfigMap, nothing else).
+# There is no data here on purpose. The Argo CD Application ignores /data on this object
+# (ignoreDifferences + RespectIgnoreDifferences), so a sync never wipes the state.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: executor-state
+  namespace: mamori-agent
+  labels:
+    app.kubernetes.io/name: executor
+    app.kubernetes.io/part-of: mamori

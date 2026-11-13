@@ -1,0 +1,188 @@
+# Admission policies that repeat the executor's own checks inside the API server, so that a bug
+# in the executor, or someone using its token, still cannot go beyond them. They match only
+# requests made by the executor's service account (matchConditions), so nothing else in the
+# cluster is affected. failurePolicy Fail: if a rule cannot be evaluated, the executor's
+# request is denied, never allowed. ValidatingAdmissionPolicy is built into Kubernetes (GA
+# since 1.30); no webhook or Gatekeeper is involved.
+---
+# remove-fault: RBAC lets the executor delete these kinds in boutique, but RBAC cannot look at
+# labels. Only objects labelled mamori.dev/fault=true may go.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: mamori-executor-fault-deletes
+  labels:
+    app.kubernetes.io/name: executor
+    app.kubernetes.io/part-of: mamori
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["networking.istio.io"]
+        apiVersions: ["*"]
+        operations: ["DELETE"]
+        resources: ["virtualservices", "sidecars"]
+      - apiGroups: ["security.istio.io"]
+        apiVersions: ["*"]
+        operations: ["DELETE"]
+        resources: ["authorizationpolicies"]
+      - apiGroups: ["apps"]
+        apiVersions: ["*"]
+        operations: ["DELETE"]
+        resources: ["deployments"]
+      - apiGroups: ["chaos-mesh.org"]
+        apiVersions: ["*"]
+        operations: ["DELETE"]
+        resources: ["podchaos", "networkchaos", "stresschaos"]
+  matchConditions:
+    - name: executor-only
+      expression: "request.userInfo.username == 'system:serviceaccount:mamori-agent:executor'"
+  validations:
+    - expression: >-
+        request.namespace == 'boutique' &&
+        has(oldObject.metadata.labels) &&
+        'mamori.dev/fault' in oldObject.metadata.labels &&
+        oldObject.metadata.labels['mamori.dev/fault'] == 'true'
+      message: "the executor may delete only objects labelled mamori.dev/fault=true in boutique"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: mamori-executor-fault-deletes
+  labels:
+    app.kubernetes.io/name: executor
+    app.kubernetes.io/part-of: mamori
+spec:
+  policyName: mamori-executor-fault-deletes
+  validationActions: ["Deny"]
+---
+# restart: RBAC's "patch deployments" would also allow a new image, a new owner (the garbage
+# collector would then delete the Deployment), a finalizer or a label. The executor may change
+# only the kubectl.kubernetes.io/restartedAt annotation of the pod template, and only on the
+# Deployments listed in executor-config restart.deployments.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: mamori-executor-restart-only
+  labels:
+    app.kubernetes.io/name: executor
+    app.kubernetes.io/part-of: mamori
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["deployments"]
+  matchConditions:
+    - name: executor-only
+      expression: "request.userInfo.username == 'system:serviceaccount:mamori-agent:executor'"
+  variables:
+    - name: restartKey
+      expression: "'kubectl.kubernetes.io/restartedAt'"
+  validations:
+    # Keep equal to restart.deployments in configmap-config.yaml (tools/executor's
+    # manifests_test.go fails if the two lists drift apart).
+    - expression: "request.name in ['adservice', 'cartservice', 'checkoutservice', 'currencyservice', 'emailservice', 'frontend', 'paymentservice', 'productcatalogservice', 'recommendationservice', 'shippingservice']"
+      message: "the executor may restart only the Deployments in executor-config restart.deployments"
+      reason: Forbidden
+    - expression: "object.spec.template.spec == oldObject.spec.template.spec"
+      message: "the executor may not change the pod spec (images, commands, env, volumes, ...)"
+      reason: Forbidden
+    - expression: >-
+        object.spec.replicas == oldObject.spec.replicas &&
+        object.spec.selector == oldObject.spec.selector &&
+        object.spec.strategy == oldObject.spec.strategy &&
+        (has(object.spec.paused) && object.spec.paused) == (has(oldObject.spec.paused) && oldObject.spec.paused) &&
+        (has(object.spec.minReadySeconds) ? object.spec.minReadySeconds : 0) == (has(oldObject.spec.minReadySeconds) ? oldObject.spec.minReadySeconds : 0) &&
+        has(object.spec.revisionHistoryLimit) == has(oldObject.spec.revisionHistoryLimit) &&
+        (!has(object.spec.revisionHistoryLimit) || object.spec.revisionHistoryLimit == oldObject.spec.revisionHistoryLimit) &&
+        has(object.spec.progressDeadlineSeconds) == has(oldObject.spec.progressDeadlineSeconds) &&
+        (!has(object.spec.progressDeadlineSeconds) || object.spec.progressDeadlineSeconds == oldObject.spec.progressDeadlineSeconds)
+      message: "the executor may not change replicas (use the scale subresource), the selector or the rollout settings"
+      reason: Forbidden
+    - expression: >-
+        has(object.metadata.ownerReferences) == has(oldObject.metadata.ownerReferences) &&
+        (!has(object.metadata.ownerReferences) || object.metadata.ownerReferences == oldObject.metadata.ownerReferences) &&
+        has(object.metadata.finalizers) == has(oldObject.metadata.finalizers) &&
+        (!has(object.metadata.finalizers) || object.metadata.finalizers == oldObject.metadata.finalizers) &&
+        has(object.metadata.annotations) == has(oldObject.metadata.annotations) &&
+        (!has(object.metadata.annotations) || object.metadata.annotations == oldObject.metadata.annotations) &&
+        has(object.spec.template.metadata.ownerReferences) == has(oldObject.spec.template.metadata.ownerReferences) &&
+        (!has(object.spec.template.metadata.ownerReferences) || object.spec.template.metadata.ownerReferences == oldObject.spec.template.metadata.ownerReferences) &&
+        has(object.spec.template.metadata.finalizers) == has(oldObject.spec.template.metadata.finalizers) &&
+        (!has(object.spec.template.metadata.finalizers) || object.spec.template.metadata.finalizers == oldObject.spec.template.metadata.finalizers)
+      message: "the executor may not change owner references, finalizers or annotations"
+      reason: Forbidden
+    - expression: >-
+        object.spec.template.metadata.labels == oldObject.spec.template.metadata.labels &&
+        (has(object.metadata.labels) == has(oldObject.metadata.labels)) &&
+        (!has(object.metadata.labels) || object.metadata.labels == oldObject.metadata.labels)
+      message: "the executor may not change labels"
+      reason: Forbidden
+    - expression: >-
+        (!has(object.spec.template.metadata.annotations) ||
+          object.spec.template.metadata.annotations.all(k, k == variables.restartKey ||
+            (has(oldObject.spec.template.metadata.annotations) &&
+             k in oldObject.spec.template.metadata.annotations &&
+             oldObject.spec.template.metadata.annotations[k] == object.spec.template.metadata.annotations[k]))) &&
+        (!has(oldObject.spec.template.metadata.annotations) ||
+          oldObject.spec.template.metadata.annotations.all(k, k == variables.restartKey ||
+            (has(object.spec.template.metadata.annotations) && k in object.spec.template.metadata.annotations)))
+      message: "the executor may change only the kubectl.kubernetes.io/restartedAt pod-template annotation"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: mamori-executor-restart-only
+  labels:
+    app.kubernetes.io/name: executor
+    app.kubernetes.io/part-of: mamori
+spec:
+  policyName: mamori-executor-restart-only
+  validationActions: ["Deny"]
+---
+# scale: RBAC on deployments/scale cannot bound the replica count or the name. This is the
+# hard ceiling (the executor's code holds the same number, hardMaxReplicas); the per-Deployment
+# bounds in executor-config sit inside it. Never zero: scaling to zero is an outage, not a
+# mitigation. Only the Deployments that have bounds in executor-config.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: mamori-executor-scale-bounds
+  labels:
+    app.kubernetes.io/name: executor
+    app.kubernetes.io/part-of: mamori
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["deployments/scale"]
+  matchConditions:
+    - name: executor-only
+      expression: "request.userInfo.username == 'system:serviceaccount:mamori-agent:executor'"
+  validations:
+    - expression: "request.namespace == 'boutique' && object.spec.replicas >= 1 && object.spec.replicas <= 5"
+      message: "the executor may scale only within 1 to 5 replicas, in boutique"
+      reason: Forbidden
+    # Keep equal to the keys of scale in configmap-config.yaml (manifests_test.go checks).
+    - expression: "request.name in ['adservice', 'cartservice', 'checkoutservice', 'emailservice', 'paymentservice', 'shippingservice']"
+      message: "the executor may scale only the Deployments with bounds in executor-config scale"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: mamori-executor-scale-bounds
+  labels:
+    app.kubernetes.io/name: executor
+    app.kubernetes.io/part-of: mamori
+spec:
+  policyName: mamori-executor-scale-bounds
+  validationActions: ["Deny"]

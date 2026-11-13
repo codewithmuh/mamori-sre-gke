@@ -1,0 +1,20 @@
+# The action executor (#25): runs the incident agent's proposed actions after a human approves
+# them in Slack. Design and RBAC table: docs/executor.md. Runbook: docs/runbooks/executor.md.
+#
+# No `namespace:` here on purpose: the objects live in two namespaces (mamori-agent, and the
+# Role in boutique) plus a few cluster-scoped ones, and each file states its own.
+# The namespace mamori-agent itself is created by the Argo CD Applications (agent and
+# executor, CreateNamespace=true with the same labels), not by a manifest.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - serviceaccount.yaml
+  - rbac.yaml
+  - admission-policy.yaml
+  - configmap-config.yaml
+  - configmap-state.yaml
+  - deployment.yaml
+  - service.yaml
+  - networkpolicy.yaml
+  - podmonitoring.yaml

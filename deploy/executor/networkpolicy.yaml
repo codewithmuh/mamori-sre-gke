@@ -1,0 +1,45 @@
+# Only the agent may call the API; only Managed Prometheus may scrape. GKE Dataplane V2 enforces
+# NetworkPolicy. The kubelet's probes come from the node, which NetworkPolicy always allows.
+# `kubectl port-forward` reaches the pod through the kubelet too, behind Kubernetes RBAC.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: executor
+  namespace: mamori-agent
+  labels:
+    app.kubernetes.io/name: executor
+    app.kubernetes.io/part-of: mamori
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: executor
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    # The agent (#24) in this namespace. POST also needs its token (TokenReview).
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent
+      ports:
+        - port: 8080
+          protocol: TCP
+    # Managed Service for Prometheus collectors.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gmp-system
+      ports:
+        - port: 9090
+          protocol: TCP
+  egress:
+    # DNS.
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # The Kubernetes API (GKE control plane) and Slack (slack.com, wss-*.slack.com), both
+    # HTTPS. Their addresses are not stable enough to pin, so this allows port 443 only.
+    - ports:
+        - port: 443
+          protocol: TCP

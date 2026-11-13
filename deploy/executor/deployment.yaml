@@ -1,0 +1,100 @@
+# At most one replica: the state ConfigMap is written with optimistic concurrency, so two would
+# still be safe, but Slack would split clicks between two Socket Mode connections for no gain.
+# Recreate: never two at once.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: executor
+  namespace: mamori-agent
+  labels:
+    app.kubernetes.io/name: executor
+    app.kubernetes.io/part-of: mamori
+    app.kubernetes.io/component: incident-response
+spec:
+  # 0 until the image exists: raise to 1 after the first image publish, at M5; see
+  # docs/images.md. Until then the pod would sit in ImagePullBackOff (PROJECT_ID placeholder)
+  # and Argo CD would show the app Degraded. The kill switch stays off either way.
+  replicas: 0
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: executor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: executor
+        app.kubernetes.io/part-of: mamori
+        app.kubernetes.io/component: incident-response
+    spec:
+      serviceAccountName: executor
+      automountServiceAccountToken: true # it calls the Kubernetes API with its own identity
+      terminationGracePeriodSeconds: 30 # a decision in progress gets up to 25 s to finish and be recorded
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: executor
+          image: asia-northeast1-docker.pkg.dev/PROJECT_ID/mamori/executor:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9090
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: AUTH_MODE
+              value: tokenreview
+            - name: AUTH_AUDIENCE
+              value: executor
+            - name: AUTH_ALLOWED_USERS
+              value: system:serviceaccount:mamori-agent:agent
+            # Created by hand (docs/runbooks/executor.md), never in Git. Optional, so the pod
+            # starts without them; it then refuses every proposal (nobody could approve).
+            # Its own Slack app and tokens, never the agent's: a bot token can edit any message
+            # its app posted, so sharing one would let the agent rewrite a proposal message.
+            - name: EXECUTOR_SLACK_APP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: executor-slack
+                  key: app-token
+                  optional: true
+            - name: EXECUTOR_SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: executor-slack
+                  key: bot-token
+                  optional: true
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.memory
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 10m
+              memory: 48Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

@@ -1,0 +1,16 @@
+# Managed Service for Prometheus scrapes the executor's metrics (mamori_executor_*).
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: executor
+  namespace: mamori-agent
+  labels:
+    app.kubernetes.io/name: executor
+    app.kubernetes.io/part-of: mamori
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: executor
+  endpoints:
+    - port: metrics
+      interval: 30s
