@@ -96,9 +96,13 @@ like upstream's ad deadline; change it in `rpc.go` if the measured latency calls
 (CVE-2026-78669, fixed in 0.60.0; CVE-2026-78661, fixed in 0.62.0). `go get` and `go mod tidy`
 with the Dockerfile's Go (1.27.0) also moved `golang.org/x/crypto` v0.55.0 → v0.58.0, `x/sync`
 v0.22.0 → v0.24.0, `x/sys` v0.47.0 → v0.49.0 and `x/text` v0.41.0 → v0.43.0, and raised the `go`
-directive from 1.25.0 to 1.26.0, which x/net v0.62.0 requires. The toolchain line (go1.27.1) and
-everything else in `go.mod` are unchanged. All five releases were at least two weeks old on
+directive from 1.25.0 to 1.26.0, which x/net v0.62.0 requires. All five releases were at least two weeks old on
 2026-11-13 (proxy.golang.org).
+
+Go toolchain: the build image moves from `golang:1.27.0-alpine` to `golang:1.27.3-alpine` (pinned by digest) and
+`toolchain` in `go.mod` from `go1.27.1` to `go1.27.3`. The binary embeds the Go standard library, and Trivy found four
+HIGH CVEs in 1.27.0 (CVE-2026-111943 crypto/x509, CVE-2026-78667 and CVE-2026-78669 net/http, CVE-2026-97031
+crypto/tls), all fixed in 1.27.3.
 
 ## 6. Tests
 
