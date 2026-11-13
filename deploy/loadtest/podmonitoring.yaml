@@ -1,0 +1,17 @@
+# Managed Service for Prometheus scrapes the relay. The managed collectors already write to Cloud
+# Monitoring, so the load test needs no Google Cloud role of its own.
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: k6-metrics
+  labels:
+    app.kubernetes.io/name: k6-metrics
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: k6-metrics
+  endpoints:
+    - port: metrics
+      # k6 exports every 5 s. A 10 s scrape keeps step edges sharp; with about 200 series it costs
+      # cents per run (estimate: ~200 series x 6 samples a minute at $0.06 per million samples).
+      interval: 10s

@@ -1,0 +1,104 @@
+# k6-metrics: an OpenTelemetry Collector that receives k6's metrics over OTLP and serves them on
+# :8889/metrics for Managed Service for Prometheus (podmonitoring.yaml). Config: otelcol-config.yaml.
+# It outlives each k6 Job, so the final counter values of a run are still scraped after k6 exits.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: k6-metrics
+  labels:
+    app.kubernetes.io/name: k6-metrics
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k6-metrics
+  labels:
+    app.kubernetes.io/name: k6-metrics
+    app.kubernetes.io/component: metrics-relay
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: k6-metrics
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: k6-metrics
+        app.kubernetes.io/component: metrics-relay
+    spec:
+      serviceAccountName: k6-metrics
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: otelcol
+          # Core distribution: has the OTLP receiver, filter processor and Prometheus exporter, and
+          # nothing that talks to a cloud API.
+          image: otel/opentelemetry-collector:0.164.0@sha256:28b6d41ac51bff6b41ba5e8fe503569ffb9d6a1ea90f7a78419e86f34e44f750
+          args:
+            - --config=/etc/otelcol/config.yaml
+          env:
+            # Listen on the pod IP only, not 0.0.0.0 (the collector's own security advice).
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: GOMEMLIMIT
+              value: 200MiB
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: metrics
+              containerPort: 8889
+            - name: health
+              containerPort: 13133
+          readinessProbe:
+            httpGet:
+              path: /
+              port: health
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: k6-metrics-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k6-metrics
+  labels:
+    app.kubernetes.io/name: k6-metrics
+spec:
+  selector:
+    app.kubernetes.io/name: k6-metrics
+  ports:
+    - name: grpc-otlp
+      port: 4317
+      targetPort: otlp-grpc
+      appProtocol: grpc

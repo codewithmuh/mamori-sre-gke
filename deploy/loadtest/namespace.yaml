@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: loadtest
+  labels:
+    # No sidecar: the generator reaches the shop the way an outside client does, through the
+    # Istio ingress gateway.
+    istio-injection: disabled
+    # Both pods here meet the restricted Pod Security Standard; keep it that way.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

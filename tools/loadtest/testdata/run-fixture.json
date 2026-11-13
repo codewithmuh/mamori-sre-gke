@@ -1,0 +1,71 @@
+{
+  "comment": "What Managed Service for Prometheus would return for a 5-step run (10, 20, 40, 60, 80 RPS, 300 s steps, 240 s measured). Step 1 is inconclusive (300 view-cart requests cannot confirm 99.5 %), step 2 passes, step 3 is inconclusive (view-cart at exactly 99.5 %), step 4 clearly misses checkout latency, and step 5 is invalid: 429s from the gateway, with k6 behind the plan. Counts are per measured window.",
+  "steps": [
+    {
+      "requests": {"browse": 1000, "add-to-cart": 800, "view-cart": 300, "checkout": 300},
+      "good": {"browse": 1000, "add-to-cart": 800, "view-cart": 300, "checkout": 300},
+      "fast": {
+        "browse": {"100": 600, "250": 950, "500": 995, "1000": 1000},
+        "add-to-cart": {"100": 700, "250": 790, "500": 800, "1000": 800},
+        "view-cart": {"100": 200, "250": 290, "500": 299, "1000": 300},
+        "checkout": {"100": 50, "250": 200, "500": 290, "1000": 300}
+      },
+      "dropped": null,
+      "p95": {"browse": 210, "add-to-cart": 90, "view-cart": 180, "checkout": 420},
+      "generatorCPU": 0.08, "nodeCPU": 0.5, "nodes": 3, "frontendRPS": 13.0
+    },
+    {
+      "requests": {"browse": 2000, "add-to-cart": 1600, "view-cart": 600, "checkout": 600},
+      "good": {"browse": 1999, "add-to-cart": 1600, "view-cart": 600, "checkout": 599},
+      "fast": {
+        "browse": {"100": 1000, "250": 1800, "500": 1960, "1000": 1999},
+        "add-to-cart": {"100": 1300, "250": 1580, "500": 1598, "1000": 1600},
+        "view-cart": {"100": 300, "250": 560, "500": 590, "1000": 600},
+        "checkout": {"100": 20, "250": 300, "500": 520, "1000": 590}
+      },
+      "dropped": 0,
+      "p95": {"browse": 280, "add-to-cart": 130, "view-cart": 250, "checkout": 610},
+      "generatorCPU": 0.15, "nodeCPU": 0.62, "nodes": 3, "frontendRPS": 23.5
+    },
+    {
+      "requests": {"browse": 4000, "add-to-cart": 3200, "view-cart": 1200, "checkout": 1200},
+      "good": {"browse": 3990, "add-to-cart": 3195, "view-cart": 1194, "checkout": 1195},
+      "fast": {
+        "browse": {"100": 1500, "250": 3300, "500": 3850, "1000": 3985},
+        "add-to-cart": {"100": 2000, "250": 3000, "500": 3150, "1000": 3190},
+        "view-cart": {"100": 400, "250": 1000, "500": 1170, "1000": 1190},
+        "checkout": {"100": 10, "250": 400, "500": 800, "1000": 1160}
+      },
+      "dropped": 0,
+      "p95": {"browse": 430, "add-to-cart": 240, "view-cart": 450, "checkout": 900},
+      "generatorCPU": 0.28, "nodeCPU": 0.81, "nodes": 3, "frontendRPS": 43.0
+    },
+    {
+      "requests": {"browse": 6000, "add-to-cart": 4800, "view-cart": 1800, "checkout": 1800},
+      "good": {"browse": 5985, "add-to-cart": 4790, "view-cart": 1798, "checkout": 1790},
+      "fast": {
+        "browse": {"100": 1200, "250": 4000, "500": 5800, "1000": 5970},
+        "add-to-cart": {"100": 2000, "250": 4200, "500": 4700, "1000": 4780},
+        "view-cart": {"100": 300, "250": 1200, "500": 1740, "1000": 1790},
+        "checkout": {"100": 0, "250": 200, "500": 700, "1000": 1500}
+      },
+      "dropped": 0,
+      "p95": {"browse": 490, "add-to-cart": 300, "view-cart": 520, "checkout": 1600},
+      "generatorCPU": 0.42, "nodeCPU": 0.93, "nodes": 3, "frontendRPS": 63.2
+    },
+    {
+      "requests": {"browse": 6000, "add-to-cart": 4800, "view-cart": 1800, "checkout": 1800},
+      "good": {"browse": 5700, "add-to-cart": 4700, "view-cart": 1750, "checkout": 1700},
+      "fast": {
+        "browse": {"100": 200, "250": 2000, "500": 4500, "1000": 5600},
+        "add-to-cart": {"100": 300, "250": 2500, "500": 4000, "1000": 4600},
+        "view-cart": {"100": 10, "250": 400, "500": 1200, "1000": 1700},
+        "checkout": {"100": 0, "250": 0, "500": 300, "1000": 1000}
+      },
+      "dropped": 120,
+      "rateLimited": 30,
+      "p95": {"browse": 1100, "add-to-cart": 700, "view-cart": 1200, "checkout": 3100},
+      "generatorCPU": 0.85, "nodeCPU": 0.97, "nodes": 4, "frontendRPS": 62.0
+    }
+  ]
+}

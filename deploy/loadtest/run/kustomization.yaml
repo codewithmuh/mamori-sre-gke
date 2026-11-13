@@ -1,0 +1,15 @@
+# One capacity-test run: the k6 Job. `make loadtest-run` renders this, sets the run's settings with
+# `kubectl set env`, and creates the Job after the stack in ../ is up. Jobs are immutable, so every
+# run deletes the previous Job first.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: loadtest
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: mamori
+    includeTemplates: true
+
+resources:
+  - job.yaml

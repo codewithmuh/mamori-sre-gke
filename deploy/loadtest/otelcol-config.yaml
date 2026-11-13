@@ -1,0 +1,55 @@
+# OpenTelemetry Collector config of k6-metrics: k6 pushes its metrics here over OTLP, and Managed
+# Service for Prometheus scrapes them from :8889 (podmonitoring.yaml).
+#
+# Why a relay: Managed Service for Prometheus has no remote-write endpoint, k6 cannot be scraped, and
+# k6 v2.4 deprecates its remote-write output in favour of OpenTelemetry. Scraping the relay goes
+# through the cluster's managed collectors, which already write to Cloud Monitoring, so the load
+# test needs no Google Cloud identity or role of its own.
+extensions:
+  health_check:
+    endpoint: ${env:POD_IP}:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: ${env:POD_IP}:4317
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 200
+    spike_limit_mib: 50
+  # Keep what tools/loadtest and the docs use; k6's other built-in metrics (connection phases, data
+  # sent, checks, ...) would only add series.
+  filter/k6:
+    error_mode: ignore
+    metrics:
+      metric:
+        - >-
+          not (IsMatch(name, "^k6_mamori_cuj_")
+          or name == "k6_http_reqs"
+          or name == "k6_http_req_duration"
+          or name == "k6_dropped_iterations"
+          or name == "k6_vus")
+
+exporters:
+  prometheus:
+    endpoint: ${env:POD_IP}:8889
+    # Spelled out so the metric names tools/loadtest queries cannot change with a default:
+    # counters get _total, the duration histogram gets _milliseconds.
+    translation_strategy: UnderscoreEscapingWithSuffixes
+    without_scope_info: true
+    # Keep the last values of a finished run visible to the scraper for a while.
+    metric_expiration: 60m
+
+service:
+  extensions: [health_check]
+  telemetry:
+    metrics:
+      level: none
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/k6]
+      exporters: [prometheus]
