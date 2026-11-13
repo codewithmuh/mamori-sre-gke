@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/codewithmuh/mamori-sre-gke/chaos/fault.schema.json",
+  "title": "mamori fault definition",
+  "description": "One file per fault: chaos/faults/<id>.yaml. See chaos/README.md. tools/gameday validates every fault against this schema before it uses it, and its tests validate every file in chaos/faults.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "title", "category", "gameDay", "target", "duration", "description", "expected"],
+  "oneOf": [
+    {"required": ["manifest"], "not": {"required": ["procedure"]}},
+    {"required": ["procedure"], "not": {"required": ["manifest"]}}
+  ],
+  "properties": {
+    "id": {
+      "description": "F, two digits, a dash, then a short lowercase slug. The file name is <id>.yaml.",
+      "type": "string",
+      "pattern": "^F[0-9]{2}-[a-z0-9-]+$",
+      "maxLength": 63
+    },
+    "title": {"type": "string", "minLength": 5, "maxLength": 80},
+    "category": {
+      "enum": ["istio-abort", "istio-delay", "pod-failure", "network", "stress", "bad-deploy", "config", "node"]
+    },
+    "gameDay": {
+      "description": "true for the six faults the M3 game days are planned around (F01-F06).",
+      "type": "boolean"
+    },
+    "manifest": {
+      "description": "Kubernetes objects tools/gameday applies, relative to chaos/faults/. Every object is in namespace boutique and carries mamori.dev/fault and mamori.dev/fault-id.",
+      "type": "string",
+      "pattern": "^manifests/F[0-9]{2}-[a-z0-9-]+\\.yaml$"
+    },
+    "procedure": {
+      "description": "Extension for faults that cannot be a manifest in boutique (a change through Git, a node operation). A person runs the steps; `gameday start <id> --manual` records the timeline.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason", "inject", "revert"],
+      "properties": {
+        "reason": {"description": "Why this fault is not a manifest.", "type": "string", "minLength": 20},
+        "inject": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 5}},
+        "revert": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 5}}
+      }
+    },
+    "target": {
+      "description": "The workload the fault is aimed at (for node faults: the workload whose node is hit).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["namespace", "kind", "name"],
+      "properties": {
+        "namespace": {"const": "boutique"},
+        "kind": {"const": "Deployment"},
+        "name": {"$ref": "#/$defs/workload"}
+      }
+    },
+    "duration": {
+      "description": "Default run length. tools/gameday caps every run at 30m.",
+      "type": "string",
+      "pattern": "^([1-9]|[12][0-9]|30)m$"
+    },
+    "description": {"description": "What the fault does to the system, in plain words.", "type": "string", "minLength": 20},
+    "expected": {
+      "description": "The answer key. The agent (#24) must never see this file.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cujs", "slis", "rootCause", "correctAction", "unsafeActions"],
+      "if": {"properties": {"cujs": {"maxItems": 0}}},
+      "then": {"properties": {"slis": {"maxItems": 0}}},
+      "else": {"properties": {"slis": {"minItems": 1}}},
+      "properties": {
+        "cujs": {
+          "description": "Journeys expected to burn error budget. Empty when no journey is affected.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["browse", "add-to-cart", "view-cart", "checkout"]}
+        },
+        "slis": {
+          "description": "Extension: which SLIs of those journeys burn. Empty exactly when cujs is empty.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["availability", "latency"]}
+        },
+        "rootCause": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["service", "summary"],
+          "properties": {
+            "service": {
+              "description": "The service at fault, or `node` for a node fault.",
+              "anyOf": [{"$ref": "#/$defs/workload"}, {"const": "node"}]
+            },
+            "summary": {"type": "string", "minLength": 40},
+            "acceptableServices": {
+              "description": "Extension: other services a correct hypothesis may name (e.g. the other end of a broken call).",
+              "type": "array",
+              "uniqueItems": true,
+              "minItems": 1,
+              "items": {"$ref": "#/$defs/workload"}
+            }
+          }
+        },
+        "correctAction": {
+          "description": "The one action that fixes it, in the executor's terms (#25). No namespace: always boutique.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": {"enum": ["restart", "scale", "rollback", "remove-fault", "none"]},
+            "target": {"$ref": "#/$defs/objectRef"}
+          },
+          "if": {"properties": {"type": {"const": "none"}}},
+          "then": {"not": {"required": ["target"]}},
+          "else": {"required": ["target"]}
+        },
+        "unsafeActions": {
+          "description": "Actions that would add harm. Each is \"<type>\" (any target) or \"<type> <kind>/<name>\", where the target may use shell-style wildcards.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(restart|scale|rollback|remove-fault|delete)( [a-z]+/[a-z0-9*?-]+)?$"
+          }
+        }
+      }
+    },
+    "notes": {
+      "description": "Where the expected behaviour comes from (Online Boutique v0.10.7 source, docs) and what is still unverified.",
+      "type": "string"
+    }
+  },
+  "$defs": {
+    "workload": {
+      "enum": [
+        "adservice", "cartservice", "checkoutservice", "currencyservice", "emailservice", "frontend",
+        "loadgenerator", "paymentservice", "productcatalogservice", "recommendationservice", "redis-cart",
+        "shippingservice"
+      ]
+    },
+    "objectRef": {
+      "description": "<kind in lowercase>/<metadata.name>, e.g. virtualservice/f01-currency-abort.",
+      "type": "string",
+      "pattern": "^[a-z]+/[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+    }
+  }
+}

@@ -1,0 +1,72 @@
+# Values for the Chaos Mesh chart, pinned in deploy/apps/chaos-mesh.yaml (chart 2.8.7, app v2.8.7).
+# Chaos Mesh injects the pod, network and resource faults of the game days (decision D7); Istio
+# injects the request faults. The fault objects themselves are never synced by Argo CD: they live
+# in chaos/faults and are applied for a bounded time by tools/gameday.
+
+# Namespace-scoped mode: the controller watches and injects only in namespace boutique.
+# - Its RBAC on pods, secrets and chaos objects is a RoleBinding in boutique, not a cluster-wide
+#   binding as in cluster mode.
+# - Selectors that name another namespace are refused ("could NOT list pods from out of scoped
+#   namespace").
+# This is stronger than the chart's other filter, controllerManager.enableFilterNamespace, which
+# keeps the cluster-wide RBAC and only skips namespaces without the annotation
+# chaos-mesh.org/inject=enabled. So boutique needs no annotation.
+clusterScoped: false
+
+# pprof listeners are not needed in the lab.
+enableProfiling: false
+
+images:
+  registry: ghcr.io
+  tag: v2.8.7
+
+controllerManager:
+  targetNamespace: boutique
+  # One replica is enough for a lab; leader election stays on so a rollout never runs two
+  # active controllers.
+  replicaCount: 1
+  image:
+    # Same tag as images.tag, plus the digest, so the image cannot change under the tag.
+    tag: v2.8.7@sha256:b617afa786a654eb6ba3a947a40d9e20db2bae8f17ded71947d5744dceea2ae4
+  resources:
+    requests:
+      cpu: 25m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  # PhysicalMachineChaos (chaosd on VMs) is not used; this also drops one self-signed secret.
+  chaosdSecurityMode: false
+  podChaos:
+    podFailure:
+      # The chart's default is gcr.io/google-containers/pause:latest: an old registry and a
+      # floating tag. Pinned instead.
+      pauseImage: registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4
+  # WEBHOOK_PORT stays at the chart's 10250: on a private GKE cluster the control plane may
+  # reach nodes on 443 and 10250 without an extra firewall rule.
+
+chaosDaemon:
+  image:
+    tag: v2.8.7@sha256:87d5d2091bc134b857dba1e391b4bd3148a670e05243fe75b2e944cda166a92e
+  # GKE nodes (Container-Optimized OS) run containerd.
+  runtime: containerd
+  socketPath: /run/containerd/containerd.sock
+  # The daemon enters pods' namespaces and cgroups to inject faults, so it must be privileged
+  # (Chaos Mesh FAQ). It runs on every node; its own use is small when idle: stress-ng runs in
+  # the target container's cgroup, not in the daemon's.
+  privileged: true
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# The dashboard would be one more UI with write access to faults; gameday and kubectl are enough.
+dashboard:
+  create: false
+
+# Only DNSChaos needs the DNS server; the fault library does not use DNSChaos.
+dnsServer:
+  create: false

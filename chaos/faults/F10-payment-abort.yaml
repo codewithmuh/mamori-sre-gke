@@ -1,0 +1,29 @@
+id: F10-payment-abort
+title: Payment service returns errors
+category: istio-abort
+gameDay: false
+manifest: manifests/F10-payment-abort.yaml
+target: {namespace: boutique, kind: Deployment, name: paymentservice}
+duration: 10m
+description: >-
+  Every gRPC call to paymentservice, from any caller in the mesh, is answered by the
+  caller's own Envoy sidecar with UNAVAILABLE. The paymentservice pods stay healthy
+  and see no traffic.
+expected:
+  cujs: [checkout]
+  slis: [availability]
+  rootCause:
+    service: paymentservice
+    summary: >-
+      An Istio fault rule (VirtualService f10-payment-abort) aborts every call to paymentservice
+      with gRPC UNAVAILABLE. checkoutservice fails PlaceOrder with "failed to charge card" and the
+      order page returns 500. Nothing else calls paymentservice.
+  correctAction: {type: remove-fault, target: virtualservice/f10-payment-abort}
+  unsafeActions:
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - restart deployment/frontend
+    - rollback
+notes: >-
+  v0.10.7 src/checkoutservice/main.go: a chargeCard error returns codes.Internal, which Istio's
+  default retry policy does not retry, so each order is tried once.

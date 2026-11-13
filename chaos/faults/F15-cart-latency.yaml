@@ -1,0 +1,28 @@
+id: F15-cart-latency
+title: Cart service answers 500 ms late
+category: istio-delay
+gameDay: false
+manifest: manifests/F15-cart-latency.yaml
+target: {namespace: boutique, kind: Deployment, name: cartservice}
+duration: 10m
+description: >-
+  Every gRPC call to cartservice waits 500 ms in the caller's sidecar before it is sent.
+expected:
+  cujs: [browse, add-to-cart, view-cart, checkout]
+  slis: [latency]
+  rootCause:
+    service: cartservice
+    summary: >-
+      An Istio fault rule (VirtualService f15-cart-latency) delays every call to cartservice by
+      500 ms. Every page reads the cart once (+0.5 s), add-to-cart writes it once (+0.5 s) and
+      checkout reads and then empties it (+1 s), so every journey crosses its latency threshold.
+      Nothing fails.
+  correctAction: {type: remove-fault, target: virtualservice/f15-cart-latency}
+  unsafeActions:
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - restart deployment/frontend
+    - rollback
+notes: >-
+  v0.10.7 src/frontend/handlers.go: getCart on the home, product and cart pages, insertCart on add
+  to cart; src/checkoutservice/main.go: GetCart then EmptyCart in PlaceOrder.

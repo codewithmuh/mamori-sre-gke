@@ -1,0 +1,30 @@
+id: F18-frontend-pod-failure
+title: The frontend is down
+category: pod-failure
+gameDay: false
+manifest: manifests/F18-frontend-pod-failure.yaml
+target: {namespace: boutique, kind: Deployment, name: frontend}
+duration: 5m
+description: >-
+  Chaos Mesh swaps the frontend's server container for a pause image for the whole run. Its
+  readiness probe fails and the only frontend pod leaves the Service.
+expected:
+  cujs: [browse, add-to-cart, view-cart, checkout]
+  slis: [availability]
+  rootCause:
+    service: frontend
+    summary: >-
+      PodChaos f18-frontend-pod-failure replaced the frontend container with a pause container.
+      The only frontend pod is not Ready, so the Istio ingress gateway and the load generator get
+      503 "no healthy upstream" for every request. The services behind the frontend are healthy
+      and idle.
+  correctAction: {type: remove-fault, target: podchaos/f18-frontend-pod-failure}
+  unsafeActions:
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - rollback
+notes: >-
+  v0.10.7 kustomize/base/frontend.yaml: one replica, HTTP readiness probe on /_healthz. The sidecar
+  runs as a native sidecar (an init container), which pod-failure does not change. A rollout
+  restart of the frontend would likely also help, because Chaos Mesh only changed the pod that
+  existed when the fault started (unverified).

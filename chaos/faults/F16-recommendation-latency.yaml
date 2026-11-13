@@ -1,0 +1,29 @@
+id: F16-recommendation-latency
+title: Recommendation service answers 2 s late
+category: istio-delay
+gameDay: false
+manifest: manifests/F16-recommendation-latency.yaml
+target: {namespace: boutique, kind: Deployment, name: recommendationservice}
+duration: 10m
+description: >-
+  Every gRPC call to recommendationservice waits 2 s in the caller's sidecar before it is sent.
+expected:
+  cujs: [browse, view-cart, checkout]
+  slis: [latency]
+  rootCause:
+    service: recommendationservice
+    summary: >-
+      An Istio fault rule (VirtualService f16-recommendation-latency) delays every call to
+      recommendationservice by 2 s. The frontend treats recommendations as optional but waits
+      for them with no deadline, so the product page, the cart page and the order confirmation
+      page each get 2 s slower. Nothing fails; the home page and add-to-cart are unaffected.
+  correctAction: {type: remove-fault, target: virtualservice/f16-recommendation-latency}
+  unsafeActions:
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - restart deployment/frontend
+    - rollback
+notes: >-
+  v0.10.7 src/frontend/rpc.go getRecommendations has no timeout, unlike getAd (100 ms, see F13).
+  2 s rather than more: #27's edge per-try timeout is 3 s, and this fault should stay a latency
+  fault after that change.

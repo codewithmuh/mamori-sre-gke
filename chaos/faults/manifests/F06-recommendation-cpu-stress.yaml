@@ -1,0 +1,27 @@
+# F06-recommendation-cpu-stress: two busy CPU workers inside recommendationservice's container (CPU limit 200m).
+# Applied and removed by tools/gameday only; never under an Argo CD path (chaos/README.md).
+# The stress-ng processes run inside the target container's cgroup, so they share its CPU and
+# memory limits with the app.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: f06-recommendation-cpu-stress
+  namespace: boutique
+  labels:
+    mamori.dev/fault: "true"
+    mamori.dev/fault-id: F06-recommendation-cpu-stress
+spec:
+  mode: all
+  containerNames:
+    - server
+  selector:
+    namespaces:
+      - boutique
+    labelSelectors:
+      app: recommendationservice
+  stressors:
+    cpu:
+      workers: 2
+      load: 100
+  # tools/gameday sets this to the run's duration, so Chaos Mesh stops even if the CLI dies.
+  duration: 10m

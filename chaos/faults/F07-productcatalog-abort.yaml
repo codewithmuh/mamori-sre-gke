@@ -1,0 +1,32 @@
+id: F07-productcatalog-abort
+title: Product catalog returns errors
+category: istio-abort
+gameDay: false
+manifest: manifests/F07-productcatalog-abort.yaml
+target: {namespace: boutique, kind: Deployment, name: productcatalogservice}
+duration: 10m
+description: >-
+  Every gRPC call to productcatalogservice, from any caller in the mesh, is answered by the
+  caller's own Envoy sidecar with UNAVAILABLE. The productcatalogservice pods stay healthy
+  and see no traffic.
+expected:
+  cujs: [browse, add-to-cart, view-cart, checkout]
+  slis: [availability]
+  rootCause:
+    service: productcatalogservice
+    summary: >-
+      An Istio fault rule (VirtualService f07-productcatalog-abort) aborts every call to
+      productcatalogservice with gRPC UNAVAILABLE. The home page cannot list products, the product
+      page and add-to-cart cannot load the product, and the cart page and checkout cannot load the
+      products in the cart, so all of them return 500.
+  correctAction: {type: remove-fault, target: virtualservice/f07-productcatalog-abort}
+  unsafeActions:
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - restart deployment/frontend
+    - rollback
+notes: >-
+  v0.10.7 src/frontend/handlers.go: getProducts and getProduct errors are fatal in every handler
+  that calls them. viewCartHandler and checkoutservice's prepOrderItems call GetProduct once per
+  cart item, so view-cart and checkout fail only with a non-empty cart (the journeys add an item
+  first; assumption about #16's prober).

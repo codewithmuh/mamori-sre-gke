@@ -1,0 +1,24 @@
+# F23-payment-authz-deny: a "lock paymentservice down to its one caller" policy that names the
+# wrong caller. Once an ALLOW policy selects a workload, everything it does not allow is denied,
+# so checkoutservice's Charge calls get HTTP 403 "RBAC: access denied" (gRPC PERMISSION_DENIED)
+# from paymentservice's own sidecar. Needs mTLS between the sidecars, Istio's default.
+# Applied and removed by tools/gameday only; never under an Argo CD path (chaos/README.md).
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: f23-payment-authz-deny
+  namespace: boutique
+  labels:
+    mamori.dev/fault: "true"
+    mamori.dev/fault-id: F23-payment-authz-deny
+spec:
+  selector:
+    matchLabels:
+      app: paymentservice
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              # Wrong: the caller is checkoutservice (service account "checkoutservice").
+              - cluster.local/ns/boutique/sa/frontend

@@ -1,0 +1,81 @@
+# Wave 5: Chaos Mesh (deploy/chaos-mesh/values.yaml), namespace-scoped to boutique. After the shop
+# (wave 3) because the chart puts its RoleBindings in namespace boutique.
+# This installs the tool only. Fault objects (chaos/faults) are never synced: tools/gameday
+# applies them for a bounded time.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: chaos-mesh
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    - repoURL: https://charts.chaos-mesh.org
+      chart: chaos-mesh
+      targetRevision: 2.8.7
+      helm:
+        releaseName: chaos-mesh
+        valueFiles:
+          - $values/deploy/chaos-mesh/values.yaml
+    - repoURL: https://github.com/codewithmuh/mamori-sre-gke.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: chaos-mesh
+  # Without cert-manager the chart generates a new CA, webhook and daemon certificates, and a
+  # random "rollme" pod annotation on every render, and Argo CD renders on every refresh. Keep
+  # the live values: otherwise the app is never in sync, self-heal re-applies new certificates,
+  # and the webhooks' caBundle and the secrets can drift apart.
+  ignoreDifferences:
+    - kind: Secret
+      name: chaos-mesh-webhook-certs
+      namespace: chaos-mesh
+      jsonPointers:
+        - /data
+    - kind: Secret
+      name: chaos-mesh-daemon-certs
+      namespace: chaos-mesh
+      jsonPointers:
+        - /data
+    - kind: Secret
+      name: chaos-mesh-daemon-client-certs
+      namespace: chaos-mesh
+      jsonPointers:
+        - /data
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/template/metadata/annotations/rollme
+    - group: apps
+      kind: DaemonSet
+      jsonPointers:
+        - /spec/template/metadata/annotations/rollme
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        app.kubernetes.io/part-of: mamori
+        # chaos-daemon must run privileged (Chaos Mesh FAQ). Said explicitly, so a cluster-wide
+        # Pod Security default can't block it silently.
+        pod-security.kubernetes.io/enforce: privileged
+    syncOptions:
+      - CreateNamespace=true
+      # Some Chaos Mesh CRDs (workflows, schedules) are far too large for the last-applied
+      # annotation of a client-side apply.
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true

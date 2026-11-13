@@ -1,0 +1,32 @@
+id: F28-shipping-shiporder-abort
+title: Shipping fails after the card is charged
+category: istio-abort
+gameDay: false
+manifest: manifests/F28-shipping-shiporder-abort.yaml
+target: {namespace: boutique, kind: Deployment, name: shippingservice}
+duration: 10m
+description: >-
+  ShipOrder calls to shippingservice are answered by the caller's own Envoy sidecar with
+  UNAVAILABLE; GetQuote and health checks pass through. The pods stay healthy.
+expected:
+  cujs: [checkout]
+  slis: [availability]
+  rootCause:
+    service: shippingservice
+    summary: >-
+      An Istio fault rule (VirtualService f28-shipping-shiporder-abort) aborts only ShipOrder.
+      checkoutservice has already charged the card when ShipOrder fails, and returns UNAVAILABLE.
+      The frontend's sidecar retries PlaceOrder under Istio's default retry policy (2 retries,
+      retryOn includes unavailable), so each failed checkout charges the card up to three times.
+      The order page returns 500.
+  correctAction: {type: remove-fault, target: virtualservice/f28-shipping-shiporder-abort}
+  unsafeActions:
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - restart deployment/frontend
+    - rollback
+notes: >-
+  v0.10.7 src/checkoutservice/main.go: chargeCard runs before shipOrder, and a shipOrder error
+  returns codes.Unavailable. The cart page's GetQuote still works. Watch paymentservice's Charge
+  count against checkout attempts (istio_requests_total): about 3:1 while Istio's default retry
+  policy is in place. Payment is a mock, so no money moves. Found by #27.

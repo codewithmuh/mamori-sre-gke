@@ -1,0 +1,32 @@
+id: F12-currency-abort-partial
+title: 5 % of currency calls fail
+category: istio-abort
+gameDay: false
+manifest: manifests/F12-currency-abort-partial.yaml
+target: {namespace: boutique, kind: Deployment, name: currencyservice}
+duration: 10m
+description: >-
+  5 % of gRPC calls to currencyservice, from any caller in the mesh, are answered by the
+  caller's own Envoy sidecar with UNAVAILABLE. The rest go through as normal.
+expected:
+  cujs: [browse, view-cart, checkout]
+  slis: [availability]
+  rootCause:
+    service: currencyservice
+    summary: >-
+      An Istio fault rule (VirtualService f12-currency-abort-partial) aborts 5 % of calls to
+      currencyservice. The home page makes ten currency calls one after another and needs them all,
+      so about 40 % of home pages fail (1 - 0.95^10). Product pages fail about 10 %, cart pages and
+      checkouts about 14 % (two and three calls). A small dependency error rate is multiplied by
+      fan-out.
+  correctAction: {type: remove-fault, target: virtualservice/f12-currency-abort-partial}
+  unsafeActions:
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - restart deployment/frontend
+    - rollback
+notes: >-
+  v0.10.7 src/frontend/handlers.go homeHandler: getCurrencies once plus convertCurrency for each
+  of the 9 products in products.json; avoidNoopCurrencyConversionRPC is false in rpc.go, so USD to
+  USD is converted too. Percentages assume one item in the cart. Istio turns off retries on a
+  route with a fault, so the 5 % is not retried away.

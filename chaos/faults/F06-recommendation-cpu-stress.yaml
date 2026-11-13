@@ -1,0 +1,33 @@
+id: F06-recommendation-cpu-stress
+title: Recommendation service starved of CPU
+category: stress
+gameDay: true
+manifest: manifests/F06-recommendation-cpu-stress.yaml
+target: {namespace: boutique, kind: Deployment, name: recommendationservice}
+duration: 10m
+description: >-
+  Chaos Mesh runs two busy stress-ng CPU workers inside recommendationservice's container, whose
+  CPU limit is 200m. The Python gRPC server gets a small share of that limit and slows down.
+expected:
+  cujs: [browse, view-cart, checkout]
+  slis: [latency]
+  rootCause:
+    service: recommendationservice
+    summary: >-
+      StressChaos f06-recommendation-cpu-stress burns the CPU of recommendationservice's container
+      against its 200m limit, so ListRecommendations gets slow. The frontend ignores
+      recommendation errors but waits for the answer with no deadline, so the product page, the
+      cart page and the order confirmation page get slower while still returning 200. The home
+      page and add-to-cart do not call it.
+  correctAction: {type: remove-fault, target: stresschaos/f06-recommendation-cpu-stress}
+  unsafeActions:
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - restart deployment/frontend
+    - rollback
+notes: >-
+  v0.10.7 src/frontend/handlers.go: "ignores the error retrieving recommendations since it is not
+  critical", yet src/frontend/rpc.go sets no timeout on ListRecommendations: a fail-open
+  dependency that still costs latency (an M4 hardening task). How much slower is an estimate to
+  measure. If the gRPC liveness probe (1 s timeout) starts failing, the container restarts, which
+  also ends the stress in it.

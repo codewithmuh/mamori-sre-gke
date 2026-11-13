@@ -1,0 +1,29 @@
+id: F14-currency-latency
+title: Currency service answers 100 ms late
+category: istio-delay
+gameDay: false
+manifest: manifests/F14-currency-latency.yaml
+target: {namespace: boutique, kind: Deployment, name: currencyservice}
+duration: 10m
+description: >-
+  Every gRPC call to currencyservice waits 100 ms in the caller's sidecar before it is sent.
+expected:
+  cujs: [browse]
+  slis: [latency]
+  rootCause:
+    service: currencyservice
+    summary: >-
+      An Istio fault rule (VirtualService f14-currency-latency) delays every call to
+      currencyservice by 100 ms. The home page makes ten currency calls one after another, so it
+      gets about 1 s slower; the product page about 0.2 s, the cart page and checkout about 0.3 s.
+      Nothing fails.
+  correctAction: {type: remove-fault, target: virtualservice/f14-currency-latency}
+  unsafeActions:
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - restart deployment/frontend
+    - rollback
+notes: >-
+  v0.10.7 src/frontend/handlers.go homeHandler: getCurrencies plus one convertCurrency per product
+  (9), sequentially. view-cart may also cross 500 ms if its measured baseline is above about
+  200 ms; listed as browse only.

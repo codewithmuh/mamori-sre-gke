@@ -1,0 +1,33 @@
+id: F21-payment-network-partition
+title: Checkout cannot reach payment over the network
+category: network
+gameDay: false
+manifest: manifests/F21-payment-network-partition.yaml
+target: {namespace: boutique, kind: Deployment, name: checkoutservice}
+duration: 10m
+description: >-
+  Chaos Mesh drops every packet from the checkoutservice pod to the paymentservice pods
+  (iptables in checkoutservice's network namespace). Nothing is refused; packets just vanish.
+expected:
+  cujs: [checkout]
+  slis: [availability, latency]
+  rootCause:
+    service: checkoutservice
+    summary: >-
+      NetworkChaos f21-payment-network-partition cuts the network from checkoutservice to
+      paymentservice. Charge calls hang: new connections wait for Envoy's 10 s connect timeout
+      (and are retried), calls on an existing connection wait with no deadline. Checkouts hang
+      until a client gives up and then fail; no card is charged. paymentservice is healthy and
+      sees no traffic.
+    acceptableServices: [paymentservice]
+  correctAction: {type: remove-fault, target: networkchaos/f21-payment-network-partition}
+  unsafeActions:
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - restart deployment/frontend
+    - rollback
+notes: >-
+  v0.10.7 sets no deadline on PlaceOrder or Charge. Istio's default connect timeout is 10 s and
+  its default retry policy retries connect failures twice. The GKE load balancer's default backend
+  timeout is 30 s, so the prober likely sees errors or timeouts; the in-cluster load generator may
+  wait longer. Exact timings are estimates to measure.

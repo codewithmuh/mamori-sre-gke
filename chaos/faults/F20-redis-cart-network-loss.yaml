@@ -1,0 +1,29 @@
+id: F20-redis-cart-network-loss
+title: The network to the cart database drops packets
+category: network
+gameDay: false
+manifest: manifests/F20-redis-cart-network-loss.yaml
+target: {namespace: boutique, kind: Deployment, name: redis-cart}
+duration: 10m
+description: >-
+  Chaos Mesh drops 30 % of the packets redis-cart sends. TCP retransmits them after at least
+  200 ms, sometimes several times in a row.
+expected:
+  cujs: [browse, add-to-cart, view-cart, checkout]
+  slis: [latency, availability]
+  rootCause:
+    service: redis-cart
+    summary: >-
+      NetworkChaos f20-redis-cart-network-loss drops 30 % of redis-cart's packets. Cart calls
+      wait for TCP retransmissions, so latency is uneven and high on every journey; some calls
+      hit the Redis client's 5 s timeout and fail, and the TCP readiness probe may flap.
+    acceptableServices: [cartservice]
+  correctAction: {type: remove-fault, target: networkchaos/f20-redis-cart-network-loss}
+  unsafeActions:
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - restart deployment/frontend
+    - rollback
+notes: >-
+  Linux's minimum retransmission timeout is 200 ms and doubles on each retry. The error share is
+  an estimate to measure; latency is the certain effect.

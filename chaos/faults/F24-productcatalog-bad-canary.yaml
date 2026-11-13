@@ -1,0 +1,34 @@
+id: F24-productcatalog-bad-canary
+title: A slow canary of the product catalog takes traffic
+category: bad-deploy
+gameDay: false
+manifest: manifests/F24-productcatalog-bad-canary.yaml
+target: {namespace: boutique, kind: Deployment, name: productcatalogservice}
+duration: 10m
+description: >-
+  A canary Deployment of productcatalogservice, 2 s slower on every call, joins the existing
+  Service next to the stable pod. Part of the catalog traffic goes to it.
+expected:
+  cujs: [browse, add-to-cart, view-cart, checkout]
+  slis: [latency]
+  rootCause:
+    service: productcatalogservice
+    summary: >-
+      A canary Deployment f24-productcatalog-bad-canary (pods labelled
+      app=productcatalogservice) is 2 s slower on every call (EXTRA_LATENCY=2s) and serves part
+      of productcatalogservice's traffic. Pages that make one catalog call are sometimes 2 s
+      slower; the product, cart and order pages make about seven and are slow most of the time.
+      The stable Deployment is healthy. Istio metrics split the traffic by destination_workload.
+  correctAction: {type: remove-fault, target: deployment/f24-productcatalog-bad-canary}
+  unsafeActions:
+    - rollback deployment/productcatalogservice
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - restart deployment/frontend
+notes: >-
+  v0.10.7 src/productcatalogservice/product_catalog.go sleeps EXTRA_LATENCY in ListProducts,
+  GetProduct and SearchProducts. Envoy's default least-request balancing sends fewer calls to the
+  slow pod once it has calls in flight, so its share is below half (estimate). The canary's
+  selector includes mamori.dev/fault-id and its ReplicaSet has its own owner, so the stable
+  Deployment does not adopt it. Under #27's 3 s edge per-try timeout, slow product pages may turn
+  into 504s.

@@ -1,0 +1,53 @@
+id: F05-node-preemption
+title: A Spot node is preempted
+category: node
+gameDay: true
+procedure:
+  reason: >-
+    A preemption happens to the VM, outside Kubernetes, and gameday only touches objects in the
+    boutique namespace. Compute Engine's simulated maintenance event preempts a Spot VM the way a
+    real reclaim does (30 s notice, graceful node shutdown).
+  inject:
+    - >-
+      Pick the node that runs redis-cart, so the effect is the same every time:
+      NODE=$(kubectl -n boutique get pod -l app=redis-cart -o jsonpath='{.items[0].spec.nodeName}');
+      kubectl get pods -A -o wide --field-selector spec.nodeName=$NODE
+    - >-
+      Preempt it: gcloud compute instances simulate-maintenance-event $NODE --zone=$ZONE
+      --project=$PROJECT_ID
+  revert:
+    - >-
+      Nothing to undo. Watch kubectl get nodes -w until three nodes are Ready again (the node keeps
+      its name when GKE recreates it) and kubectl -n boutique get pods until every pod is Running.
+    - >-
+      If the VM is still TERMINATED after 15 minutes (no Spot capacity), note it in the timeline
+      and start it: gcloud compute instances start $NODE --zone=$ZONE --project=$PROJECT_ID
+target: {namespace: boutique, kind: Deployment, name: redis-cart}
+duration: 20m
+description: >-
+  The node that runs redis-cart is preempted. Its pods get about 15 s to stop and are recreated
+  on the other two nodes, where some may wait Pending for lack of CPU until the node returns.
+expected:
+  cujs: [browse, add-to-cart, view-cart, checkout]
+  slis: [availability]
+  rootCause:
+    service: node
+    summary: >-
+      Compute Engine preempted one Spot node of spot-pool. Every pod on it was stopped and
+      rescheduled; redis-cart came back empty (emptyDir), so all carts were lost and cart calls
+      failed until it was ready. Other single-replica services on that node had a short outage
+      too, and capacity dropped by a third until the node returned. PodDisruptionBudgets do not
+      apply to preemption.
+    acceptableServices: [redis-cart]
+  correctAction: {type: none}
+  unsafeActions:
+    - scale deployment/redis-cart
+    - restart deployment/redis-cart
+    - rollback
+notes: >-
+  GKE Spot docs (checked 2026-11-13): 30 s graceful termination by default, 15 s for regular pods,
+  then 15 s for system pods; preemption is not covered by PodDisruptionBudgets; node names usually
+  stay the same when recreated. deploy/README.md: requests are about 61 % of three nodes, about
+  91 % of two, so some pods may stay Pending (estimate). If the Istio ingress gateway (one
+  replica) was on the node, the public path fails until it moves, while the in-cluster load
+  generator does not notice.

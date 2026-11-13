@@ -1,0 +1,20 @@
+# F18-frontend-pod-failure: the frontend's container is swapped for a pause image for the run, so the shop is down.
+# Applied and removed by tools/gameday only; never under an Argo CD path (chaos/README.md).
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: f18-frontend-pod-failure
+  namespace: boutique
+  labels:
+    mamori.dev/fault: "true"
+    mamori.dev/fault-id: F18-frontend-pod-failure
+spec:
+  action: pod-failure
+  mode: all
+  # tools/gameday sets this to the run's duration, so Chaos Mesh stops even if the CLI dies.
+  duration: 5m
+  selector:
+    namespaces:
+      - boutique
+    labelSelectors:
+      app: frontend

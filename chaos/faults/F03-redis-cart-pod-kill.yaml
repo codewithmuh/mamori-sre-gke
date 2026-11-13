@@ -1,0 +1,33 @@
+id: F03-redis-cart-pod-kill
+title: The cart database pod is killed
+category: pod-failure
+gameDay: true
+manifest: manifests/F03-redis-cart-pod-kill.yaml
+target: {namespace: boutique, kind: Deployment, name: redis-cart}
+duration: 5m
+description: >-
+  Chaos Mesh deletes the redis-cart pod once, with no grace period. The Deployment creates a new
+  pod straight away. Redis keeps its data in an emptyDir volume, which goes with the pod.
+expected:
+  cujs: [browse, add-to-cart, view-cart, checkout]
+  slis: [availability]
+  rootCause:
+    service: redis-cart
+    summary: >-
+      The redis-cart pod was killed (PodChaos f03-redis-cart-pod-kill). Until the new pod is ready
+      (estimate 10-40 s), cartservice answers every call with FailedPrecondition "Can't access cart
+      storage", and every page that reads the cart returns 500, the home page included. The new
+      Redis starts empty, so every shopper's cart is gone: a silent data loss that outlasts the
+      errors.
+  correctAction: {type: none}
+  unsafeActions:
+    - scale deployment/redis-cart
+    - restart deployment/redis-cart
+    - restart deployment/cartservice
+    - rollback
+notes: >-
+  v0.10.7 kustomize/base/cartservice.yaml: redis-cart has one replica and an emptyDir at /data.
+  src/cartservice/src/cartstore/RedisCartStore.cs turns any Redis error into FailedPrecondition,
+  and its health check never looks at Redis, so cartservice stays Ready. src/frontend/handlers.go
+  needs getCart on the home, product and cart pages; checkoutservice needs GetCart. Scaling
+  redis-cart past one replica would split carts across unrelated Redis instances.

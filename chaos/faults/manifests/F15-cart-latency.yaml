@@ -1,0 +1,23 @@
+# F15-cart-latency: every call to cartservice waits 500 ms first.
+# Applied and removed by tools/gameday only; never under an Argo CD path (chaos/README.md).
+# Istio applies the fault in the client's sidecar, so every caller in the mesh sees it.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: f15-cart-latency
+  namespace: boutique
+  labels:
+    mamori.dev/fault: "true"
+    mamori.dev/fault-id: F15-cart-latency
+spec:
+  hosts:
+    - cartservice.boutique.svc.cluster.local
+  http:
+    - fault:
+        delay:
+          fixedDelay: 500ms
+          percentage:
+            value: 100
+      route:
+        - destination:
+            host: cartservice.boutique.svc.cluster.local

@@ -1,0 +1,29 @@
+id: F22-frontend-cpu-stress
+title: Frontend starved of CPU
+category: stress
+gameDay: false
+manifest: manifests/F22-frontend-cpu-stress.yaml
+target: {namespace: boutique, kind: Deployment, name: frontend}
+duration: 10m
+description: >-
+  Chaos Mesh runs two busy stress-ng CPU workers inside the frontend's container, whose CPU limit
+  is 200m. Every page is rendered with a small share of that limit.
+expected:
+  cujs: [browse, add-to-cart, view-cart, checkout]
+  slis: [latency]
+  rootCause:
+    service: frontend
+    summary: >-
+      StressChaos f22-frontend-cpu-stress burns the frontend container's CPU against its 200m
+      limit, so the frontend is throttled and every page gets slower, while the services behind
+      it answer as fast as before. If the liveness probe (1 s timeout) starts failing, the
+      container restarts and requests fail for a few seconds.
+  correctAction: {type: remove-fault, target: stresschaos/f22-frontend-cpu-stress}
+  unsafeActions:
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - rollback
+notes: >-
+  v0.10.7 kustomize/base/frontend.yaml: limits cpu 200m, one replica. The size of the slowdown
+  is an estimate to measure; a container_cpu_cfs_throttled_seconds_total rise on the frontend is
+  the tell.

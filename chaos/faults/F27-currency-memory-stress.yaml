@@ -1,0 +1,32 @@
+id: F27-currency-memory-stress
+title: Currency service runs out of memory
+category: stress
+gameDay: false
+manifest: manifests/F27-currency-memory-stress.yaml
+target: {namespace: boutique, kind: Deployment, name: currencyservice}
+duration: 10m
+description: >-
+  Chaos Mesh starts a stress-ng worker that holds 100 MiB inside currencyservice's container,
+  whose memory limit is 128Mi, and protects it from the OOM killer. The kernel kills the Node.js
+  server instead.
+expected:
+  cujs: [browse, view-cart, checkout]
+  slis: [availability]
+  rootCause:
+    service: currencyservice
+    summary: >-
+      StressChaos f27-currency-memory-stress pushed currencyservice's container past its 128Mi
+      limit; the server was OOMKilled (lastState.terminated.reason OOMKilled, restart count up).
+      While it restarts, currency calls fail, so browse, the cart page and checkout return 500 for
+      a few seconds, possibly more than once.
+  correctAction: {type: remove-fault, target: stresschaos/f27-currency-memory-stress}
+  unsafeActions:
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - restart deployment/frontend
+    - rollback
+notes: >-
+  Unverified: whether the stress process dies with the container (likely, as the container's
+  cgroup goes) and whether Chaos Mesh injects again into the restarted container. If it does not,
+  the effect is one OOMKill and a few seconds of errors. Raising the memory limit is the lasting
+  fix if it were real.
