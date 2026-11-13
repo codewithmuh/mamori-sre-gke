@@ -1,0 +1,30 @@
+# Test fixture for slo-gen, not a measurement. Same schema as slo/cuj-map.yaml (build contract).
+apiVersion: mamori/v1
+kind: CUJMap
+metadata:
+  generatedAt: "2026-11-01T00:00:00Z"
+  generator: cuj-discovery/test
+  onlineBoutique: v0.10.7
+  runsPerCase: 20
+  failureThreshold: 0.5
+  fault: "test fixture"
+  someFutureField: ignored
+journeys:
+  - id: browse
+    critical: [productcatalogservice, currencyservice]
+    nonCritical: [adservice, recommendationservice]
+    results:
+      productcatalogservice: {failureRate: 1.0, runs: 20}
+      currencyservice: {failureRate: 1.0, runs: 20}
+      adservice: {failureRate: 0.0, runs: 20}
+  - id: add-to-cart
+    critical: [cartservice, productcatalogservice, redis-cart]
+    nonCritical: [adservice]
+  - id: view-cart
+    critical: [cartservice, currencyservice, redis-cart, shippingservice]
+    nonCritical: [recommendationservice]
+  - id: checkout
+    critical: [cartservice, checkoutservice, currencyservice, paymentservice, productcatalogservice, redis-cart, shippingservice]
+    nonCritical: [emailservice]
+  - id: wishlist
+    critical: [productcatalogservice]
