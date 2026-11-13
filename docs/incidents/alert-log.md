@@ -3,7 +3,7 @@
 Status: empty, M3 (#20), 2026-11-13. No alert has fired yet.
 
 Every alert that fires gets a row here, classified, so the lab can report how many alerts were worth acting on,
-before and after tuning (requirement R5). How the numbers are computed and what "before" and "after" mean:
+before and after tuning (goal G5). How the numbers are computed and what "before" and "after" mean:
 [../alerting.md](../alerting.md#counting-actionability-before-and-after-tuning). Fill it in at the morning review
 ([on-call.md](on-call.md)) and after every incident or game day.
 

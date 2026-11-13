@@ -1,22 +1,23 @@
 # Runbook: CUJ browse alert
 
 Status: draft, M3 (#20), 2026-11-13. Not yet used on a real alert; queries checked against the names in the build
-contract, not against live data.
+contract, not against live data. The alerts exist only once `slo_enabled` is true
+([../alerting.md](../alerting.md#alert-inventory)); until then nothing fires.
 
-**Alerts:** `CUJ browse: <prober|mesh> <availability|latency> <fast|medium|slow> burn` and `CUJ browse: prober no
-data` (inventory: [../alerting.md](../alerting.md)). **Journey:** the shopper opens the home page (`GET /`) and a
-product page (`GET /product/{id}`).
+**Alerts:** `CUJ browse: <prober|mesh> <availability|latency> <fast|medium|slow> burn`, and the shared `CUJ prober: no
+data` and `CUJ mesh: no data` (inventory: [../alerting.md](../alerting.md)). **Journey:** the shopper opens the home
+page (`GET /`) and a product page (`GET /product/{id}`).
 
 ## What fired
 
 | Part of the name | Means |
 |---|---|
 | `prober` | The Go prober's runs fail or are slow. It enters at the Istio ingress gateway inside the cluster, so it covers the gateway, the frontend and every service behind it, but not the load balancer, certificate or Cloud Armor |
-| `mesh` | The Istio sidecar metrics: the product of the journey's critical services' success rates, or their latency, per minute |
+| `mesh` | The Istio sidecar metrics: the product of the journey's critical backend services' success rates, or their latency, per minute (the frontend is not in it). Always a ticket |
 | `availability` / `latency` | Requests fail / requests are slower than 500 ms |
-| `fast`, `medium` | Page: 2 % of the 28-day budget gone in an hour, or 5 % in six hours |
+| `fast`, `medium` | On the prober, a page: 2 % of the 28-day budget gone in an hour, or 5 % in six hours (latency has lower thresholds of its own). On the mesh, a ticket |
 | `slow` | Ticket: 10 % gone in a day. Look within working hours |
-| `prober no data` | The prober stopped reporting. The shop may be fine: see the last section |
+| `CUJ prober: no data`, `CUJ mesh: no data` | A signal stopped reporting, for every journey at once. See the last section |
 
 ## Impact
 
@@ -28,12 +29,13 @@ minutes is SEV1; a page-tier alert below that is SEV2; a slow-tier ticket alone 
 
 1. **Acknowledge** in PagerDuty, including duplicates ("acknowledge all"). Don't resolve there; the alert closes by
    itself.
-2. **Game day?** `gameday status` and `#incidents`. If a fault is running and explains what you see, follow the game
-   day ([../incidents/game-days.md](../incidents/game-days.md)). Anything it doesn't explain is a real incident.
+2. **Game day?** `make gameday-status` (from the repo root) and `#incidents`. If a fault is running and explains
+   what you see, follow the game day ([../incidents/game-days.md](../incidents/game-days.md)). Anything it doesn't
+   explain is a real incident.
 3. **Declare** in `#incidents` with a first severity ([../incidents/communication.md](../incidents/communication.md)).
 4. **Size it:** run queries 1 and 2 below. Is it browse only, or other journeys too? Several journeys at once point
    at what they share: `cartservice`/`redis-cart`, `currencyservice`, `productcatalogservice`, the frontend or the
-   ingress gateway.
+   ingress gateway. Every probe starts on the home page, so a broken home page fails all four journeys.
 5. **What changed?** Argo CD history, recent merges to `deploy/`, a Terraform apply, a lost node, an active fault
    rule. Most incidents follow a change.
 
@@ -95,7 +97,7 @@ Kubernetes events older than an hour: `logName="projects/PROJECT_ID/logs/events"
 
 One at a time; wait for query 1 to move before the next ([../incidents/roles.md](../incidents/roles.md)).
 
-1. **Remove an active fault** once you know it is the cause: `gameday stop --all`, then the label query above must
+1. **Remove an active fault** once you know it is the cause: `make gameday-stop-all`, then the label query above must
    return nothing.
 2. **Roll back a recent change through Git**: `git revert <sha>`, pull request, merge; Argo CD syncs it. Don't use
    `kubectl rollout undo`: Argo CD's self-heal puts the Git version straight back. If a SEV1 can't wait for CI,
@@ -114,16 +116,24 @@ One at a time; wait for query 1 to move before the next ([../incidents/roles.md]
 Time boxes from [../incidents/on-call.md](../incidents/on-call.md#escalation): no working mitigation after
 30 minutes (SEV1) or 60 minutes (SEV2) → stop diagnosing, use the generic mitigations above for everything changed
 in the last 24 hours, raise the severity. Check [Google Cloud Service Health](https://status.cloud.google.com/).
-Last resort: rebuild with `make down` and `make up`.
+Last resort: rebuild with `make slo-snooze`, `make down` and `make up`.
 
-## "CUJ browse: prober no data"
+## No-data alerts
 
-The prober has sent nothing for browse for 10 minutes. The same alert usually fires for all four journeys.
+These cover every journey at once, so they live here rather than in each runbook.
+
+**`CUJ prober: no data`** (page): the prober has sent nothing for 10 minutes.
 
 1. Check the mesh SLIs (query 1, mesh line). If they are normal, the shop is fine and the lab is blind: SEV3.
-2. `kubectl -n prober get pods` and `kubectl -n prober logs deploy/prober --since=15m`; then the prober's runbook,
-   [prober.md](prober.md) (#16).
-3. If every pod in the cluster stopped reporting, suspect the nodes or the spend guard, not the prober.
+2. If `CUJ mesh: no data` fired too, or nothing in the cluster reports, the whole cluster may be down, and this is
+   the only page you will get: treat it as SEV1. `kubectl get nodes`; check the spend guard
+   ([spend-guard.md](spend-guard.md)) and [Google Cloud Service Health](https://status.cloud.google.com/).
+3. Otherwise it is the prober: `kubectl -n prober get pods` and `kubectl -n prober logs deploy/prober --since=15m`,
+   then the prober's runbook, [prober.md](prober.md) (#16).
+
+**`CUJ mesh: no data`** (ticket): the mesh SLI series have stopped for 10 minutes, because the managed rule evaluator
+or the Istio scrape stopped. The prober still watches the journeys; if it is green, fix it in working hours
+([../observability.md](../observability.md), #19). If the prober is silent too, see step 2 above.
 
 ## Afterwards
 

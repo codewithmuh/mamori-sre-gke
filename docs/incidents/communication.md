@@ -4,12 +4,14 @@ Status: draft, M3 (#20), 2026-11-13. Templates not yet used on a real incident.
 
 ## Where
 
-- **Slack channel `#incidents`** in the lab's free workspace. PagerDuty's Slack integration posts every incident of
-  the `mamori-shop` service there, with acknowledge and resolve buttons (#21, [../oncall.md](../oncall.md)). The free
+- **Slack channel `#incidents`** in the lab's free workspace. PagerDuty's Slack integration posts a card there for
+  every incident of the `mamori-shop` service (#21, [../oncall.md](../oncall.md)). Whether the free plan's cards
+  carry acknowledge and resolve buttons is not verified yet; acknowledge in the PagerDuty app either way. The free
   plan cannot create a channel per incident, so **each incident is one thread** in `#incidents`, started by the
   declaration below.
-- From M5 the agent posts its investigation, and the executor its approval request, in the same thread
-  ([roles.md](roles.md)).
+- From M5 the agent posts its investigation, and the executor its approval request, as new messages in their
+  configured channels, not in the incident thread. **Paste both links into the incident thread**
+  ([roles.md](roles.md)), so the thread stays the one record.
 - **No status page.** PagerDuty's free plan has none, and the shoppers are synthetic. The Slack thread is the working
   record; the postmortem in Git is the public one.
 
@@ -84,7 +86,7 @@ Planned budget: <journey> about <x> %
 
 ```text
 GAME DAY GD<n> STOP: <HH:MM> UTC (<ended on time | aborted because ...>)
-Fault removed: <yes, gameday status empty and no mamori.dev/fault objects left>
+Fault removed: <yes, make gameday-status empty and no mamori.dev/fault objects left>
 ```
 
 ## Handoff note to yourself
@@ -93,7 +95,7 @@ See the checklist in [on-call.md](on-call.md).
 
 ```text
 HANDOFF: away <from HH:MM> to <until HH:MM> UTC
-Faults active: none (gameday status, label check)
+Faults active: none (make gameday-status, label check)
 Argo CD: all Synced and Healthy
 Open: <incidents and tickets, next step each>
 Budget left: browse <x> %, add-to-cart <x> %, view-cart <x> %, checkout <x> %

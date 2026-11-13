@@ -1,18 +1,20 @@
 # Runbook: CUJ checkout alert
 
 Status: draft, M3 (#20), 2026-11-13. Not yet used on a real alert; queries checked against the names in the build
-contract, not against live data.
+contract, not against live data. The alerts exist only once `slo_enabled` is true
+([../alerting.md](../alerting.md#alert-inventory)); until then nothing fires.
 
-**Alerts:** `CUJ checkout: <prober|mesh> <availability|latency> <fast|medium|slow> burn` and `CUJ checkout: prober
-no data` (inventory: [../alerting.md](../alerting.md)). **Journey:** the shopper places an order with the demo's
-pre-filled fake card (`POST /cart/checkout`). Targets: 99.0 % available, 95 % under 1,000 ms.
+**Alerts:** `CUJ checkout: <prober|mesh> <availability|latency> <fast|medium|slow> burn`, and the shared `CUJ prober:
+no data` and `CUJ mesh: no data` (inventory: [../alerting.md](../alerting.md)). **Journey:** the shopper places an
+order with the demo's pre-filled fake card (`POST /cart/checkout`). Targets: 99.0 % available, 95 % under 1,000 ms.
 
 ## What fired
 
-`prober` = the end-to-end probe from the in-cluster ingress gateway; `mesh` = sidecar metrics of the journey's
-critical services. `availability` = orders fail; `latency` = slower than 1,000 ms. `fast` and `medium` page (2 % of
-the 28-day budget in an hour, 5 % in six hours; for checkout that is about 9 failed minutes in an hour);
-`slow` is a ticket (10 % in a day). `prober no data`: see [cuj-browse.md](cuj-browse.md#cuj-browse-prober-no-data).
+`prober` = the end-to-end probe from the in-cluster ingress gateway; `mesh` = sidecar metrics of the journey's critical
+backend services. `availability` = orders fail; `latency` = slower than 1,000 ms. `fast` and `medium` on the prober page
+(2 % of the 28-day budget in an hour, about 9 failed probes; 5 % in six hours; latency has lower thresholds of its own);
+every mesh alert and the prober's `slow` tier (10 % in a day) are tickets. `CUJ prober: no data` and `CUJ mesh: no data`
+cover every journey: see [cuj-browse.md](cuj-browse.md#no-data-alerts).
 
 ## Impact
 
@@ -23,13 +25,17 @@ page-tier alert below that is SEV2; a slow-tier ticket alone is SEV3.
 ## First five minutes
 
 1. **Acknowledge** in PagerDuty, duplicates too. Don't resolve there.
-2. **Game day?** `gameday status` and `#incidents`.
+2. **Game day?** `make gameday-status` (from the repo root) and `#incidents`.
 3. **Declare** in `#incidents` with a first severity
    ([../incidents/communication.md](../incidents/communication.md)).
-4. **Size it** with queries 1 and 2. Checkout alone points at `checkoutservice`, `paymentservice` or a recent change
-   to them; checkout plus other journeys points at what they share (cart, currency, catalog, shipping).
-5. **What changed?** Argo CD history, recent merges to `deploy/`, a lost node, an active fault rule. A bad config or
-   image for `checkoutservice` shows up here first.
+4. **Size it** with queries 1 and 2. The prober runs checkout as `home`, `add-to-cart`, `view-cart`, then
+   `place-order`: a failure at an earlier step belongs to that journey's runbook; a failure at `place-order` is
+   checkout's own. Checkout alone points at `checkoutservice`, `paymentservice` or a change to them; checkout plus
+   other journeys points at what they share (cart, currency, catalog, shipping).
+5. **What changed?** Argo CD history, recent merges to `deploy/`, a lost node, an active fault rule. Also mesh
+   config made outside Git, which Argo CD doesn't show: `kubectl -n boutique get
+   sidecars,virtualservices,authorizationpolicies`. An Istio Sidecar, VirtualService or AuthorizationPolicy can cut
+   `checkoutservice` off from a dependency while every pod stays `Ready`.
 
 ## Likely causes
 
@@ -70,27 +76,32 @@ pq 'sum by (destination_service_name, grpc_response_status)
 
 ```bash
 kubectl -n boutique get pods -o wide -l 'app in (checkoutservice,paymentservice,shippingservice,emailservice)'
+kubectl -n boutique get sidecars,virtualservices,authorizationpolicies --show-labels   # mesh config, in Git or not
 kubectl -n boutique logs deploy/checkoutservice --since=15m | grep -iE 'error|fail' | tail -20
 kubectl -n boutique rollout history deploy/checkoutservice
 kubectl -n boutique get deploy checkoutservice -o jsonpath='{.spec.template.spec.containers[0].env}'; echo
 kubectl -n argocd get applications
 ```
 
-Compare the environment with Git (`deploy/online-boutique/` and the pinned upstream manifests): a changed service
-address or setting is the classic bad config. More checks (nodes, fault rules, Argo CD history, Logs Explorer):
-[cuj-browse.md](cuj-browse.md#queries).
+Query 5 names the failing call. `paymentservice` answering `UNAVAILABLE` while the payment pods get no traffic
+points at mesh config on checkout's side, not at payment. Any Sidecar, VirtualService or AuthorizationPolicy in
+`boutique` that isn't in `deploy/` is drift; one labelled `mamori.dev/fault=true` is a game-day fault. A changed
+service address in the Deployment's environment (compare with Git) is the other classic bad config. More checks
+(nodes, fault rules, Argo CD history, Logs Explorer): [cuj-browse.md](cuj-browse.md#queries).
 
 ## Mitigations
 
 One at a time; wait for query 1 to move before the next.
 
-1. **Remove an active fault** once it is the known cause: `gameday stop --all`.
-2. **Roll back a recent change through Git** (`git revert`, pull request, merge); Argo CD syncs it. Never
-   `kubectl rollout undo` while Argo CD self-heals: it puts the bad version straight back. If the bad config was
-   applied outside Git, Argo CD may already be reverting it: check `kubectl -n argocd get application
-   online-boutique` before acting. Break-glass steps in [cuj-browse.md](cuj-browse.md#mitigations).
-3. **Restart a stuck service:** `kubectl -n boutique rollout restart deploy/<service>`.
-4. **From M5:** the agent's proposal (often a rollback), approved only if its evidence matches.
+1. **Remove an active fault** once it is the known cause: `make gameday-stop-all`.
+2. **Remove other mesh config made outside Git** once it is the known cause: save it for the postmortem
+   (`kubectl -n boutique get <kind>/<name> -o yaml`), then `kubectl -n boutique delete <kind>/<name>`.
+3. **Roll back a recent Git change** (`git revert`, pull request, merge); Argo CD syncs it. Never
+   `kubectl rollout undo` while Argo CD self-heals: it puts the bad version straight back. Break-glass steps in
+   [cuj-browse.md](cuj-browse.md#mitigations).
+4. **Restart a stuck service:** `kubectl -n boutique rollout restart deploy/<service>`.
+5. **From M5:** the agent's proposal, approved only if its evidence matches. The executor refuses rollbacks: if the
+   agent suggests one, a person does it as a Git revert.
 
 ## Escalation
 

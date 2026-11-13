@@ -11,9 +11,9 @@ agent proposes one; the human decides. The postmortem reviews it.
 
 | Level | Shopper impact (any one is enough) | Error-budget signal | Response |
 |---|---|---|---|
-| **SEV1** | A journey is **hard down**: about half or more of its requests or probes fail for 5 minutes or more. Or every journey is down at once (cluster, zone, load balancer, spend guard) | Burn rate around 100× or more (99.5 % target) or 50× (checkout, 99.0 %): the whole 28-day budget would be gone in under 14 hours | Page. Declare at once. Drop everything else. Updates every 15 minutes. Postmortem required |
-| **SEV2** | A journey is **degraded**: a visible share of shoppers fail or wait too long, but fewer than half fail | A page-tier burn-rate alert fired: 2 % of the 28-day budget in an hour (fast tier) or 5 % in six hours (medium tier) | Page. Declare. Updates every 30 minutes. Postmortem required |
-| **SEV3** | **Small or slow damage**: only a ticket-tier (slow-burn) alert; or a non-critical part of a page is missing (ads, recommendations) while the journey still succeeds; or the SLO data is missing (prober no data) and nothing else shows impact | Slow tier: 10 % of the budget in a day. Or unknown, because monitoring is blind | Ticket (email). Handle in waking hours, the same or next day. Declare only if it gets worse |
+| **SEV1** | A journey is **hard down**: about half or more of its requests or probes fail for 5 minutes or more. Or every journey is down at once (cluster, zone, load balancer, spend guard) | Prober availability burning about 100× or more (50× for checkout): half or more of the probes fail, and the whole 28-day budget would be gone in under 14 hours | Page. Declare at once. Drop everything else. Updates every 15 minutes. Postmortem required |
+| **SEV2** | A journey is **degraded**: a visible share of shoppers fail or wait too long, but fewer than half fail | A fast- or medium-tier burn on availability (2 % of the 28-day budget in an hour, or 5 % in six hours) or latency. The prober pages for it; the same burn on the mesh signal arrives as a ticket and counts the same | Page. Declare. Updates every 30 minutes. Postmortem required |
+| **SEV3** | **Small or slow damage**: only slow-tier burn; or a non-critical part of a page is missing (ads, recommendations) while the journey still succeeds; or SLO data is missing (`CUJ prober: no data` or `CUJ mesh: no data`) and the other signal shows no impact | Slow tier: 10 % of the budget in a day. Or unknown, because monitoring is blind | Ticket (email). Handle in waking hours, the same or next day. Declare only if it gets worse |
 | **SEV4** | **No shopper impact now**: lost redundancy (one Spot node gone while every SLO holds), a near miss, a gap found in an alert or runbook | No measurable burn | A GitHub issue. No declaration |
 
 **Why any journey hard down is SEV1.** Every journey in this shop sits on the way to an order: browsing finds the
@@ -21,25 +21,46 @@ product, add-to-cart fills the cart, and the cart page holds the checkout form. 
 orders, so there is no "less important" journey at SEV1. Checkout's lower availability target reflects how many
 services it calls (see [../prd.md](../prd.md)), not lower importance.
 
-**A page is not automatically SEV2.** The alert tier says how urgent it is to look; severity says what was found.
-The "prober no data" alert pages, but if the mesh SLIs show every journey working, the incident is SEV3: the lab is
-blind, not broken.
+**A page is not automatically SEV2, and a ticket is not automatically SEV3.** The alert tier says how urgent it is
+to look; severity says what was found. Only the prober pages, so a mesh ticket showing a fast burn is still SEV2
+once confirmed. `CUJ prober: no data` pages: if the mesh SLIs show every journey working, it is SEV3 (the lab is
+blind, not broken); if `CUJ mesh: no data` has fired too, the whole cluster may be down: treat it as SEV1 until
+`kubectl get nodes` and the shop show otherwise.
 
 ### The burn rates behind the levels
 
-Burn rate is how fast the error budget is being spent: 1× spends exactly the 28-day budget in 28 days. Error ratio =
-burn rate × (1 − target). The tiers are the generated alerts from #18 (Google's multiwindow, multi-burn-rate
-alerts, recomputed for a 28-day window); [../alerting.md](../alerting.md) has the full inventory.
+Burn rate is how fast the error budget is being spent: 1× spends exactly the 28-day budget in 28 days. For the
+request-based prober SLOs, error ratio = burn rate × (1 − target). The mesh SLOs are windows-based: a minute below
+target counts as fully bad, however many requests failed in it, so their burn rate is a share of bad minutes, not an
+error ratio ([Cloud Monitoring SLO concepts](https://docs.cloud.google.com/stackdriver/docs/solutions/slo-monitoring)).
+That is why SEV1 is read from the prober. The tiers are the generated alerts from #18 (Google's multiwindow,
+multi-burn-rate alerts, recomputed for a 28-day window); only the prober's fast and medium tiers page, everything
+else is a ticket. [../alerting.md](../alerting.md) has the full inventory.
 
-| Tier (alert) | Burn rate, both windows | Error ratio at 99.5 % | Error ratio at 99.0 % (checkout) | Budget spent |
+Availability:
+
+| Tier (alert) | Burn rate, both windows | Error ratio at 99.5 %¹ | Error ratio at 99.0 % (checkout)¹ | Budget spent |
 |---|---|---|---|---|
-| SEV1 (no alert of its own) | about 100× (50× for checkout) | ≥ 50 % | ≥ 50 % | whole budget in under 14 hours |
-| Fast (page) | > 13.44× over 1 h and 5 min | > 6.72 % | > 13.44 % | 2 % in 1 hour |
-| Medium (page) | > 5.6× over 6 h and 30 min | > 2.8 % | > 5.6 % | 5 % in 6 hours |
+| SEV1 (no alert of its own) | about 100× (50× for checkout), prober availability | ≥ 50 % | ≥ 50 % | whole budget in under 14 hours |
+| Fast (prober: page) | > 13.44× over 1 h and 5 min | > 6.72 % | > 13.44 % | 2 % in 1 hour |
+| Medium (prober: page) | > 5.6× over 6 h and 30 min | > 2.8 % | > 5.6 % | 5 % in 6 hours |
 | Slow (ticket) | > 2.8× over 24 h and 2 h | > 1.4 % | > 2.8 % | 10 % in 24 hours |
 
-My math. Latency SLOs have a 95 % target, so their budget is 5 % of requests; the most a latency SLO can burn is 20×
-(every request slow), and its fast tier needs more than two thirds of requests to be slow.
+¹ Error ratios apply to the request-based prober SLOs. For the mesh SLOs, read the column as the share of bad
+minutes. A partial outage therefore shows sooner on the mesh signal: if one checkout in four fails, every minute is
+below 99 %, so the mesh fast tier opens a ticket after about 9 minutes, while the prober's 25 % error ratio needs
+about 32 minutes to push the hour's average above 13.44 % and page.
+
+Latency has its own tiers. Its 95 % target makes the budget 5 % of requests (or minutes) and caps the burn rate at
+20× (everything slow):
+
+| Tier (alert) | Burn rate, both windows | Share slow | Total slowdown fires after |
+|---|---|---|---|
+| Fast (prober: page) | > 6.72× over 1 h and 5 min | about 34 % of the hour | about 21 minutes |
+| Medium (prober: page) | > 2.8× over 6 h and 30 min | 14 % of six hours | about 51 minutes |
+| Slow (ticket) | > 1.4× over 24 h and 2 h | 7 % of a day | about 101 minutes |
+
+My math throughout.
 
 ## Rules
 
@@ -77,8 +98,8 @@ Anything else may get a short postmortem when there is something to learn. Templ
 | What happens | Expected severity | Why |
 |---|---|---|
 | Most product pages return errors for 10 minutes | SEV1 | Browse hard down |
-| One checkout in four fails, for an hour | SEV2 | Checkout's fast tier (> 13.44 % at 99 %) pages after about half an hour; most orders still succeed |
-| The cart page takes 2 s instead of 300 ms for nearly every request | SEV2 | View-cart latency fast tier pages |
+| One checkout in four fails, for an hour | SEV2 | Checkout's mesh fast tier opens a ticket after about 9 minutes (every minute is below target); the prober's fast tier pages after about 32; most orders still succeed |
+| The cart page takes 2 s instead of 300 ms for nearly every request | SEV2 | View-cart's prober latency fast tier pages after about 21 minutes |
 | Recommendations are missing from product pages, pages load fine | SEV3 | Non-critical part missing; browse still succeeds |
 | The prober stops reporting; mesh SLIs are normal | SEV3 | Blind, not broken |
 | One Spot node is preempted; pods move; no journey burns | SEV4 | Lost redundancy, no impact |

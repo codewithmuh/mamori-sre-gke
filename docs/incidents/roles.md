@@ -67,16 +67,18 @@ person holds all four. What keeps that workable:
 ## The AI incident agent: an advisor, never the commander
 
 From M5 (#24, #25). Every alert also reaches the agent through Pub/Sub. It investigates with read-only tools and
-posts in the incident's Slack thread: the journeys hit, an impact summary, a proposed severity, ranked root-cause
-hypotheses with evidence, and at most one proposed action, which the executor turns into an approval request.
+posts a summary to Slack as a new message in its configured channel, not in the incident thread: the journeys hit,
+an impact summary, a proposed severity, ranked root-cause hypotheses with evidence, and at most one proposed action.
+The executor turns that action into an approval request, posted as its own message in its configured channel. Paste
+both links into the incident thread, so the record stays in one place.
 
 | The agent may | The agent never |
 |---|---|
 | Investigate with read-only access (metrics, logs, traces, Kubernetes, Argo CD, Istio config, past postmortems) | Holds write credentials (decision D9: privilege separation) |
 | Propose a severity | Sets the severity, declares or resolves an incident |
 | Rank hypotheses and show its evidence | Decides what is true; the IC checks the evidence |
-| Propose one allow-listed action (restart, scale, rollback, remove a fault) | Runs it: the executor runs it only after a human approves, once per incident |
-| Write a timestamped investigation record | Approves its own proposal, or acts outside the incident thread |
+| Propose one allow-listed action (restart, scale within bounds, remove a fault). The executor refuses rollbacks: a rollback is a Git revert a person makes | Runs it: the executor runs it only after a human approves, once per incident |
+| Write a timestamped investigation record | Approves its own proposal |
 
 How the commander uses it:
 

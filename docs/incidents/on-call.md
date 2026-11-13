@@ -24,13 +24,15 @@ escalation policy and the notification channels are built in Terraform is in [..
 
 | Signal | Goes to | Phone? |
 |---|---|---|
-| Page-tier burn-rate alerts (fast and medium tiers), "prober no data" | PagerDuty service `mamori-shop`, email, Pub/Sub `incident-alerts` | Yes, if not acknowledged in time (below) |
-| Ticket-tier burn-rate alerts (slow tier) | Email, Pub/Sub `incident-alerts` | Never |
+| Prober burn-rate alerts, fast and medium tiers (availability and latency); `CUJ prober: no data` | PagerDuty service `mamori-shop`, email, Pub/Sub `incident-alerts` | Yes, if not acknowledged in time (below) |
+| Prober slow tier; every mesh alert; `CUJ mesh: no data` | Email, Pub/Sub `incident-alerts` | Never |
 | Budget notifications (50/90/100 %), spend guard | Email from Cloud Billing ([../runbooks/spend-guard.md](../runbooks/spend-guard.md)) | Never |
-| Datadog monitors during the 14-day window (M3) | Not PagerDuty: one pager per symptom (see [../alerting.md](../alerting.md)) | Never |
+| Datadog synthetics during the 14-day window (M3) | Tickets only, never PagerDuty: one pager per symptom (see [../alerting.md](../alerting.md)) | Never |
 | Anything about a cause rather than a symptom (CPU, restarts, one pod down) | Dashboards only | Never |
 
-The full inventory and the design rules are in [../alerting.md](../alerting.md).
+The full inventory and the design rules are in [../alerting.md](../alerting.md). **Nothing pages before
+`slo_enabled` is true**: the SLOs and alert policies are created only once it is set, after the first `make up`
+and about 10 minutes of prober data. Until then the lab is unwatched.
 
 ## How a page reaches the phone
 
@@ -62,11 +64,12 @@ carry on, and check it in the first month.
 - **Game days cost zero calls.** The responder is at the desk and acknowledges at once.
 - **Long incidents re-page.** An acknowledged PagerDuty incident triggers again after 30 minutes if the alert is
   still open. Acknowledge again within 5 minutes, or each re-trigger can cost a call.
-- **Worst case (my math).** One outage can open several PagerDuty incidents, one per Cloud Monitoring alert policy
-  (about 6 at once for an outage on three journeys, up to 12 once the medium tier fires too, see
-  [../alerting.md](../alerting.md)). Each one left unacknowledged calls at 5 minutes in each of its 3 rounds: up to
-  3 calls each, so 36 calls, over a third of the month's allowance, from one unanswered night. Acknowledge
-  everything at once ("acknowledge all" in the app), and treat duplicate pages as an alert-tuning finding.
+- **Worst case (my math).** One outage can open several PagerDuty incidents, one per paging policy: the prober's
+  fast tier for each journey it hurts, then the medium tier if it lasts about 11 minutes. An outage on all four
+  journeys opens 4, up to 8 (see [../alerting.md](../alerting.md)). Each one left unacknowledged calls at 5 minutes
+  in each of its 3 rounds: up to 3 calls each, so 24 calls, about a quarter of the month's allowance, from one
+  unanswered night. Acknowledge everything at once ("acknowledge all" in the app), and treat duplicate pages as an
+  alert-tuning finding.
 
 **Thresholds** (counted from the PagerDuty notification log, recorded weekly in [alert-log.md](alert-log.md)):
 
@@ -74,7 +77,7 @@ carry on, and check it in the first month.
 |---|---|
 | 50 | Alert-tuning review before the next game day; no new paging alert without a measured trigger rate |
 | 80 | Personal rule switches to push only for the rest of the month; post it in `#incidents`; accept slower night response |
-| 100 | Push and email only until the 1st; note it in the alert log as an alert-fatigue finding (R5) |
+| 100 | Push and email only until the 1st; note it in the alert log as an alert-fatigue finding (goal G5) |
 
 The monthly count against 100 is one of the PRD's success measures.
 
@@ -87,7 +90,7 @@ here the next person is you, tired or eight hours later.
 
 **Before going away (checklist):**
 
-- [ ] No fault is active: `gameday status` shows nothing, and nothing in `boutique` carries the label
+- [ ] No fault is active: `make gameday-status` shows nothing, and nothing in `boutique` carries the label
   `mamori.dev/fault=true`:
 
   ```bash
@@ -97,7 +100,8 @@ here the next person is you, tired or eight hours later.
 
 - [ ] No change half done: every Argo CD application is `Synced` and `Healthy`
   (`kubectl get applications -n argocd`); nothing merged in the last hour that you haven't watched land.
-- [ ] No forgotten snooze on an alert policy in Cloud Monitoring.
+- [ ] No forgotten snooze on an alert policy in Cloud Monitoring (`make slo-snooze` snoozes every generated policy
+  for 60 minutes by default; it should only ever cover planned downtime).
 - [ ] From M5: the executor's kill switch (ConfigMap `executor-config`, key `enabled` in `mamori-agent`) is in the
   state you intend.
 - [ ] Open incidents and tickets: state and next step written down.
@@ -122,8 +126,10 @@ second person, so escalation means escalating the response:
    30 minutes (SEV1) or 60 minutes (SEV2), stop looking for the cause and use the runbook's generic mitigations:
    remove any active fault, roll back every change from the last 24 hours (through Git, so Argo CD doesn't undo it),
    restart the failing service.
-4. **Rebuild as the last resort.** If the cluster itself is broken, `make down` and `make up` rebuild the lab from
-   nothing. Carts are lost (they are synthetic); the SLO history stays in Cloud Monitoring.
+4. **Rebuild as the last resort.** If the cluster itself is broken, `make slo-snooze`, then `make down` and
+   `make up` rebuild the lab from nothing. Carts are lost (they are synthetic); the SLO history stays in Cloud
+   Monitoring. Alerts are back only once `slo_enabled` is applied again
+   ([../alerting.md](../alerting.md#alert-inventory)).
 5. **Look outside** when the cause may not be ours: [Google Cloud Service Health](https://status.cloud.google.com/)
    for zone, GKE or load-balancer problems; the GKE release notes; the issue trackers of Online Boutique, Istio,
    Argo CD and Chaos Mesh. Google Cloud's free Basic Support covers billing, not technical cases

@@ -1,18 +1,20 @@
 # Runbook: CUJ view-cart alert
 
 Status: draft, M3 (#20), 2026-11-13. Not yet used on a real alert; queries checked against the names in the build
-contract, not against live data.
+contract, not against live data. The alerts exist only once `slo_enabled` is true
+([../alerting.md](../alerting.md#alert-inventory)); until then nothing fires.
 
-**Alerts:** `CUJ view-cart: <prober|mesh> <availability|latency> <fast|medium|slow> burn` and `CUJ view-cart: prober
-no data` (inventory: [../alerting.md](../alerting.md)). **Journey:** the shopper opens the cart page (`GET /cart`),
-with shipping cost and recommendations. The cart page also holds the checkout form.
+**Alerts:** `CUJ view-cart: <prober|mesh> <availability|latency> <fast|medium|slow> burn`, and the shared `CUJ prober:
+no data` and `CUJ mesh: no data` (inventory: [../alerting.md](../alerting.md)). **Journey:** the shopper opens the
+cart page (`GET /cart`), with shipping cost and recommendations. The cart page also holds the checkout form.
 
 ## What fired
 
-`prober` = the end-to-end probe from the in-cluster ingress gateway; `mesh` = sidecar metrics of the journey's
-critical services. `availability` = requests fail; `latency` = slower than 500 ms. `fast` and `medium` page (2 % of
-the 28-day budget in an hour, 5 % in six hours); `slow` is a ticket (10 % in a day). `prober no data`: see
-[cuj-browse.md](cuj-browse.md#cuj-browse-prober-no-data).
+`prober` = the end-to-end probe from the in-cluster ingress gateway; `mesh` = sidecar metrics of the journey's critical
+backend services. `availability` = requests fail; `latency` = slower than 500 ms. `fast` and `medium` on the prober page
+(2 % of the 28-day budget in an hour, 5 % in six hours; latency has lower thresholds of its own); every mesh alert and
+the prober's `slow` tier (10 % in a day) are tickets. `CUJ prober: no data` and `CUJ mesh: no data` cover every journey:
+see [cuj-browse.md](cuj-browse.md#no-data-alerts).
 
 ## Impact
 
@@ -23,11 +25,13 @@ page-tier alert below that is SEV2; a slow-tier ticket alone is SEV3.
 ## First five minutes
 
 1. **Acknowledge** in PagerDuty, duplicates too. Don't resolve there.
-2. **Game day?** `gameday status` and `#incidents`.
+2. **Game day?** `make gameday-status` (from the repo root) and `#incidents`.
 3. **Declare** in `#incidents` with a first severity
    ([../incidents/communication.md](../incidents/communication.md)).
-4. **Size it** with queries 1 and 2. Browse failing too points at currency, the catalog or the cart; checkout
-   failing too points at shipping, currency or the cart; view-cart alone points at `shippingservice`.
+4. **Size it** with queries 1 and 2. The prober runs view-cart as `home`, `add-to-cart`, then `view-cart`: a
+   failure at an earlier step belongs to that journey's runbook. Browse failing too points at currency, the catalog
+   or the cart; checkout failing too points at shipping, currency or the cart; view-cart alone points at
+   `shippingservice`.
 5. **What changed?** Argo CD history, recent merges to `deploy/`, a lost node, an active fault rule.
 
 ## Likely causes
@@ -74,7 +78,7 @@ More checks (nodes, fault rules, Argo CD history, Logs Explorer): [cuj-browse.md
 
 One at a time; wait for query 1 to move before the next.
 
-1. **Remove an active fault** once it is the known cause: `gameday stop --all`.
+1. **Remove an active fault** once it is the known cause: `make gameday-stop-all`.
 2. **Roll back a recent change through Git** (`git revert`, pull request, merge). Never `kubectl rollout undo`
    while Argo CD self-heals; break-glass steps in [cuj-browse.md](cuj-browse.md#mitigations).
 3. **Restart a stuck service:** `kubectl -n boutique rollout restart deploy/<service>`. After a `redis-cart`
