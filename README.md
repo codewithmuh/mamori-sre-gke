@@ -1,131 +1,105 @@
-# Production Repo Template
+# mamori-sre-gke
 
-<p align="center">
-  <a href="https://github.com/codewithmuh/production-repo-template/releases"><img src="https://img.shields.io/github/v/release/codewithmuh/production-repo-template?color=blue&label=version&style=flat-square" alt="GitHub Release"></a>
-  <a href="https://github.com/codewithmuh/production-repo-template/actions/workflows/ci.yml"><img src="https://github.com/codewithmuh/production-repo-template/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/codewithmuh/production-repo-template/actions/workflows/release.yml"><img src="https://github.com/codewithmuh/production-repo-template/actions/workflows/release.yml/badge.svg" alt="Release"></a>
-  <a href="https://github.com/codewithmuh/production-repo-template/stargazers"><img src="https://img.shields.io/github/stars/codewithmuh/production-repo-template?style=flat-square" alt="Stars"></a>
-  <a href="https://github.com/codewithmuh/production-repo-template/network/members"><img src="https://img.shields.io/github/forks/codewithmuh/production-repo-template?style=flat-square" alt="Forks"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat-square" alt="License: MIT"></a>
-  <br>
-  <img src="https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/Go-1.22%2B-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go">
-  <img src="https://img.shields.io/badge/Docker-Ready-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker">
-  <img src="https://img.shields.io/badge/Security-Trivy%20%7C%20Gitleaks-critical?style=flat-square" alt="Security">
-</p>
+This repo runs [Online Boutique](https://github.com/GoogleCloudPlatform/microservices-demo), Google's open-source demo
+shop (11 services in its own count, talking gRPC), on a GKE cluster in Tokyo. The shop is the given workload: it was
+written by others and is not the work here. The work is the SRE layer around it: Terraform and keyless CI, GitOps,
+SLOs built around user journeys, alerts that page a phone, game days with postmortems, and an AI incident agent that
+can only act through guardrails and a human approval.
 
-A GitHub template that makes every new repository **production-grade from the first commit**: CI on every pull
-request, secret and vulnerability scanning, signed container images with SBOMs, automated releases and changelog,
-docs and runbooks, and a one-command local setup. It ships with two small sample services — one in **Python
-(FastAPI)** and one in **Go** — so every pipeline runs against real code.
+*Mamori* (守り) means protection: keeping something safe.
 
-> Start a new project: click **Use this template** on GitHub, then follow [After creating a repo](#after-creating-a-repo-from-this-template).
+## Status
 
----
+**M0 (plan and repo) in progress.** Nothing is deployed yet: there is no cluster, no SLO data and no incident so far.
+Work is tracked in the [milestones](https://github.com/codewithmuh/mamori-sre-gke/milestones) and
+[issues](https://github.com/codewithmuh/mamori-sre-gke/issues); [PLAN.md](PLAN.md) section 5 has the dates.
 
-## What you get
+## What the project will show
 
-| Area | What is set up | Where |
-|---|---|---|
-| Code quality | ruff (lint + format), mypy strict, golangci-lint v2, pre-commit hooks | `pyproject.toml`, `.golangci.yml`, `.pre-commit-config.yaml` |
-| Tests | pytest and Go tests with the race detector; **80 % coverage gate**; container smoke test | `tests/`, `*_test.go`, `ci.yml` |
-| CI | Lint → test → build → scan → smoke test on every PR; workflows linted with actionlint | `.github/workflows/ci.yml` |
-| Security | gitleaks, Trivy (repo + images), Actions pinned to SHAs, least-privilege tokens, non-root read-only containers | `ci.yml`, `Dockerfile`s, `SECURITY.md` |
-| Supply chain | Images signed with cosign (keyless), SBOM (SPDX) on every release, build provenance | `release.yml` |
-| Releases | Conventional Commits → release-please PR → tag, changelog, GHCR images | `release.yml`, `CHANGELOG.md` |
-| Dependencies | Weekly grouped Dependabot PRs for Actions, uv, Go modules and base images | `.github/dependabot.yml` |
-| Observability | JSON logs with request IDs, Prometheus metrics, liveness/readiness probes | `services/*` |
-| Reliability | Graceful shutdown on SIGTERM, server timeouts, health checks in images | `services/*`, `compose.yaml` |
-| Docs | Architecture, threat model, ADRs, runbooks, contributing, security policy, issue/PR templates | `docs/`, `.github/` |
-| Developer experience | `make` targets, Dev Container, Docker Compose, `.env.example` | `Makefile`, `.devcontainer/` |
+Each item is planned, not done. The project counts as done only when it has run for weeks and its numbers are
+measured.
 
-## Quick start
+- **Build and tear down from nothing:** `make up` creates the network, cluster, edge and apps; `make down` removes
+  them and checks that nothing billable is left. All infrastructure is Terraform; CI has no keys.
+- **SLOs for user journeys, not services:** fault injection finds which services each journey depends on; SLOs and
+  burn-rate alerts are generated from that map.
+- **Incident response:** paging to a phone, severity levels and roles, 5–6 game days, a blameless postmortem for
+  each.
+- **An AI incident agent with guardrails:** it reads telemetry and proposes a fix; a separate executor with narrow
+  permissions runs only allow-listed actions after a human approves. Evaluated on 20–30 injected incidents.
+- **Resilience, capacity and governance:** before/after numbers for timeouts, retries and load shedding; the highest
+  load that still meets the SLOs; readiness rules as admission policies.
 
-Requirements: [uv](https://docs.astral.sh/uv/), [Go 1.27](https://go.dev/dl/),
-[golangci-lint](https://golangci-lint.run/), [pre-commit](https://pre-commit.com/), Docker — or just open the
-**Dev Container**.
+## Architecture sketch
 
-```bash
-make setup    # install dependencies and git hooks
-make check    # lint, type-check and test everything (same as CI)
-make up       # run both services: python on :8000, go on :8080
+From [PLAN.md](PLAN.md) section 4; [docs/design.md](docs/design.md) has the details.
 
-curl localhost:8000/v1/hello?name=Tokyo   # {"message":"Hello, Tokyo!"}
-curl localhost:8080/metrics | head
-
-make down
 ```
-
-Run `make` with no arguments to list every command.
-
-## How changes flow
-
-```mermaid
-flowchart LR
-    dev[Branch + PR] --> ci{ci.yml<br/>lint · test · scan<br/>build · smoke test}
-    ci -- green + review --> main[(main)]
-    main --> rp[release-please<br/>opens Release PR]
-    rp -- merge --> tag[Tag + GitHub release<br/>CHANGELOG]
-    tag --> pub[Publish to GHCR<br/>sign · SBOM · provenance]
+GitHub (monorepo: infra/, deploy/, services/ fork, tools/ in Go, agent/)
+  │  PR → plan comment ─ manual apply (lab env)        images → Artifact Registry
+  ▼                                                     │
+GCP project (asia-northeast1)                           ▼
+  VPC ─ GKE Standard (zonal, Spot pool) ◀──── Argo CD (app-of-apps)
+          │
+          ├─ Istio ── Online Boutique (11 services, gRPC) + Redis
+          │           ▲ load: Locust (steady) · CUJ prober in Go (every minute)
+          │           ▲ faults: Istio aborts/delays · Chaos Mesh · Spot preemption
+          │           ▲ users: mamori.codewithmuh.com ─ load balancer + Cloud Armor rate limits
+          │
+          ├─ OTel Collector ─▶ Managed Prometheus · Cloud Trace · Cloud Logging
+          │                     └▶ Cloud Monitoring SLOs + burn-rate alerts ─┐
+          ├─ Datadog Agent (14-day window) ─▶ Datadog SLOs, monitors, synth ─┤
+          │                                                                  ▼
+          ├─ Gatekeeper (readiness policies) ─▶ weekly evidence bundle   PagerDuty ─▶ phone
+          │                                                                  │
+          └─ AI incident agent (Python) ◀── alert webhook ───────────────────┘
+               │ read-only tools: PromQL, Logging, Trace, kubectl get/describe/logs,
+               │ Argo CD history, Istio config, past postmortems
+               │ model: Claude on Vertex AI (Workload Identity)
+               ▼
+             Slack: impact summary, ranked RCA, proposed action ─▶ human approves
+               ▼
+             Executor (Go, narrow RBAC): rollback · scale within bounds · restart ·
+             remove a fault rule. One action per incident, audit-logged, kill switch.
 ```
-
-1. Open a pull request with a [Conventional Commit](https://www.conventionalcommits.org/) title.
-2. `ci.yml` must pass and a code owner approves; squash-merge into `main`.
-3. release-please keeps a Release PR open with the next version and changelog.
-4. Merging the Release PR tags the version; `release.yml` publishes signed images to GHCR and attaches SBOMs.
 
 ## Repository layout
 
-```
-.github/                 workflows, Dependabot, CODEOWNERS, issue + PR templates
-.devcontainer/           reproducible dev environment
-docs/                    architecture, threat model, ADRs, runbooks
-services/api-python/     FastAPI sample: src/, tests/, Dockerfile, pyproject.toml, uv.lock
-services/api-go/         Go sample: cmd/, internal/, Dockerfile, go.mod
-compose.yaml             local run with production-like hardening
-Makefile                 every command you need
-```
+| Path | What it holds | Arrives |
+|---|---|---|
+| `infra/` | Terraform: `bootstrap/` (state bucket, keyless CI identity) and `envs/lab/` (network, cluster, edge, budget) | M1 |
+| `deploy/` | Argo CD applications: Istio, Online Boutique, the public edge | M1 |
+| `tools/` | Go tooling: the spend guard first; the prober, SLO generator and executor later | M1 onwards |
+| `docs/` | PRD, design, threat model, decision records, runbooks, research | M0 |
+| `agent/` | The AI incident agent | M5 |
+| `services/` | Forked Online Boutique services, once one needs a code change | later |
 
-## Every service follows the same contract
+## Cost, and what the numbers mean
 
-| Endpoint / behaviour | Meaning |
+- **Cost (estimate):** about $150–190 a month while the cluster runs, from list prices on 2026-11-13
+  ([PLAN.md](PLAN.md) section 6). Measured numbers replace this in M1.
+- **Cost controls:** Spot nodes only; a budget with alerts at 50/90/100 %; at 100 % a small function scales the node
+  pool to zero; `make down` with a check for billable leftovers.
+- **It is a lab:** one zonal cluster on Spot VMs, synthetic load (a Locust load generator and a prober), and faults
+  injected on purpose. Every number this repo reports comes from that lab, not from production traffic.
+- **Demo shop:** once it is up at `mamori.codewithmuh.com`, every page carries a "demo shop, no real payments" banner
+  and checkout uses the demo's pre-filled fake card. Please don't type real card details.
+
+## Documents
+
+| Document | What it is |
 |---|---|
-| `GET /healthz` | Liveness — the process is up (never checks dependencies) |
-| `GET /readyz` | Readiness — 503 until started and while shutting down |
-| `GET /metrics` | Prometheus metrics: request count and latency by route and status |
-| Logs | JSON on stdout, one line per request, with `request_id` (taken from `X-Request-Id` or generated) |
-| `SIGTERM` | Fail readiness → finish in-flight requests (≤ 20 s) → exit |
-| Image | Non-root user, read-only filesystem, built-in `HEALTHCHECK` |
-
-## After creating a repo from this template
-
-1. Replace `codewithmuh/production-repo-template` in `README.md`, `SECURITY.md`, `.github/CODEOWNERS` and
-   `services/api-go/go.mod` with your repository.
-2. Rename, replace or delete the sample services — keep the runtime contract above.
-3. Protect `main` (Settings → Branches): require pull requests, one approval, and these status checks:
-   `Repo checks (workflows, secrets, misconfigurations)`, `Python (lint, types, tests)`, `Go (lint, tests)`,
-   and both `Image … (build, scan, smoke test)` jobs.
-4. Settings → Actions → General: allow GitHub Actions to create pull requests (needed by release-please).
-5. Settings → Code security: enable Dependabot alerts and private vulnerability reporting.
-6. Use **squash merge** only, so each PR title becomes one Conventional Commit.
-7. Fill in `docs/architecture.md` and write your first real ADR.
-
-## Production-grade checklist
-
-Use this before announcing a project built from the template.
-
-- [ ] Code quality — linters, formatters, type checks and pre-commit pass
-- [ ] Tests — unit + integration, ≥ 80 % coverage, a smoke test and a load test with published numbers
-- [ ] CI — every PR runs lint, tests, build and scans; `main` is protected
-- [ ] Security — no secrets in git, least privilege, scanned images, SBOM, signed images, threat model
-- [ ] Infrastructure as code — remote state, `make up` / `make down`, cost estimate, clean teardown
-- [ ] Releases — semantic versions, changelog, images in a registry
-- [ ] Observability — logs, metrics, traces, dashboards as code, alerts linked to runbooks
-- [ ] Reliability — probes, graceful shutdown, timeouts/retries/idempotency, tested backups, written SLOs
-- [ ] Docs — README with quick start, architecture, ADRs, runbooks, contributing, license
-- [ ] Developer experience — one-command setup, Dev Container or Compose, seed data
-- [ ] Demo — screenshots, short demo video, write-up
+| [PLAN.md](PLAN.md) | Scope, decisions D1–D13, milestones, cost, risks |
+| [docs/prd.md](docs/prd.md) | Who it serves, critical user journeys, starting SLO targets, non-goals, success measures |
+| [docs/design.md](docs/design.md) | Components, request and telemetry paths, failure domains, security, cost controls, names |
+| [docs/threat-model.md](docs/threat-model.md) | Assets, entry points, threats and mitigations |
+| [docs/adr/README.md](docs/adr/README.md) | Index of architecture decision records |
+| [docs/cost-and-tooling-research.md](docs/cost-and-tooling-research.md) | Prices, free tiers and tool facts behind the plan, with sources |
+| [docs/runbooks/README.md](docs/runbooks/README.md) | Runbook index |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How work flows: issue, branch, PR, review |
 
 ## License
 
-[MIT](LICENSE) © 2026 Muhammad Rashid ([CodeWithMuh](https://youtube.com/@codewithmuh))
+[MIT](LICENSE) © 2026 Muhammad Rashid ([CodeWithMuh](https://youtube.com/@codewithmuh)).
+Online Boutique is © Google LLC under the
+[Apache License 2.0](https://github.com/GoogleCloudPlatform/microservices-demo/blob/main/LICENSE).

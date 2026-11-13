@@ -1,39 +1,28 @@
-# Security Policy
+# Security policy
 
-## Supported Versions
+## Supported versions
 
-We provide security updates and patches for the current major release track:
+The project is pre-1.0. Only the latest commit on `main` is supported.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 1.0.x   | :white_check_mark: |
-| < 1.0   | :x:                |
+## Reporting a vulnerability
 
----
+Please don't open a public issue for a security problem, such as a leaked credential, an over-broad IAM grant, a CI
+injection path, or a way to abuse the public demo shop.
 
-## Reporting a Vulnerability
+1. Report it privately through
+   [GitHub private vulnerability reporting](https://github.com/codewithmuh/mamori-sre-gke/security/advisories/new)
+   (preferred).
+2. Or email [contact@codewithmuh.com](mailto:contact@codewithmuh.com) with the subject `[SECURITY] mamori-sre-gke`.
 
-We take the security of this architecture and its deployment scripts seriously. If you discover a security vulnerability or credential exposure risk:
+Include what you found, how to reproduce it, and the impact you expect. You'll get an acknowledgement within 48 hours
+and a status update within 5 business days. Fixes are disclosed after they ship.
 
-1. **Do NOT open a public GitHub issue.**
-2. Report the vulnerability privately via **[GitHub Private Security Advisories](https://github.com/codewithmuh/three-tier-devsecops-project/security/advisories/new)** (preferred).
-3. Alternatively, email the maintainer directly at **[contact@codewithmuh.com](mailto:contact@codewithmuh.com)** with the subject line `[SECURITY] Three-Tier DevSecOps Project`.
+## How the repo keeps secrets out
 
-### What to Include in Your Report:
-* Description of the vulnerability or risk (e.g., IAM over-privileging, pipeline injection, insecure container defaults).
-* Steps to reproduce the vulnerability or proof-of-concept configuration.
-* Potential impact and mitigation recommendations.
+- No long-lived credentials: CI reaches Google Cloud through Workload Identity Federation, and workloads use GKE
+  Workload Identity.
+- gitleaks runs in pre-commit and in CI on the full history; trivy scans for secrets and misconfigurations.
+- `.gitignore` blocks `.env` files, keys, Terraform state and plans, and `*.tfvars` (only `*.tfvars.example` is
+  committed).
 
-### Response Timeline:
-* **Initial Acknowledgment**: Within 48 hours.
-* **Assessment & Status Update**: Within 5 business days.
-* **Patch & Public Disclosure**: Coordinated release following remediation.
-
----
-
-## Zero-Secret Policy
-
-This repository strictly enforces a zero-credentials policy:
-* Automated pre-commit and PR scanning is enforced via **Gitleaks**.
-* Environment templates must only use `.env.example` placeholders.
-* Sensitive infrastructure state files (`*.tfstate`) and keys (`*.pem`, `*.key`) are blocked by `.gitignore`.
+See [docs/threat-model.md](docs/threat-model.md) for the threats this lab is designed against.

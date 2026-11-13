@@ -1,3 +1,6 @@
+# Local notes, never published
+.private/
+
 # Secrets and local config — never commit
 .env
 .env.*
@@ -6,6 +9,9 @@
 *.key
 *.tfvars
 !*.example.tfvars
+!*.tfvars.example
+*-key.json
+credentials*.json
 
 # Python
 .venv/
@@ -28,8 +34,11 @@ coverage.out
 *.tfstate
 *.tfstate.*
 *.tfplan
+.terraform.tfstate.lock.info
+crash.log
 
 # Editors / OS
 .DS_Store
 .idea/
+.vscode/
 *.swp
