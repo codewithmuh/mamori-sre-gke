@@ -1,0 +1,194 @@
+{
+ "metrics": {
+  "http_reqs": {
+   "contains": "default",
+   "type": "counter",
+   "values": {
+    "count": 569,
+    "rate": 7.094428009165573
+   }
+  },
+  "iterations": {
+   "contains": "default",
+   "type": "counter",
+   "values": {
+    "count": 316,
+    "rate": 3.939963534088438
+   }
+  },
+  "mamori_cuj_fast": {
+   "contains": "default",
+   "type": "counter",
+   "values": {
+    "count": 4007,
+    "rate": 49.960233800925224
+   }
+  },
+  "mamori_cuj_good": {
+   "contains": "default",
+   "type": "counter",
+   "values": {
+    "count": 565,
+    "rate": 7.044555053037872
+   }
+  },
+  "mamori_cuj_good{cuj:add-to-cart}": {
+   "contains": "default",
+   "thresholds": {
+    "count>=0": {
+     "ok": true
+    }
+   },
+   "type": "counter",
+   "values": {
+    "count": 155,
+    "rate": 1.9325770499484427
+   }
+  },
+  "mamori_cuj_good{cuj:browse}": {
+   "contains": "default",
+   "thresholds": {
+    "count>=0": {
+     "ok": true
+    }
+   },
+   "type": "counter",
+   "values": {
+    "count": 318,
+    "rate": 3.9649000121522886
+   }
+  },
+  "mamori_cuj_good{cuj:checkout}": {
+   "contains": "default",
+   "thresholds": {
+    "count>=0": {
+     "ok": true
+    }
+   },
+   "type": "counter",
+   "values": {
+    "count": 45,
+    "rate": 0.5610707564366446
+   }
+  },
+  "mamori_cuj_good{cuj:view-cart}": {
+   "contains": "default",
+   "thresholds": {
+    "count>=0": {
+     "ok": true
+    }
+   },
+   "type": "counter",
+   "values": {
+    "count": 47,
+    "rate": 0.5860072345004955
+   }
+  },
+  "mamori_cuj_requests": {
+   "contains": "default",
+   "type": "counter",
+   "values": {
+    "count": 569,
+    "rate": 7.094428009165573
+   }
+  },
+  "mamori_cuj_requests{cuj:add-to-cart}": {
+   "contains": "default",
+   "thresholds": {
+    "count>=0": {
+     "ok": true
+    }
+   },
+   "type": "counter",
+   "values": {
+    "count": 157,
+    "rate": 1.9575135280122935
+   }
+  },
+  "mamori_cuj_requests{cuj:browse}": {
+   "contains": "default",
+   "thresholds": {
+    "count>=0": {
+     "ok": true
+    }
+   },
+   "type": "counter",
+   "values": {
+    "count": 318,
+    "rate": 3.9649000121522886
+   }
+  },
+  "mamori_cuj_requests{cuj:checkout}": {
+   "contains": "default",
+   "thresholds": {
+    "count>=0": {
+     "ok": true
+    }
+   },
+   "type": "counter",
+   "values": {
+    "count": 47,
+    "rate": 0.5860072345004955
+   }
+  },
+  "mamori_cuj_requests{cuj:view-cart}": {
+   "contains": "default",
+   "thresholds": {
+    "count>=0": {
+     "ok": true
+    }
+   },
+   "type": "counter",
+   "values": {
+    "count": 47,
+    "rate": 0.5860072345004955
+   }
+  }
+ },
+ "options": {
+  "noColor": false,
+  "summaryTimeUnit": "",
+  "summaryTrendStats": [
+   "avg",
+   "p(50)",
+   "p(95)",
+   "p(99)",
+   "max"
+  ]
+ },
+ "setup_data": {
+  "host": "mamori.codewithmuh.com",
+  "latencyThresholdsMs": [
+   100,
+   250,
+   500,
+   750,
+   1000,
+   1500,
+   2000,
+   3000
+  ],
+  "mix": {
+   "add-to-cart": 0.2,
+   "browse": 0.5,
+   "checkout": 0.15,
+   "view-cart": 0.15
+  },
+  "rampSeconds": 10,
+  "runId": "20270112-100000",
+  "start": "2027-01-12T10:00:00.250Z",
+  "stepSeconds": 300,
+  "steps": [
+   5,
+   10,
+   20,
+   40
+  ],
+  "target": "http://istio-ingressgateway.istio-ingress.svc.cluster.local"
+ },
+ "state": {
+  "isStdErrTTY": false,
+  "isStdOutTTY": false,
+  "testRunDurationMs": 1215000.5
+ }
+}

@@ -1,0 +1,67 @@
+# Settings of `loadtest report` that stay the same from run to run. This file is built into the
+# binary as the defaults; `--config FILE` overrides any of them (fields you leave out keep these
+# values). Per-run settings (time range, steps, run id) are flags.
+
+# GKE cluster name, used in the context queries below.
+cluster: mamori
+
+# The start of every step is ignored while the shop settles at the new rate (the ramp is inside it).
+warmup: 60s
+
+# A step whose measured request rate is below this share of the plan did not really test the plan
+# (k6 ran out of VUs or CPU): it cannot pass.
+minDeliveredRatio: 0.95
+
+# A journey with fewer requests than this in a step's measured window cannot pass that step: there is
+# too little data to tell 99.5 % from 100 %.
+minRequestsPerJourney: 100
+
+# k6's CPU limit in cores (deploy/loadtest/run/job.yaml). A step where k6 used more than 80 % of it
+# gets a warning: the generator itself may have added latency.
+generatorCPULimit: 1
+
+# The report suggests this share of the capacity as the ingress gateway's local rate limit
+# (deploy/resilience/ingress-rate-limit.yaml), so the gateway sheds load just before the SLOs break.
+rateLimitShare: 0.9
+
+# What k6 exports through the k6-metrics relay (deploy/loadtest/otelcol-config.yaml).
+metrics:
+  requests: k6_mamori_cuj_requests_total
+  good: k6_mamori_cuj_good_total
+  fast: k6_mamori_cuj_fast_total
+  dropped: k6_dropped_iterations_total
+  duration: k6_http_req_duration_milliseconds
+  # Every HTTP request k6 sent, by status: 429s show the gateway's rate limit was enforced.
+  httpRequests: k6_http_reqs_total
+  journeyLabel: cuj
+  thresholdLabel: threshold_ms
+  runLabel: run
+  statusLabel: status
+
+# Context for each step, reported next to the SLIs and never used to pass or fail a step. ${range}
+# becomes the step's measured window (for example 240s) and ${cluster} the cluster name. GKE system
+# metrics (kubernetes_io:...) are free and need no setup; istio_requests_total needs the mesh
+# metrics to be scraped. Leave a query empty to skip it.
+context:
+  generatorCPU: sum(rate(kubernetes_io:container_cpu_core_usage_time{monitored_resource="k8s_container",cluster_name="${cluster}",namespace_name="loadtest"}[${range}]))
+  nodeCPU: avg(avg_over_time(kubernetes_io:node_cpu_allocatable_utilization{monitored_resource="k8s_node",cluster_name="${cluster}"}[${range}]))
+  nodes: count(max_over_time(kubernetes_io:node_cpu_allocatable_utilization{monitored_resource="k8s_node",cluster_name="${cluster}"}[${range}]))
+  frontendRPS: sum(rate(istio_requests_total{reporter="destination",destination_workload="frontend",destination_workload_namespace="boutique"}[${range}]))
+
+# What the cluster costs while it serves the load. List prices for Tokyo on 2026-11-13 from
+# docs/cost-and-tooling-research.md. Covers nodes and their disks only: the cluster fee is covered by
+# the free tier, and the load balancer, Cloud Armor, NAT and Managed Prometheus are not in this
+# test's path or do not grow with it.
+cost:
+  currency: USD
+  nodes: 3
+  machineType: e2-standard-2
+  provisioning: Spot
+  region: asia-northeast1
+  nodeHourly: 0.051584
+  diskGBPerNode: 30
+  diskGBMonthly: 0.052 # pd-standard
+  hoursPerMonth: 730
+  # Allocatable CPU per node after GKE's reservation (deploy/README.md, resource budget).
+  allocatableCPUPerNode: 1.93
+  source: docs/cost-and-tooling-research.md (list prices, 2026-11-13)

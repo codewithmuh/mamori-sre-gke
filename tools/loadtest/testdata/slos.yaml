@@ -1,0 +1,13 @@
+# Fixture in the shape of slo/slos.yaml (kind SLOSpec) with the starting targets from docs/prd.md.
+# The "notes" key is one this tool does not read: it must be ignored, not rejected.
+apiVersion: mamori/v1
+kind: SLOSpec
+window: 28d
+journeys:
+  - {id: browse, availability: {target: 0.995}, latency: {thresholdMs: 500, target: 0.95}}
+  - {id: add-to-cart, availability: {target: 0.995}, latency: {thresholdMs: 500, target: 0.95}}
+  - {id: view-cart, availability: {target: 0.995}, latency: {thresholdMs: 500, target: 0.95}}
+  - id: checkout
+    notes: starts lower; see docs/prd.md
+    availability: {target: 0.99}
+    latency: {thresholdMs: 1000, target: 0.95}

@@ -1,0 +1,32 @@
+# The capacity-test stack (#29): namespace, the metrics relay that Managed Service for Prometheus
+# scrapes, and the k6 script. Not synced by Argo CD (nothing in deploy/apps points here):
+# `make loadtest-run` applies it, starts a run from run/, and `make loadtest-clean` deletes it.
+# Method and limits: docs/capacity/README.md.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: loadtest
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: mamori
+    includeTemplates: true
+
+resources:
+  - namespace.yaml
+  - k6-serviceaccount.yaml
+  - metrics-relay.yaml
+  - podmonitoring.yaml
+
+configMapGenerator:
+  # Name hashed: a config change rolls the relay.
+  - name: k6-metrics-config
+    files:
+      - config.yaml=otelcol-config.yaml
+  # Fixed name: run/job.yaml lives in another kustomization and refers to it by name. Each run is a
+  # new Job, so it always mounts the current script.
+  - name: k6-scripts
+    files:
+      - scripts/capacity.js
+    options:
+      disableNameSuffixHash: true

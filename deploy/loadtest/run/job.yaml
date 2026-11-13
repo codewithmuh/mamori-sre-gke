@@ -1,0 +1,133 @@
+# The load generator. It shares the three nodes with the shop, so docs/capacity/README.md explains
+# how its CPU is measured, kept off the busiest pods and taken out of the cost per 1K RPS.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: k6
+  labels:
+    app.kubernetes.io/name: k6
+    app.kubernetes.io/component: load-generator
+spec:
+  # A failed run is read, not repeated: a retry would load the shop again under a new start time.
+  backoffLimit: 0
+  activeDeadlineSeconds: 14400
+  # Keep the finished pod a day so `make loadtest-run` (or a person) can read the summary in its log.
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: k6
+        app.kubernetes.io/component: load-generator
+    spec:
+      restartPolicy: Never
+      serviceAccountName: k6
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 12345
+        runAsGroup: 12345
+        seccompProfile:
+          type: RuntimeDefault
+      # Prefer a node without the ingress gateway or the frontend, the two pods every request
+      # passes, so the generator's CPU competes with them as little as possible. Soft: on three
+      # nodes there may be no such node.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                namespaces: [istio-ingress]
+                labelSelector:
+                  matchLabels:
+                    istio: ingressgateway
+            - weight: 50
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                namespaces: [boutique]
+                labelSelector:
+                  matchLabels:
+                    app: frontend
+      containers:
+        - name: k6
+          image: grafana/k6:2.3.0@sha256:2dd4756ec6e14e62778916e1eb850108e4b499304c02df56760fa0bdb0fba0b8
+          args:
+            - run
+            - --include-system-env-vars
+            - --out
+            - opentelemetry
+            - --log-format
+            - json
+            - /scripts/capacity.js
+          # A batch Job: no probes. activeDeadlineSeconds above bounds a run that hangs.
+          env:
+            # Defaults for a run started by hand; `make loadtest-run` overrides the first group.
+            - name: STEPS
+              value: "5,10,20,30,40,60,80,100"
+            - name: STEP_DURATION
+              value: 5m
+            - name: RAMP
+              value: 10s
+            - name: MIX
+              value: browse=50,add-to-cart=20,view-cart=15,checkout=15
+            - name: RUN_ID
+              value: manual
+            - name: TARGET_HOST
+              value: mamori.codewithmuh.com
+            # Must include every SLO's latency threshold (slo/slos.yaml).
+            - name: LATENCY_THRESHOLDS_MS
+              value: "100,250,500,750,1000,1500,2000,3000"
+            - name: TARGET_URL
+              value: http://istio-ingressgateway.istio-ingress.svc.cluster.local
+            - name: MAX_VUS
+              value: "100"
+            - name: REQUEST_TIMEOUT
+              value: 10s
+            # Metrics to the relay in this namespace (plain gRPC inside the cluster).
+            - name: K6_OTEL_EXPORTER_PROTOCOL
+              value: grpc
+            - name: K6_OTEL_GRPC_EXPORTER_ENDPOINT
+              value: k6-metrics.loadtest.svc.cluster.local:4317
+            - name: K6_OTEL_GRPC_EXPORTER_INSECURE
+              value: "true"
+            - name: K6_OTEL_METRIC_PREFIX
+              value: k6_
+            - name: K6_OTEL_EXPORT_INTERVAL
+              value: 5s
+            - name: K6_OTEL_SERVICE_NAME
+              value: k6
+            # No usage report to Grafana, and no downloading of k6 extensions at run time.
+            - name: K6_NO_USAGE_REPORT
+              value: "true"
+            - name: K6_AUTO_EXTENSION_RESOLUTION
+              value: "false"
+            - name: GOMEMLIMIT
+              value: 900MiB
+          # Requests are what it needs at the planned rates (estimate); the CPU limit leaves room
+          # to burst. tools/loadtest reports its measured CPU per step and warns near the limit.
+          # Memory: up to about 170 VUs start at once for the default steps, a few MiB each.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: scripts
+          configMap:
+            name: k6-scripts
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
