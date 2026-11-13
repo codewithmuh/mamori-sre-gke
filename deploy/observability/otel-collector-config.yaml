@@ -1,0 +1,100 @@
+# OpenTelemetry Collector config (contrib 0.164.0). Traces only: the shop's services send OTLP over
+# gRPC, the collector keeps a sample and exports it to Cloud Trace. Metrics come from Managed
+# Prometheus scraping Envoy (monitoring-*.yaml), and GKE ships logs; neither goes through here.
+#
+# Cost: Cloud Trace charges $0.20 per million spans after the first 2.5 million a month. The shop
+# makes about 50 spans/s under the load generator (estimate, docs/observability.md), about 130
+# million a month. Keeping everything would cost about $25 a month; the policy below keeps about
+# 1 % of normal traces plus the interesting ones, and caps the total at 10 spans/s.
+extensions:
+  # Liveness and readiness probes. Listens on the pod IP; the default (localhost) is unreachable
+  # for the kubelet.
+  health_check:
+    endpoint: ${env:MY_POD_IP}:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: ${env:MY_POD_IP}:4317
+
+processors:
+  # Refuse data before the container hits its memory limit, instead of being OOM-killed.
+  # Percentages are of the cgroup limit (256 MiB in otel-collector.yaml).
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+
+  # Decide per trace once it is complete (10 s after its first span), so the decision can look
+  # at errors and duration. One collector replica sees every span of a trace, which tail
+  # sampling needs.
+  tail_sampling:
+    decision_wait: 10s
+    num_traces: 5000
+    expected_new_traces_per_sec: 10
+    policies:
+      - name: budget
+        type: composite
+        composite:
+          # Hard ceiling: about 26 million spans a month even if every trace failed all month
+          # (about $4.70, my math). Normal days stay inside the free 2.5 million.
+          max_total_spans_per_second: 10
+          policy_order: [errors, slow, baseline]
+          composite_sub_policy:
+            # Every failed trace (span status ERROR: gRPC non-OK, HTTP 5xx). These are the
+            # traces a game day or the incident agent needs.
+            - name: errors
+              type: status_code
+              status_code:
+                status_codes: [ERROR]
+            # Slower than the checkout latency threshold (1,000 ms, docs/prd.md).
+            - name: slow
+              type: latency
+              latency:
+                threshold_ms: 1000
+            # A steady trickle of normal traffic, for comparison. Hashes the trace ID, so a
+            # trace is kept or dropped as a whole.
+            - name: baseline
+              type: probabilistic
+              probabilistic:
+                sampling_percentage: 1
+          rate_allocation:
+            - policy: errors
+              percent: 50
+            - policy: slow
+              percent: 25
+            - policy: baseline
+              percent: 25
+
+  batch:
+    send_batch_size: 256
+    timeout: 5s
+
+exporters:
+  # Project and credentials come from the GKE metadata server (Workload Identity): the
+  # Kubernetes service account observability/otel-collector holds roles/cloudtrace.agent
+  # (infra/bootstrap/observability_identity.tf). No key, no project ID in Git.
+  googlecloud: {}
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, tail_sampling, batch]
+      exporters: [googlecloud]
+  telemetry:
+    logs:
+      level: info
+      encoding: json
+    # The collector's own metrics (spans received, sent, failed, sampling decisions), scraped
+    # by Managed Prometheus through monitoring-platform.yaml.
+    metrics:
+      level: basic
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: ${env:MY_POD_IP}
+                port: 8888

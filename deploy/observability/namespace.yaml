@@ -1,0 +1,9 @@
+# The trace collector's namespace. No istio-injection label: the collector stays outside the mesh,
+# so its own traffic never shows up in the mesh metrics the SLOs are built from. Sidecars in
+# boutique reach it in plain text (Istio sends plain text to pods without a sidecar).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    app.kubernetes.io/part-of: mamori

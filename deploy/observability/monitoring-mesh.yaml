@@ -1,0 +1,86 @@
+# Managed Service for Prometheus scrapes of the mesh: every Envoy sidecar and the ingress gateway,
+# on Envoy's own stats port (15090, /stats/prometheus). These are the SLI source for the CUJ SLOs
+# (#18) and the mesh dashboard (infra/envs/lab/dashboards.tf).
+#
+# Cost: $0.06 per million samples, with no free allotment. Envoy exposes several hundred series
+# per proxy; the SLIs, dashboards and the incident agent need only Istio's request and TCP
+# metrics. metricRelabeling keeps those and drops the rest before anything is written. Estimate:
+# 40-80 million samples a month ($2.40-4.80); unfiltered it would be several hundred million
+# (docs/observability.md).
+#
+# Kept, with every standard Istio label; no label is dropped. The SLO rules (#18), runbooks (#20)
+# and the incident agent rely on reporter, source_workload, destination_service_name,
+# destination_workload(_namespace), response_code, grpc_response_status, response_flags and le:
+#   istio_requests_total                                   traffic and errors
+#   istio_request_duration_milliseconds_{bucket,sum,count}  latency (all buckets: Cloud Monitoring
+#                                                          bills only non-empty buckets, so the
+#                                                          unused ones cost nothing)
+#   istio_tcp_connections_{opened,closed}_total            cartservice -> redis-cart (plain TCP)
+#
+# Both reporters are kept. reporter="source" is the caller's view and the only one that sees
+# Istio fault injection (the caller's sidecar injects the fault, so the callee never sees the
+# request); reporter="destination" is the server's view. Comparing the two separates a slow or
+# failing server from a slow or failing network path.
+#
+# 30 s scrapes: the SLO recording rules use 2-minute rates, and detection time is measured in
+# the agent evaluation (M5). 60 s would halve the cost.
+#
+# The port is a number on purpose. Istio 1.31 runs the sidecar as a native sidecar (an init
+# container), and a numeric port is scraped whether or not a container declares it.
+apiVersion: monitoring.googleapis.com/v1
+kind: ClusterPodMonitoring
+metadata:
+  name: istio-sidecars
+  labels:
+    app.kubernetes.io/name: istio-sidecars
+    app.kubernetes.io/part-of: mamori
+spec:
+  # Istio's sidecar injection template sets this label on every injected pod; its gateway
+  # template does not, so the gateway is not scraped twice (it has its own PodMonitoring below).
+  selector:
+    matchLabels:
+      security.istio.io/tlsMode: istio
+  filterRunning: true
+  endpoints:
+    - port: 15090
+      path: /stats/prometheus
+      interval: 30s
+      timeout: 10s
+      metricRelabeling:
+        - action: keep
+          sourceLabels: [__name__]
+          regex: istio_requests_total|istio_request_duration_milliseconds_(bucket|sum|count)|istio_tcp_connections_(opened|closed)_total
+        # The services' trace export to the collector (namespace observability) is plumbing,
+        # not shop traffic.
+        - action: drop
+          sourceLabels: [destination_service_namespace]
+          regex: observability
+---
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: istio-ingressgateway
+  namespace: istio-ingress
+  labels:
+    app.kubernetes.io/name: istio-ingressgateway
+    app.kubernetes.io/part-of: mamori
+spec:
+  # Pod labels from deploy/istio/gateway-values.yaml. The gateway reports the requests it
+  # forwards to the frontend with reporter="source": the public path as the mesh sees it.
+  selector:
+    matchLabels:
+      istio: ingressgateway
+  filterRunning: true
+  endpoints:
+    - port: 15090
+      path: /stats/prometheus
+      interval: 30s
+      timeout: 10s
+      metricRelabeling:
+        - action: keep
+          sourceLabels: [__name__]
+          regex: istio_requests_total|istio_request_duration_milliseconds_(bucket|sum|count)|istio_tcp_connections_(opened|closed)_total
+        # Same rules as istio-sidecars above; keep the two in step.
+        - action: drop
+          sourceLabels: [destination_service_namespace]
+          regex: observability
