@@ -5,7 +5,7 @@
 
 ## Context
 
-Decisions made in chat or in someone's head are lost. New contributors (and interviewers) ask *why* things are the
+Decisions made in chat or in someone's head are lost. New contributors (and reviewers) ask *why* things are the
 way they are.
 
 ## Decision
