@@ -1,0 +1,23 @@
+# Wave 3: Online Boutique v0.10.7 with Istio sidecars and the load generator (deploy/online-boutique).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: online-boutique
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/codewithmuh/mamori-sre-gke.git
+    targetRevision: main
+    path: deploy/online-boutique
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: boutique
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

@@ -1,0 +1,17 @@
+# Mesh side of the public entry, part 2: route the public host from the ingress gateway to the
+# frontend Service. Fault-injection and retry rules for the public path go here later.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: frontend-public
+spec:
+  hosts:
+    - mamori.codewithmuh.com
+  gateways:
+    - frontend-public
+  http:
+    - route:
+        - destination:
+            host: frontend.boutique.svc.cluster.local
+            port:
+              number: 80

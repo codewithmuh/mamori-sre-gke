@@ -1,0 +1,26 @@
+# By default the load balancer health-checks the serving port (80) at "/". Envoy has no route for
+# the prober's Host header (the endpoint IP), so it would answer 404 and every endpoint would look
+# down. Probe the gateway's own readiness endpoint instead. HealthCheckPolicy takes a fixed port
+# number, which may differ from the serving port; probes go straight to the pod IP.
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: istio-ingressgateway
+spec:
+  default:
+    checkIntervalSec: 10
+    timeoutSec: 5
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+    logConfig:
+      enabled: false
+    config:
+      type: HTTP
+      httpHealthCheck:
+        portSpecification: USE_FIXED_PORT
+        port: 15021
+        requestPath: /healthz/ready
+  targetRef:
+    group: ""
+    kind: Service
+    name: istio-ingressgateway

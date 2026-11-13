@@ -1,0 +1,90 @@
+# Values for the Argo CD Helm chart (argo-cd 10.11.6 from https://argoproj.github.io/argo-helm,
+# Argo CD v3.5.6). `make up` installs it with:
+#   helm upgrade --install argocd argo-cd --repo https://argoproj.github.io/argo-helm \
+#     --version 10.11.6 -n argocd --create-namespace -f deploy/bootstrap/argocd-values.yaml
+# Argo CD does not manage itself; the version lives in the Makefile and in this comment.
+#
+# Small, single-replica, no SSO: one person runs this lab and reaches the UI by port-forward.
+
+configs:
+  cm:
+    # Since Argo CD 1.8 an Application has no health of its own, so sync waves in an app of apps
+    # would not wait for one child (say istiod) to be healthy before starting the next (the
+    # gateway, which needs istiod's injection webhook). This restores the health check, as the
+    # Argo CD docs describe for app-of-apps ordering.
+    resource.customizations.health.argoproj.io_Application: |
+      hs = {}
+      hs.status = "Progressing"
+      hs.message = ""
+      if obj.status ~= nil then
+        if obj.status.health ~= nil then
+          hs.status = obj.status.health.status
+          if obj.status.health.message ~= nil then
+            hs.message = obj.status.health.message
+          end
+        end
+      end
+      return hs
+
+# SSO is not needed: the local admin account and port-forward are enough for a one-person lab.
+dex:
+  enabled: false
+
+# Nothing sends Argo CD notifications yet; turn on when Slack is wired up.
+notifications:
+  enabled: false
+
+controller:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 320Mi
+    limits:
+      memory: 1Gi
+
+repoServer:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+server:
+  replicas: 1
+  # ClusterIP only: no LoadBalancer, no Ingress. Reach it with kubectl port-forward.
+  service:
+    type: ClusterIP
+  resources:
+    requests:
+      cpu: 25m
+      memory: 96Mi
+    limits:
+      memory: 256Mi
+
+applicationSet:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 10m
+      memory: 48Mi
+    limits:
+      memory: 128Mi
+
+redis:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+
+redisSecretInit:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi

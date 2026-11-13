@@ -1,0 +1,18 @@
+# Plain HTTP only redirects to HTTPS. sectionName pins this route to the HTTP listener, so it never
+# catches HTTPS traffic. It lives next to the Gateway, so the HTTP listener can stay limited to
+# this namespace.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mamori-frontend-https-redirect
+spec:
+  parentRefs:
+    - name: mamori-frontend
+      sectionName: http
+  # No hostnames: any plain-HTTP request to the IP is redirected.
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301

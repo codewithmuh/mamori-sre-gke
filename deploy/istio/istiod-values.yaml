@@ -1,0 +1,47 @@
+# Values for the istiod chart, pinned in deploy/apps/istiod.yaml.
+# Sized for the lab cluster (3 x e2-standard-2). The chart defaults (istiod 500m / 2 GiB, every sidecar
+# 100m / 128 MiB) would use most of the cluster before the shop starts.
+
+# One istiod is enough for 12 meshed pods. With one replica the chart creates no PodDisruptionBudget,
+# so node drains during GKE upgrades are not blocked; the data plane keeps working while istiod restarts.
+autoscaleEnabled: false
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+env:
+  # Istio watches Gateway API resources and, by default, creates a Deployment and a LoadBalancer
+  # Service for any Gateway of class "istio". The only public entry is the GKE Gateway in deploy/edge,
+  # so turn that off: no Istio-made load balancer, even by mistake.
+  PILOT_ENABLE_GATEWAY_API_DEPLOYMENT_CONTROLLER: "false"
+
+meshConfig:
+  # Retry policy for every route without one of its own, which here means every gRPC call between the
+  # shop's services. Istio's built-in default also retries on gRPC UNAVAILABLE and CANCELLED, which can
+  # repeat a write that already ran: checkoutservice answers UNAVAILABLE when shipping fails *after* it
+  # has charged the card, so the frontend's sidecar would place the order (and charge) up to two more
+  # times. Retry only when the request cannot have reached the service. Page reads are retried whole at
+  # the edge instead (M4, docs/resilience/).
+  defaultHttpRetryPolicy:
+    attempts: 2
+    retryOn: connect-failure,refused-stream,reset-before-request
+
+global:
+  # Cloud Logging parses JSON lines into structured fields.
+  logAsJson: true
+  proxy:
+    # Sidecar (and istio-init) size. Envoy in a mesh this small idles at a few millicores and
+    # roughly 40-60 MiB (estimate; measure in M1). The CPU limit stops a runaway proxy from starving
+    # its neighbours on a 2-vCPU node.
+    resources:
+      requests:
+        cpu: 20m
+        memory: 64Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi

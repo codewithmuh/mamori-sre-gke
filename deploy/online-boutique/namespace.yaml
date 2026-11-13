@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: boutique
+  labels:
+    # istiod's webhook adds an Envoy sidecar to every pod created here.
+    istio-injection: enabled

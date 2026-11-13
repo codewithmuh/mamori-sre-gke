@@ -1,0 +1,20 @@
+# Load-balancer settings for the backend (the Istio ingress gateway Service). GKE policies must
+# sit in the same namespace as the Service they target.
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: istio-ingressgateway
+spec:
+  default:
+    # Per-client rate limit (429) from Terraform, enforced before traffic reaches the cluster.
+    securityPolicy: mamori-frontend-armor
+    timeoutSec: 30
+    # Request logs show who hit the rate limit and feed outside-in SLO checks. Traffic is small
+    # (probes and a few visitors), so log every request.
+    logging:
+      enabled: true
+      sampleRate: 1000000
+  targetRef:
+    group: ""
+    kind: Service
+    name: istio-ingressgateway

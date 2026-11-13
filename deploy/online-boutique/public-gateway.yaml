@@ -1,0 +1,21 @@
+# Mesh side of the public entry, part 1. The GKE load balancer (deploy/edge) sends plain HTTP to
+# the Istio ingress gateway pods. This Gateway opens port 80 on those pods for one host only;
+# requests for any other host get a 404 from Envoy.
+# If the hostname changes, change it here, in public-virtualservice.yaml and in
+# deploy/edge/httproute.yaml.
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: frontend-public
+spec:
+  # Labels the gateway chart puts on its pods (deploy/istio/gateway-values.yaml), in namespace
+  # istio-ingress. Istio matches Gateway selectors across namespaces by default.
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - mamori.codewithmuh.com

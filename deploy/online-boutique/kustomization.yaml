@@ -1,0 +1,90 @@
+# Online Boutique v0.10.7 (github.com/GoogleCloudPlatform/microservices-demo, Apache-2.0), unchanged
+# except for what this file says. Remote refs are pinned to the commit the v0.10.7 tag points to,
+# so a moved tag cannot change what we deploy.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: boutique
+
+resources:
+  - namespace.yaml
+  # 11 Deployments (10 services + the Locust load generator) plus redis-cart.
+  - https://github.com/GoogleCloudPlatform/microservices-demo//kustomize/base?ref=5b608cb1dfe317d05e4f1bb8c99b7618452fde87 # v0.10.7
+  # Accept mamori.codewithmuh.com on the Istio ingress gateway and route it to the frontend.
+  - public-gateway.yaml
+  - public-virtualservice.yaml
+
+components:
+  # Adds ServiceEntries for Google APIs and the metadata server, a mesh VirtualService for the
+  # frontend, a Gateway API Gateway + HTTPRoute of class "istio", and deletes the frontend-external
+  # LoadBalancer Service.
+  - https://github.com/GoogleCloudPlatform/microservices-demo//kustomize/components/service-mesh-istio?ref=5b608cb1dfe317d05e4f1bb8c99b7618452fde87 # v0.10.7
+
+patches:
+  # The component's Gateway API Gateway (class "istio") would make istiod create its own gateway
+  # Deployment and a LoadBalancer Service. Our entry is the GKE Gateway (deploy/edge) in front of
+  # the Helm-installed ingress gateway, so drop the component's Gateway and its HTTPRoute.
+  - patch: |-
+      apiVersion: gateway.networking.k8s.io/v1beta1
+      kind: Gateway
+      metadata:
+        name: istio-gateway
+      $patch: delete
+  - patch: |-
+      apiVersion: gateway.networking.k8s.io/v1beta1
+      kind: HTTPRoute
+      metadata:
+        name: frontend-route
+      $patch: delete
+  # The component hard-codes the "default" namespace in its VirtualService host.
+  - target:
+      group: networking.istio.io
+      kind: VirtualService
+      name: frontend
+    patch: |-
+      - op: replace
+        path: /spec/hosts/0
+        value: frontend.boutique.svc.cluster.local
+  # Site-wide banner. The v0.10.7 frontend reads FRONTEND_MESSAGE (src/frontend/handlers.go) and
+  # header.html shows it at the top of every page, error pages included.
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: frontend
+      spec:
+        template:
+          spec:
+            containers:
+              - name: server
+                env:
+                  - name: FRONTEND_MESSAGE
+                    value: "Demo shop, no real payments. Do not enter real card details."
+
+images:
+  # Same tags as upstream v0.10.7, plus digests so the images cannot change under the tag.
+  - name: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/adservice
+    newTag: v0.10.7@sha256:7b26b5ea1a6472ca62b3c20c6f6ac12dd1fbcf18ba596a2c174982bcccdfc0c8
+  - name: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/cartservice
+    newTag: v0.10.7@sha256:e5310c2aa45732e351c55c88051700d958dc7ed2693e66405fc6c70cf080109e
+  - name: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/checkoutservice
+    newTag: v0.10.7@sha256:f0e72ff7b438dd2e8776fb142d5132cfa5ba02c523466f1491270c576412d33f
+  - name: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/currencyservice
+    newTag: v0.10.7@sha256:c581681bbf9abec8563e520aac3f3dbe3e7498853b6eb263193bc80c87e42f74
+  - name: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/emailservice
+    newTag: v0.10.7@sha256:1142813191b50f7e74bd1d8957d3b272496e9648b745d2c9914752b94356eade
+  - name: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/frontend
+    newTag: v0.10.7@sha256:e1cbd4561d3c9d27497dc0e8b1c12da194c4bf2ea82648f58bf38f073698f483
+  - name: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/loadgenerator
+    newTag: v0.10.7@sha256:f86f07c0da48bc00e7843e060b6811b56b1ad8a184d3962f5e80e15f42370cc8
+  - name: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/paymentservice
+    newTag: v0.10.7@sha256:e1ff27c553f7e0c31f4a10f1950ec0ee34cd41d77dd819b1fcfa139273891602
+  - name: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/productcatalogservice
+    newTag: v0.10.7@sha256:ba573405e9b03ea29970185eeaf0a9de9db7400b9104695e39d4dfc0fb651cb5
+  - name: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/recommendationservice
+    newTag: v0.10.7@sha256:69291992f5511e9199d08c24a3ceb6470b39461933304fbdad1c7ddfc7358fd9
+  - name: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/shippingservice
+    newTag: v0.10.7@sha256:3984397422ef1b45bd8a7c6736f935f4b6a41a1724ea39f9563b26733ed633e4
+  # Upstream uses the floating redis:alpine tag (8.10.3-alpine on 2026-11-13). Pin it.
+  - name: redis
+    newTag: 8.10.3-alpine@sha256:7958cfbb9d152f87dadfbc89f1b0b15938f0b81ff8982feb327476f4911935c3

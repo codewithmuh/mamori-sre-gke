@@ -1,0 +1,19 @@
+# HTTPS traffic for the shop goes to the Istio ingress gateway. sectionName pins this route to the
+# HTTPS listener, so the shop is never served over plain HTTP.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mamori-frontend
+spec:
+  parentRefs:
+    - name: mamori-frontend
+      sectionName: https
+  # If the hostname changes, change it here and in deploy/online-boutique/public-gateway.yaml and
+  # public-virtualservice.yaml.
+  hostnames:
+    - mamori.codewithmuh.com
+  rules:
+    - backendRefs:
+        # Istio ingress gateway Service (deploy/istio/gateway-values.yaml), plain HTTP on port 80.
+        - name: istio-ingressgateway
+          port: 80

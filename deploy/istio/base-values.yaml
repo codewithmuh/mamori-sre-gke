@@ -1,0 +1,4 @@
+# Values for the Istio base chart (CRDs and cluster roles), pinned in deploy/apps/istio-base.yaml.
+# We run one unnamed istiod revision; "default" makes the base chart create the validating webhook
+# that routes Istio config validation to it.
+defaultRevision: default

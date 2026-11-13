@@ -1,0 +1,13 @@
+# Public entry for mamori.codewithmuh.com. Lives in istio-ingress, next to the Istio ingress
+# gateway Service it sends traffic to, so no cross-namespace ReferenceGrant is needed.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: istio-ingress
+
+resources:
+  - gateway.yaml
+  - httproute.yaml
+  - httproute-redirect.yaml
+  - backend-policy.yaml
+  - healthcheck-policy.yaml
