@@ -1,16 +1,34 @@
+// Modified by the mamori-sre-gke project: the deployment details are built in a local map and
+// published under a lock, because requests read them while this goroutine was still writing (a
+// data race the race detector reported). See CHANGES.md.
+
 package main
 
 import (
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
 	"github.com/sirupsen/logrus"
 )
 
-var deploymentDetailsMap map[string]string
+// deploymentDetailsMap is published once by loadDeploymentDetails and never changed afterwards;
+// deploymentDetailsMu guards the handover. Read it with deploymentDetails().
+var (
+	deploymentDetailsMu  sync.RWMutex
+	deploymentDetailsMap map[string]string
+)
 var log *logrus.Logger
+
+// deploymentDetails returns the pod's hostname, cluster and zone, or nil while they are still
+// loading. The map is not modified after it is published, so callers may read it freely.
+func deploymentDetails() map[string]string {
+	deploymentDetailsMu.RLock()
+	defer deploymentDetailsMu.RUnlock()
+	return deploymentDetailsMap
+}
 
 func init() {
 	initializeLogger()
@@ -34,7 +52,7 @@ func initializeLogger() {
 }
 
 func loadDeploymentDetails() {
-	deploymentDetailsMap = make(map[string]string)
+	details := make(map[string]string)
 	var metaServerClient = metadata.NewClient(&http.Client{})
 
 	podHostname, err := os.Hostname()
@@ -52,9 +70,12 @@ func loadDeploymentDetails() {
 		log.Error("Failed to fetch the Zone of the node where the pod is scheduled", err)
 	}
 
-	deploymentDetailsMap["HOSTNAME"] = podHostname
-	deploymentDetailsMap["CLUSTERNAME"] = podCluster
-	deploymentDetailsMap["ZONE"] = podZone
+	details["HOSTNAME"] = podHostname
+	details["CLUSTERNAME"] = podCluster
+	details["ZONE"] = podZone
+	deploymentDetailsMu.Lock()
+	deploymentDetailsMap = details
+	deploymentDetailsMu.Unlock()
 
 	log.WithFields(logrus.Fields{
 		"cluster":  podCluster,

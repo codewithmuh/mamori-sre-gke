@@ -39,8 +39,9 @@ type fakeCurrency struct {
 	currencies []string
 	listErr    error
 	convertErr error
-	failFrom   int  // fail Convert call number failFrom (1-based) and every later one; 0: never
-	block      bool // Convert waits until its context ends
+	failFrom   int           // fail Convert call number failFrom (1-based) and every later one; 0: never
+	block      bool          // Convert waits until its context ends
+	delay      time.Duration // Convert takes this long, unless its context ends first
 	result     func(*pb.CurrencyConversionRequest) *pb.Money
 
 	listCalls    int
@@ -64,9 +65,16 @@ func (f *fakeCurrency) Convert(ctx context.Context, in *pb.CurrencyConversionReq
 	f.convertCalls++
 	n := f.convertCalls
 	_, f.sawDeadline = ctx.Deadline()
-	block, convertErr, failFrom, result := f.block, f.convertErr, f.failFrom, f.result
+	block, delay, convertErr, failFrom, result := f.block, f.delay, f.convertErr, f.failFrom, f.result
 	f.mu.Unlock()
 
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, status.FromContextError(ctx.Err()).Err()
+		}
+	}
 	switch {
 	case block:
 		<-ctx.Done()
@@ -108,7 +116,6 @@ func newTestView(t *testing.T, fake *fakeCurrency, timeout time.Duration, want s
 	logger, hook := logtest.NewNullLogger()
 	fe := &frontendServer{currency: fake, currencyTimeout: timeout}
 	v := fe.newCurrencyView(context.Background(), logger, want)
-	t.Cleanup(v.close)
 	return v, hook
 }
 
@@ -247,6 +254,72 @@ func TestCurrencyViewTimeoutFallsBack(t *testing.T) {
 	}
 	if _, convert := fake.calls(); convert != 1 {
 		t.Errorf("made %d Convert calls, want 1 (the budget is per page, not per call)", convert)
+	}
+}
+
+func TestCurrencyBudgetCountsOnlyTimeInCurrencyCalls(t *testing.T) {
+	// Time the page spends elsewhere (catalog, cart, recommendations) between two currency calls
+	// must not use up the currency budget.
+	fake := &fakeCurrency{currencies: []string{"EUR"}}
+	v, hook := newTestView(t, fake, 50*time.Millisecond, "EUR")
+
+	v.supported()
+	time.Sleep(150 * time.Millisecond) // three times the budget, outside any currency call
+	got := v.convert(usd(3, 0))
+	if v.fallback() || got[0].GetCurrencyCode() != "EUR" {
+		t.Errorf("fallback() = %v, price %v; want no fallback and a EUR price", v.fallback(), got[0])
+	}
+	if n := warnings(hook); n != 0 {
+		t.Errorf("logged %d warnings, want none", n)
+	}
+	if !fake.sawDeadline {
+		t.Error("currency call had no deadline although CURRENCY_TIMEOUT is set")
+	}
+}
+
+func TestCurrencyBudgetIsSharedByThePagesCalls(t *testing.T) {
+	// Each call gets what the earlier calls left: 100 ms budget, 70 ms per conversion, so the
+	// second conversion runs out of time and the page falls back.
+	fake := &fakeCurrency{currencies: []string{"EUR"}, delay: 70 * time.Millisecond}
+	v, hook := newTestView(t, fake, 100*time.Millisecond, "EUR")
+
+	in := []*pb.Money{usd(1, 0), usd(2, 0), usd(3, 0)}
+	got := v.convert(in...)
+	if !v.fallback() || got[0] != in[0] {
+		t.Errorf("fallback() = %v, first price %v; want fallback and the USD prices", v.fallback(), got[0])
+	}
+	if _, convert := fake.calls(); convert != 2 {
+		t.Errorf("made %d Convert calls, want 2", convert)
+	}
+	if n := warnings(hook); n != 1 {
+		t.Errorf("logged %d warnings, want 1", n)
+	}
+	// Spent budget: later calls on the page don't reach the service.
+	v2, _ := newTestView(t, fake, 100*time.Millisecond, "EUR")
+	v2.spent = v2.budget
+	if err := v2.call(func(context.Context) error { t.Error("call made with no budget left"); return nil }); err == nil {
+		t.Error("call with no budget left returned no error")
+	}
+}
+
+func TestEndedRequestIsNotACurrencyFailure(t *testing.T) {
+	// The client went away: the page stops converting, but the currency service is not blamed.
+	logger, hook := logtest.NewNullLogger()
+	logger.SetLevel(logrus.DebugLevel)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	fake := &fakeCurrency{currencies: []string{"EUR"}, block: true}
+	v := (&frontendServer{currency: fake}).newCurrencyView(ctx, logger, "EUR")
+
+	in := usd(3, 0)
+	if got := v.convert(in); got[0] != in || !v.fallback() {
+		t.Errorf("convert() = %v, fallback() = %v; want the USD price and true", got[0], v.fallback())
+	}
+	if n := warnings(hook); n != 0 {
+		t.Errorf("logged %d warnings for an ended request, want 0", n)
+	}
+	if e := hook.LastEntry(); e == nil || e.Level != logrus.DebugLevel {
+		t.Errorf("last log entry %v, want a debug entry", e)
 	}
 }
 

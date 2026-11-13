@@ -5,14 +5,18 @@ name: images
 #
 # - Pull requests: Go tests for services/* modules (tools/* are tested by ci.yml), docker build,
 #   Trivy scan of the image. Nothing leaves the runner.
-# - main: the same, then push to Artifact Registry as
-#   asia-northeast1-docker.pkg.dev/<project>/mamori/<name>:<git sha>, sign with cosign (keyless)
-#   and attach a signed SPDX SBOM. Skipped while the repository variable GCP_WIF_PROVIDER is unset.
-# - Releases: release.yml calls this workflow with the version (or run it by hand with one), and
-#   the images built from tag v<version> are published as :<version> too. Manifests in deploy/
-#   use version tags.
+# - main: build and scan (no tests again: the pull request ran them), then a separate, minimal
+#   job pushes the scanned image to Artifact Registry as
+#   asia-northeast1-docker.pkg.dev/<project>/mamori/<name>:<git sha>, signs it with cosign
+#   (keyless) and attaches the SBOM as a signed attestation. Skipped while the repository variable
+#   GCP_WIF_PROVIDER is unset.
+# - Releases: release.yml calls this workflow with the version (or run it by hand with one); the
+#   images are built from tag v<version>, which must be on main, and published as :<version>.
+#   Manifests in deploy/ use version tags. The registry's tags are immutable.
 #
-# How to verify a signature, and why the lab's images live only as long as the lab: docs/images.md.
+# Only the publish job can get an OIDC token (to act as ci-images and to sign). It runs no
+# repository code, tests or scanners: it loads the image the build job scanned, pushes and signs it.
+# How to verify a signature: docs/images.md.
 on:
   pull_request:
     paths:
@@ -58,8 +62,6 @@ defaults:
 env:
   # Release being published (workflow_call, workflow_dispatch); empty for pushes and pull requests.
   VERSION: ${{ inputs.version }}
-  # What to build: the release tag; empty means the commit that triggered the run (checkout's default).
-  SOURCE_REF: ${{ inputs.version && format('refs/tags/v{0}', inputs.version) || '' }}
   TRIVY_VERSION: v0.76.1 # keep in step with ci.yml
   COSIGN_VERSION: v3.1.4
   REGION: asia-northeast1
@@ -70,6 +72,8 @@ jobs:
     runs-on: ubuntu-24.04 # pinned: upgrade deliberately, not when GitHub moves "latest"
     outputs:
       images: ${{ steps.find.outputs.images }}
+      sha: ${{ steps.source.outputs.sha }}
+      publish: ${{ steps.source.outputs.publish }}
     steps:
       - name: Check the inputs
         env:
@@ -91,8 +95,24 @@ jobs:
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.SOURCE_REF }}
+          # A release builds its tag; full history, to check below that the tag is on main.
+          ref: ${{ inputs.version && format('refs/tags/v{0}', inputs.version) || '' }}
+          fetch-depth: ${{ inputs.version && '0' || '1' }}
           persist-credentials: false
+      - name: Pin the commit to build
+        id: source
+        env:
+          PUBLISH: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.GCP_WIF_PROVIDER != '' }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          # Only code that went through review on main may be published under a version: a tag
+          # can point at any commit, including one from an unmerged branch.
+          if [[ -n $VERSION ]] && ! git merge-base --is-ancestor "$sha" origin/main; then
+            echo "::error::Tag v${VERSION} (${sha}) is not on main; refusing to publish it."
+            exit 1
+          fi
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "publish=${PUBLISH}" >> "$GITHUB_OUTPUT"
       - name: List Dockerfiles
         id: find
         run: |
@@ -124,33 +144,37 @@ jobs:
           echo "images=${images}" >> "$GITHUB_OUTPUT"
           jq . <<<"$images"
 
-  check:
-    name: Check ${{ matrix.image.name }} (tests, build, scan)
+  build:
+    name: Build ${{ matrix.image.name }} (tests, build, scan)
     needs: discover
-    # Pull requests, and main while publishing is not set up yet (then this is all main gets).
-    if: >-
-      needs.discover.outputs.images != '[]'
-      && (github.event_name == 'pull_request' || vars.GCP_WIF_PROVIDER == '')
+    if: needs.discover.outputs.images != '[]'
     runs-on: ubuntu-24.04 # pinned: upgrade deliberately, not when GitHub moves "latest"
+    # No id-token here: tests, the build and the scanners run without any way to get cloud or
+    # signing credentials.
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         image: ${{ fromJSON(needs.discover.outputs.images) }}
     env:
-      LOCAL_IMAGE: local/${{ matrix.image.name }}:${{ github.sha }}
+      LOCAL_IMAGE: local/${{ matrix.image.name }}:${{ needs.discover.outputs.sha }}
       DIR: ${{ matrix.image.dir }}
+      PUBLISH: ${{ needs.discover.outputs.publish }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.SOURCE_REF }}
+          # A release builds exactly the commit discover checked; otherwise the triggering commit.
+          ref: ${{ inputs.version && needs.discover.outputs.sha || '' }}
           persist-credentials: false
+      # Tests run on pull requests; the publish path builds what the reviewed pull request tested.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        if: matrix.image.go
+        if: matrix.image.go && github.event_name == 'pull_request'
         with:
           go-version-file: ${{ matrix.image.dir }}/go.mod # uses its toolchain directive
           cache-dependency-path: ${{ matrix.image.dir }}/go.sum
       - name: Go tests (race detector)
-        if: matrix.image.go
+        if: matrix.image.go && github.event_name == 'pull_request'
         working-directory: ${{ matrix.image.dir }}
         run: go test -race -count=1 ./...
       - name: Build
@@ -167,16 +191,36 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: "1"
+      - name: Generate the SBOM (SPDX)
+        if: env.PUBLISH == 'true'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: image
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          format: spdx-json
+          output: out/sbom.spdx.json
+      - name: Save the image for the publish job
+        if: env.PUBLISH == 'true'
+        run: |
+          mkdir -p out
+          docker save -o out/image.tar "$LOCAL_IMAGE"
+          (cd out && sha256sum image.tar sbom.spdx.json > SHA256SUMS)
+      - name: Hand the image over
+        if: env.PUBLISH == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-${{ matrix.image.name }}
+          path: out/
+          retention-days: 1
+          if-no-files-found: error
 
   publish:
     name: Publish ${{ matrix.image.name }}
-    needs: discover
-    # Only from main (the only ref Google lets impersonate ci-images), once bootstrap is applied.
-    if: >-
-      needs.discover.outputs.images != '[]'
-      && github.event_name != 'pull_request'
-      && github.ref == 'refs/heads/main'
-      && vars.GCP_WIF_PROVIDER != ''
+    needs: [discover, build]
+    # Only from main (the only ref Google lets impersonate ci-images), once bootstrap is applied,
+    # and only if every image built and passed its scan.
+    if: needs.discover.outputs.images != '[]' && needs.discover.outputs.publish == 'true'
     runs-on: ubuntu-24.04 # pinned: upgrade deliberately, not when GitHub moves "latest"
     permissions:
       contents: read
@@ -186,37 +230,19 @@ jobs:
       matrix:
         image: ${{ fromJSON(needs.discover.outputs.images) }}
     env:
-      LOCAL_IMAGE: local/${{ matrix.image.name }}:${{ github.sha }}
-      DIR: ${{ matrix.image.dir }}
-      PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      LOCAL_IMAGE: local/${{ matrix.image.name }}:${{ needs.discover.outputs.sha }}
+      SHA: ${{ needs.discover.outputs.sha }}
       IMAGE: asia-northeast1-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/mamori/${{ matrix.image.name }}
+    # No checkout, no tests, no scanners: this job only moves the scanned image and signs it.
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          ref: ${{ env.SOURCE_REF }}
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        if: matrix.image.go
-        with:
-          go-version-file: ${{ matrix.image.dir }}/go.mod # uses its toolchain directive
-          cache-dependency-path: ${{ matrix.image.dir }}/go.sum
-      - name: Go tests (race detector)
-        if: matrix.image.go
-        working-directory: ${{ matrix.image.dir }}
-        run: go test -race -count=1 ./...
-      # Build and scan before any credentials exist on the runner.
-      - name: Build
-        run: docker build --pull --platform linux/amd64 --provenance=false --sbom=false -t "$LOCAL_IMAGE" "$DIR"
-      - name: Scan the image (fixable HIGH and CRITICAL stop the publish)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          version: ${{ env.TRIVY_VERSION }}
-          scan-type: image
-          image-ref: ${{ env.LOCAL_IMAGE }}
-          scanners: vuln,secret
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: "1"
+          name: image-${{ matrix.image.name }}
+          path: in
+      - name: Load the image the build job scanned
+        run: |
+          (cd in && sha256sum --check --strict SHA256SUMS)
+          docker load -i in/image.tar
       - id: auth
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
@@ -227,77 +253,55 @@ jobs:
           access_token_lifetime: 1200s # push, sign and attest take minutes
           create_credentials_file: false # nothing on disk that a later step could leak
       - name: Log in to Artifact Registry
-        id: registry
         env:
           ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
-        run: |
-          # The repository belongs to the lab root, so `make down` deletes it (with its images).
-          # A push to main while the lab is down is not an error; a release publish is.
-          status=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-            "https://artifactregistry.googleapis.com/v1/projects/${PROJECT_ID}/locations/${REGION}/repositories/mamori") || true
-          if [[ $status != 200 ]]; then
-            message="Artifact Registry repository mamori is not reachable (HTTP ${status}); is the lab down? Nothing was published."
-            if [[ -n $VERSION ]]; then
-              echo "::error::${message} Run this workflow again with version ${VERSION} after make up."
-              exit 1
-            fi
-            echo "::warning::${message}"
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          docker login --username oauth2accesstoken --password-stdin "https://${REGION}-docker.pkg.dev" <<<"$ACCESS_TOKEN"
-          echo "ready=true" >> "$GITHUB_OUTPUT"
+        run: docker login --username oauth2accesstoken --password-stdin "https://${REGION}-docker.pkg.dev" <<<"$ACCESS_TOKEN"
       - name: Push
         id: push
-        if: steps.registry.outputs.ready == 'true'
+        # The repository has immutable tags: a tag, once pushed, always names the same digest.
+        # - A release pushes only :<version>, a build of its tag. (The tagged commit may already be
+        #   on the registry as :<sha> from main, as a different build of the same source.)
+        # - Otherwise :<sha>. If that commit is already there (a re-run, or a manual run of a
+        #   commit main already published), nothing is pushed and the existing image is signed
+        #   again, which only adds a signature; so a re-run also repairs a publish that failed
+        #   after its push.
         run: |
-          sha=$(git rev-parse HEAD) # for a release, the tagged commit
-          tags=("$sha")
+          digest_of() { docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' 2>/dev/null | jq -r .digest; }
           if [[ -n $VERSION ]]; then
-            # Version tags are never moved: deploy/ refers to them.
-            if docker buildx imagetools inspect "${IMAGE}:${VERSION}" >/dev/null 2>&1; then
-              echo "::error::${IMAGE}:${VERSION} already exists; version tags are not overwritten."
+            tag=$VERSION
+            if [[ $(digest_of "${IMAGE}:${tag}") == sha256:* ]]; then
+              echo "::error::${IMAGE}:${tag} already exists; version tags are never replaced. Cut a new release."
               exit 1
             fi
-            tags+=("$VERSION")
+          else
+            tag=$SHA
           fi
-          for tag in "${tags[@]}"; do
+          if [[ -z $VERSION && $(digest_of "${IMAGE}:${tag}") == sha256:* ]]; then
+            echo "::notice::${IMAGE}:${tag} is already published; signing that image again instead of pushing."
+          else
             docker tag "$LOCAL_IMAGE" "${IMAGE}:${tag}"
             docker push --quiet "${IMAGE}:${tag}"
-          done
-          digest=$(docker buildx imagetools inspect "${IMAGE}:${sha}" --format '{{json .Manifest}}' | jq -r .digest)
+          fi
+          digest=$(digest_of "${IMAGE}:${tag}")
           if [[ ! $digest =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::Could not read the digest of ${IMAGE}:${sha}"
+            echo "::error::Could not read the digest of ${IMAGE}:${tag}"
             exit 1
           fi
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
-          echo "tags=${tags[*]}" >> "$GITHUB_OUTPUT"
+          echo "tags=${tag}" >> "$GITHUB_OUTPUT"
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        if: steps.registry.outputs.ready == 'true'
         with:
           cosign-release: ${{ env.COSIGN_VERSION }}
       - name: Sign (keyless, with this workflow's GitHub identity)
-        if: steps.registry.outputs.ready == 'true'
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
         # Signs the digest, so the signature covers every tag that points at it.
         run: cosign sign --yes "${IMAGE}@${DIGEST}"
-      - name: Generate the SBOM (SPDX)
-        if: steps.registry.outputs.ready == 'true'
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          version: ${{ env.TRIVY_VERSION }}
-          scan-type: image
-          image-ref: ${{ env.IMAGE }}@${{ steps.push.outputs.digest }}
-          format: spdx-json
-          output: sbom.spdx.json
       - name: Attach the SBOM as a signed attestation
-        if: steps.registry.outputs.ready == 'true'
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
-        run: cosign attest --yes --type spdxjson --predicate sbom.spdx.json "${IMAGE}@${DIGEST}"
+        run: cosign attest --yes --type spdxjson --predicate in/sbom.spdx.json "${IMAGE}@${DIGEST}"
       - name: Summary
-        if: steps.registry.outputs.ready == 'true'
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
           TAGS: ${{ steps.push.outputs.tags }}
@@ -305,7 +309,7 @@ jobs:
         run: |
           {
             echo "### ${IMAGE}"
-            echo "- digest \`${DIGEST}\`, tags: \`${TAGS}\`"
+            echo "- digest \`${DIGEST}\`, tags: \`${TAGS}\`, built from \`${SHA}\`"
             echo "- verify (see docs/images.md):"
             echo '```sh'
             echo "cosign verify ${IMAGE}@${DIGEST} \\"

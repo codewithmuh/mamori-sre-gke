@@ -14,7 +14,8 @@
 //
 // Modified by the mamori-sre-gke project: the home, product and cart pages fall back to USD
 // prices with a notice when the currency service fails, instead of answering 500; the order and
-// assistant pages no longer fail on the currency list. See CHANGES.md and currency_fallback.go.
+// assistant pages no longer call the currency service; an unknown or invalid product id is a
+// 404 or 400, not a 500. See CHANGES.md and currency_fallback.go.
 
 package main
 
@@ -35,6 +36,8 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	pb "github.com/GoogleCloudPlatform/microservices-demo/src/frontend/genproto"
 	"github.com/GoogleCloudPlatform/microservices-demo/src/frontend/money"
@@ -64,7 +67,6 @@ func (fe *frontendServer) homeHandler(w http.ResponseWriter, r *http.Request) {
 	log := r.Context().Value(ctxKeyLog{}).(logrus.FieldLogger)
 	log.WithField("currency", currentCurrency(r)).Info("home")
 	cv := fe.newCurrencyView(r.Context(), log, currentCurrency(r))
-	defer cv.close()
 	currencies := cv.supported()
 	products, err := fe.getProducts(r.Context())
 	if err != nil {
@@ -157,11 +159,10 @@ func (fe *frontendServer) productHandler(w http.ResponseWriter, r *http.Request)
 
 	p, err := fe.getProduct(r.Context(), id)
 	if err != nil {
-		renderHTTPError(log, r, w, errors.Wrap(err, "could not retrieve product"), http.StatusInternalServerError)
+		renderHTTPError(log, r, w, errors.Wrap(err, "could not retrieve product"), lookupErrorStatus(err))
 		return
 	}
 	cv := fe.newCurrencyView(r.Context(), log, currentCurrency(r))
-	defer cv.close()
 	currencies := cv.supported()
 
 	cart, err := fe.getCart(r.Context(), sessionID(r))
@@ -224,12 +225,12 @@ func (fe *frontendServer) addToCartHandler(w http.ResponseWriter, r *http.Reques
 
 	p, err := fe.getProduct(r.Context(), payload.ProductID)
 	if err != nil {
-		renderHTTPError(log, r, w, errors.Wrap(err, "could not retrieve product"), http.StatusInternalServerError)
+		renderHTTPError(log, r, w, errors.Wrap(err, "could not retrieve product"), lookupErrorStatus(err))
 		return
 	}
 
 	if err := fe.insertCart(r.Context(), sessionID(r), p.GetId(), int32(payload.Quantity)); err != nil {
-		renderHTTPError(log, r, w, errors.Wrap(err, "failed to add to cart"), http.StatusInternalServerError)
+		renderHTTPError(log, r, w, errors.Wrap(err, "failed to add to cart"), lookupErrorStatus(err))
 		return
 	}
 	w.Header().Set("location", baseUrl + "/cart")
@@ -252,7 +253,6 @@ func (fe *frontendServer) viewCartHandler(w http.ResponseWriter, r *http.Request
 	log := r.Context().Value(ctxKeyLog{}).(logrus.FieldLogger)
 	log.Debug("view user cart")
 	cv := fe.newCurrencyView(r.Context(), log, currentCurrency(r))
-	defer cv.close()
 	currencies := cv.supported()
 	cart, err := fe.getCart(r.Context(), sessionID(r))
 	if err != nil {
@@ -310,6 +310,7 @@ func (fe *frontendServer) viewCartHandler(w http.ResponseWriter, r *http.Request
 		"currencies":        currencies,
 		"user_currency":     cv.currency(),
 		"currency_fallback": cv.fallback(),
+		"order_currency":    currentCurrency(r), // what PlaceOrder charges in, whatever the page shows
 		"recommendations":   recommendations,
 		"cart_size":         cartSize(cart),
 		"shipping_cost":     shippingCost,
@@ -388,16 +389,11 @@ func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Reque
 		totalPaid = money.Must(money.Sum(totalPaid, multPrice))
 	}
 
-	// The order is placed and paid at this point. The currency list only feeds the (hidden)
-	// currency selector, so a currency failure must not turn the confirmation into an error page:
-	// a 500 here invites the user to pay again.
-	cv := fe.newCurrencyView(r.Context(), log, currentCurrency(r))
-	defer cv.close()
-	currencies := cv.supported()
-
+	// The order is placed and paid at this point. Upstream fetched the currency list here for the
+	// currency selector, which this page hides; when that failed it answered 500 for a paid order,
+	// inviting the user to pay again. No currency call any more: nothing on this page needs one.
 	if err := templates.ExecuteTemplate(w, "order", injectCommonTemplateData(r, map[string]interface{}{
 		"show_currency":   false,
-		"currencies":      currencies,
 		"order":           order.GetOrder(),
 		"total_paid":      &totalPaid,
 		"recommendations": recommendations,
@@ -407,14 +403,10 @@ func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Reque
 }
 
 func (fe *frontendServer) assistantHandler(w http.ResponseWriter, r *http.Request) {
-	// The currency selector is hidden on this page, so a currency failure only shortens the list.
-	cv := fe.newCurrencyView(r.Context(), log, currentCurrency(r))
-	defer cv.close()
-	currencies := cv.supported()
-
+	// The currency selector is hidden on this page, so it needs no currency call (upstream made
+	// one, and answered 500 when it failed).
 	if err := templates.ExecuteTemplate(w, "assistant", injectCommonTemplateData(r, map[string]interface{}{
 		"show_currency": false,
-		"currencies":    currencies,
 	})); err != nil {
 		log.Println(err)
 	}
@@ -538,8 +530,28 @@ func (fe *frontendServer) chooseAd(ctx context.Context, ctxKeys []string, log lo
 	return ads[rand.Intn(len(ads))]
 }
 
+// lookupErrorStatus is the HTTP status for a failed product or cart lookup. A product id that
+// doesn't exist (NotFound) or that the service rejects (InvalidArgument) is the request's fault:
+// 404 or 400. Anyone on the internet can request /product/<anything>; upstream answered 500, which
+// counts against the SLOs and pages the on-call. Everything else stays a 500.
+func lookupErrorStatus(err error) int {
+	switch status.Code(err) {
+	case codes.NotFound:
+		return http.StatusNotFound
+	case codes.InvalidArgument:
+		return http.StatusBadRequest
+	}
+	return http.StatusInternalServerError
+}
+
 func renderHTTPError(log logrus.FieldLogger, r *http.Request, w http.ResponseWriter, err error, code int) {
-	log.WithField("error", err).Error("request error")
+	// Client errors (4xx) are logged at info level, so junk requests can't raise error-level
+	// log alerts; upstream logged every one as an error.
+	if code >= http.StatusInternalServerError {
+		log.WithField("error", err).Error("request error")
+	} else {
+		log.WithField("error", err).WithField("status", code).Info("request error")
+	}
 	errMsg := fmt.Sprintf("%+v", err)
 
 	w.WriteHeader(code)
@@ -562,7 +574,7 @@ func injectCommonTemplateData(r *http.Request, payload map[string]interface{}) m
 		"platform_name":     plat.provider,
 		"is_cymbal_brand":   isCymbalBrand,
 		"assistant_enabled": assistantEnabled,
-		"deploymentDetails": deploymentDetailsMap,
+		"deploymentDetails": deploymentDetails(),
 		"frontendMessage":   frontendMessage,
 		"currentYear":       time.Now().Year(),
 		"baseUrl":           baseUrl,

@@ -41,27 +41,45 @@ const fallbackCurrency = "USD"
 // The first failure switches the whole page to USD. Later calls are skipped (each would most
 // likely fail too and only add latency), and prices that were already converted are dropped, so a
 // page never mixes currencies. That also keeps money.Sum, which panics on mixed currencies, safe.
+//
+// With fe.currencyTimeout set, the page's currency calls share that budget. Only time spent inside
+// currency calls counts: a slow catalog or recommendation service between two currency calls must
+// not end up blamed on the currency service.
 type currencyView struct {
 	fe     *frontendServer
-	ctx    context.Context
-	cancel context.CancelFunc
+	ctx    context.Context // the request's context
 	log    logrus.FieldLogger
-	want   string // the user's currency (cookie)
-	err    error  // the first failure; once set, the page is in USD
+	want   string        // the user's currency (cookie)
+	budget time.Duration // 0: no budget
+	spent  time.Duration // time spent inside currency calls so far
+	err    error         // the first failure; once set, the page is in USD
 }
 
-// newCurrencyView starts the currency calls of one page. If fe.currencyTimeout is set, all of the
-// page's currency calls share that budget; the caller must call close.
+// errBudgetSpent ends a page's currency calls once their time budget is used up.
+var errBudgetSpent = errors.New("currency time budget (CURRENCY_TIMEOUT) used up")
+
+// newCurrencyView prepares the currency calls of one page. It makes no call itself.
 func (fe *frontendServer) newCurrencyView(ctx context.Context, log logrus.FieldLogger, want string) *currencyView {
-	cancel := context.CancelFunc(func() {})
-	if fe.currencyTimeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, fe.currencyTimeout)
-	}
-	return &currencyView{fe: fe, ctx: ctx, cancel: cancel, log: log, want: want}
+	return &currencyView{fe: fe, ctx: ctx, log: log, want: want, budget: fe.currencyTimeout}
 }
 
-// close releases the page's currency budget.
-func (v *currencyView) close() { v.cancel() }
+// call runs one currency call with what is left of the page's budget as its deadline.
+func (v *currencyView) call(do func(ctx context.Context) error) error {
+	ctx := v.ctx
+	if v.budget > 0 {
+		left := v.budget - v.spent
+		if left <= 0 {
+			return errBudgetSpent
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, left)
+		defer cancel()
+	}
+	start := time.Now()
+	err := do(ctx)
+	v.spent += time.Since(start)
+	return err
+}
 
 // fallback reports whether the page shows USD because a currency call failed.
 func (v *currencyView) fallback() bool { return v.err != nil }
@@ -80,7 +98,11 @@ func (v *currencyView) supported() []string {
 	if v.fallback() {
 		return []string{fallbackCurrency}
 	}
-	currencies, err := v.fe.getCurrencies(v.ctx)
+	var currencies []string
+	err := v.call(func(ctx context.Context) (err error) {
+		currencies, err = v.fe.getCurrencies(ctx)
+		return err
+	})
 	if err != nil {
 		v.fail(errors.Wrap(err, "could not retrieve currencies"))
 		return []string{fallbackCurrency}
@@ -96,7 +118,11 @@ func (v *currencyView) convert(usd ...*pb.Money) []*pb.Money {
 	}
 	out := make([]*pb.Money, len(usd))
 	for i, m := range usd {
-		converted, err := v.fe.convertCurrency(v.ctx, m, v.want)
+		var converted *pb.Money
+		err := v.call(func(ctx context.Context) (err error) {
+			converted, err = v.fe.convertCurrency(ctx, m, v.want)
+			return err
+		})
 		if err == nil {
 			err = checkConverted(converted, v.want)
 		}
@@ -109,11 +135,17 @@ func (v *currencyView) convert(usd ...*pb.Money) []*pb.Money {
 	return out
 }
 
-// fail switches the page to USD and logs why, once per page.
+// fail switches the page to USD and logs why, once per page. If the request itself is over
+// (the client went away, or the request's own deadline passed), the currency service is not to
+// blame: that is logged at debug level only, so it doesn't send responders the wrong way.
 func (v *currencyView) fail(err error) {
 	v.err = err
-	v.log.WithField("error", err).WithField("currency", v.want).
-		Warn("currency service failed; falling back to USD")
+	log := v.log.WithField("error", err).WithField("currency", v.want)
+	if v.ctx.Err() != nil {
+		log.Debug("request ended during a currency call; not a currency failure")
+		return
+	}
+	log.Warn("currency service failed; falling back to USD")
 }
 
 // checkConverted rejects a conversion result the page can't add up: no result, another currency

@@ -21,8 +21,8 @@ is" from PLAN.md section 4.
 | `GET /product/{id}` | 500 | 200, price in USD, notice |
 | `GET /cart` | 500 | 200, item prices, shipping and total in USD, notice, checkout warning |
 | `POST /cart/checkout` | 500 | 500, unchanged (see section 2) |
-| Order confirmation, after a successful order | 500 | 200 (see section 2) |
-| `GET /assistant` | 500 | 200 (the currency list is not shown there anyway) |
+| Order confirmation, after a successful order | 500 | 200, no currency call (see section 2) |
+| `GET /assistant` | 500 | 200, no currency call (the page hides the currency selector) |
 
 How it works (`currency_fallback.go`):
 
@@ -36,14 +36,22 @@ How it works (`currency_fallback.go`):
   (`templates/header.html`); the cart adds `currency-fallback-checkout` next to *Place Order*
   (`templates/cart.html`). Probes can look for these ids to count degraded pages.
 - Each fallback logs one warning, `currency service failed; falling back to USD`, with the
-  error and the user's currency.
+  error and the user's currency. If the request itself ended during a currency call (the client
+  went away, or the request's own deadline passed), the page still stops converting, but that is
+  logged at debug level only: it is not a currency failure, and a warning would point responders,
+  and the incident agent, at the wrong service.
 - The user's currency cookie is left alone, so prices come back in their currency once the
   service recovers.
 - Optional `CURRENCY_TIMEOUT` (a Go duration such as `300ms`): the time budget for all currency
-  calls of one page. When it runs out, the page falls back to USD. Unset or `0` means no budget,
-  as upstream. Upstream sets no deadline on currency calls, and per-host Istio VirtualServices
-  are reserved for fault injection in this lab, so this is the only place a slow currency service
-  can be cut off. Not set in the manifests yet: pick a value from measured latency (M4).
+  calls of one page. **Only time spent inside currency calls counts**: each call's deadline is
+  what the earlier currency calls of the page left over, and time spent on the catalog, cart,
+  shipping or recommendations in between doesn't count. (A first version started the clock when
+  the page started, so a slow recommendation or catalog service pushed a healthy currency
+  service into the fallback and logged a currency failure; found in review.) When the budget runs
+  out, the page falls back to USD. Unset or `0` means no budget, as upstream. Upstream sets no
+  deadline on currency calls, and per-host Istio VirtualServices are reserved for fault injection
+  in this lab, so this is the only place a slow currency service can be cut off. Not set in the
+  manifests yet: pick a value from measured latency (M4).
 - Every other dependency behaves as upstream: without the product catalog, the cart or the
   shipping quote the page still fails, because there is nothing correct to show.
 
@@ -63,10 +71,20 @@ and the cart converts it with the item prices), `main.go` (creates the client, r
   would need a change in `checkoutservice`. A failed checkout is the honest outcome, and the
   checkout SLO counts it.
 
-What the fork does change: once `PlaceOrder` has succeeded, the confirmation page no longer turns
-into a 500 because the currency list for the (hidden) currency selector failed. Upstream did, which
-told a user whose order had gone through that it failed, inviting a second payment. The cart page
-warns, while in USD, that placing an order may fail until currency conversion is back.
+What the fork does change:
+
+- Once `PlaceOrder` has succeeded, the confirmation page makes no currency call at all. Upstream
+  fetched the currency list for a selector this page hides, and answered 500 when that failed,
+  which told a user whose order had gone through that it failed, inviting a second payment. A
+  slow currency service no longer delays the confirmation either. The assistant page likewise
+  hides the selector and makes no currency call.
+- While the cart is shown in USD, the order is still charged in the user's currency (the cookie),
+  because that is what `PlaceOrder` sends. The cart says so next to *Place Order* ("Prices here
+  are in USD, but your order is charged in EUR, converted when you place it"), and that placing an
+  order may fail until currency conversion is back.
+- *Place Order* stays enabled. With a partial outage (some currency calls failing) checkout can
+  still succeed, and the warning says what the charge will be. A disabled button would also hide
+  from users a path that the checkout journey's probes still exercise.
 
 ## 3. Recommendations get a deadline
 
@@ -78,19 +96,46 @@ the result is optional.
 `getRecommendations` (`rpc.go`) now has a 250 ms deadline, the way `getAd` has 100 ms. It covers
 the whole lookup: the recommendation call and the catalog lookups of the products it returns.
 When it runs out, the page renders without the "You May Also Like" section; the existing warning
-`failed to get product recommendations` is logged. 250 ms is half of the browse journey's 500 ms
+`failed to get product recommendations` is logged.
+
+Within that deadline, only the four products the pages show are looked up, all at once, and the
+ones that arrive are kept. Upstream looked up every returned id (up to five) one after another and
+kept the first four only afterwards, so a slow fifth lookup could cost all of them, and one failed
+lookup dropped the whole section. Now a failed or late product only drops itself, and the warning
+names it. 250 ms is half of the browse journey's 500 ms
 latency threshold (`docs/prd.md`), leaving the other half for the calls the page can't do without;
 healthy calls take far less (an estimate until M4 measures it). It is a constant, not a setting,
 like upstream's ad deadline; change it in `rpc.go` if the measured latency calls for it.
 
-## 4. Image runs as non-root
+## 4. Bad product ids are client errors, not 500s
+
+Anyone on the internet can request `GET /product/<anything>` or post any `product_id` to
+`POST /cart`. The catalog answers gRPC `NotFound` for an unknown id, and upstream turned that into
+a **500**, so junk requests counted against the browse and add-to-cart SLOs and could page the
+on-call.
+
+Now `lookupErrorStatus` (`handlers.go`) maps `NotFound` to **404** and `InvalidArgument` to
+**400** for the product lookup of the product page and of add-to-cart, and for the cart insert.
+Every other error stays a 500: a catalog that is down is still the shop's fault. `renderHTTPError`
+logs client errors (4xx) at info level instead of error, so junk traffic can't raise error-level
+log alerts either.
+
+## 5. Data race on the deployment details fixed
+
+`deployment_details.go` filled `deploymentDetailsMap` from a goroutine started in `init` while
+requests read it (every page's footer). The race detector caught it in CI. The goroutine now builds
+a local map and publishes it under a `sync.RWMutex`; pages read it with `deploymentDetails()`, which
+is `nil` until it is loaded (the footer then shows nothing, as upstream did for missing values).
+
+## 6. Image runs as non-root
 
 `Dockerfile`: the runtime image is `gcr.io/distroless/static-debian13:nonroot`, pinned by digest
 (upstream used the unpinned `gcr.io/distroless/static`, which runs as root), with `USER
 65532:65532` so Kubernetes can enforce `runAsNonRoot`. The server only reads `./templates` and
-`./static`, so it also works with a read-only root filesystem. The build stage is unchanged.
+`./static`, so it also works with a read-only root filesystem. The build stage is upstream's apart
+from the Go version (section 7).
 
-## 5. Dependency update
+## 7. Dependency update
 
 `golang.org/x/net` v0.58.0 → v0.62.0 for two HIGH advisories Trivy reports on upstream's version
 (CVE-2026-78669, fixed in 0.60.0; CVE-2026-78661, fixed in 0.62.0). `go get` and `go mod tidy`
@@ -104,21 +149,27 @@ Go toolchain: the build image moves from `golang:1.27.0-alpine` to `golang:1.27.
 HIGH CVEs in 1.27.0 (CVE-2026-111943 crypto/x509, CVE-2026-78667 and CVE-2026-78669 net/http, CVE-2026-97031
 crypto/tls), all fixed in 1.27.3.
 
-## 6. Tests
+## 8. Tests
 
 - `currency_fallback_test.go`: the fallback rules with a fake `pb.CurrencyServiceClient`: healthy
-  conversion, list failure, failure halfway through a page, unusable results, the time budget,
-  `CURRENCY_TIMEOUT` parsing.
-- `currency_fallback_handlers_test.go`: the real handlers and templates against in-memory gRPC fakes
-  (bufconn) for catalog, cart, shipping, checkout and recommendations: each page with the currency service down and
-  healthy, a cart where only a later conversion fails, checkout failing, a placed order confirmed
-  despite the currency failure, and a catalog failure that must still be a 500. Also a fake
-  recommendation service: shown when fast; when it blocks past the deadline, the product and cart
-  pages still render (without recommendations) within about 250 ms.
+  conversion, list failure, failure halfway through a page, unusable results, the time budget
+  (it counts only time inside currency calls, and the page's calls share it), a request that
+  ended (not logged as a currency failure), `CURRENCY_TIMEOUT` parsing.
+- `currency_fallback_handlers_test.go`: the real handlers and templates against in-memory gRPC
+  fakes (bufconn) for catalog, cart, shipping, checkout and recommendations:
+  - each browse page with the currency service down and healthy; a cart where only a later
+    conversion fails; the cart's warning naming the charge currency;
+  - checkout failing; the order confirmation and the assistant page making no currency call;
+  - a catalog failure that must still be a 500 (home and product page); an unknown or rejected
+    product id that is a 404 or 400 (product page and add-to-cart);
+  - recommendations: shown when fast; a blocked recommendation service costs the product and cart
+    pages about 250 ms and no recommendations; with `CURRENCY_TIMEOUT` set, those slow
+    recommendations don't push a healthy currency service into the fallback; only four products
+    are looked up; a failed and a late product drop only themselves.
 
 No new dependencies: `bufconn` and logrus's test hook come from modules upstream already requires.
 
-## 7. Housekeeping
+## 9. Housekeeping
 
 - `LICENSE` copied from the upstream repository root (`src/frontend` has none of its own);
   `NOTICE` and this file added; `README.md` replaced (upstream's described a `dep` workflow that
@@ -135,9 +186,9 @@ No new dependencies: `bufconn` and logrus's test hook come from modules upstream
   not vendor. `genproto/` is upstream's generated code.
 - Untouched upstream code is not reformatted (`gofmt` would change three lines in `handlers.go`
   and the import order in `middleware.go`).
-- Known upstream issues not fixed here: `homeHandler` rewrites the global `plat` on every request,
-  and `deployment_details.go` fills `deploymentDetailsMap` from a background goroutine while
-  requests read it. Both are data races; the second matters only in the first seconds after start.
+- Known upstream issue not fixed here: `homeHandler` rewrites the global `plat` (the platform
+  banner) on every request, a data race between concurrent home page requests. Tests don't hit it
+  (they run requests one at a time); it can at worst show a mixed-up banner.
 
 ## Updating from upstream
 

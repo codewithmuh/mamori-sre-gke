@@ -13,8 +13,9 @@
  See the License for the specific language governing permissions and
  limitations under the License.
 
- Modified by the mamori-sre-gke project: warns that checkout may fail while prices are shown in
- USD because the currency service failed. See CHANGES.md.
+ Modified by the mamori-sre-gke project: while prices are shown in USD because the currency
+ service failed, warns that the order is charged in the user's currency and that checkout may
+ fail. See CHANGES.md.
 -->
 
 {{ define "cart" }}
@@ -212,6 +213,10 @@
 
                         {{ if $.currency_fallback }}
                         <p class="text-center" role="status" id="currency-fallback-checkout">
+                            {{ if ne $.order_currency "USD" }}
+                            Prices here are in USD, but your order is charged in
+                            {{ $.order_currency }}, converted when you place it.
+                            {{ end }}
                             Placing an order needs currency conversion, so it may fail until
                             currency conversion is back.
                         </p>

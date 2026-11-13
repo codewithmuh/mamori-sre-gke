@@ -27,7 +27,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -48,9 +50,30 @@ var testProducts = []*pb.Product{
 	{Id: "66VCHSJNUP", Name: "Tank Top", Picture: "/static/img/products/tank-top.jpg", PriceUsd: usd(18, 990000000)},
 }
 
+// recommendedProducts are found by GetProduct only (they are not on the home page).
+var recommendedProducts = []*pb.Product{
+	{Id: "REC1", Name: "Rec-One", Picture: "/static/img/products/mug.jpg", PriceUsd: usd(8, 0)},
+	{Id: "REC2", Name: "Rec-Two", Picture: "/static/img/products/mug.jpg", PriceUsd: usd(8, 0)},
+	{Id: "REC3", Name: "Rec-Three", Picture: "/static/img/products/mug.jpg", PriceUsd: usd(8, 0)},
+	{Id: "REC4", Name: "Rec-Four", Picture: "/static/img/products/mug.jpg", PriceUsd: usd(8, 0)},
+	{Id: "REC5", Name: "Rec-Five", Picture: "/static/img/products/mug.jpg", PriceUsd: usd(8, 0)},
+}
+
 type fakeCatalog struct {
 	pb.UnimplementedProductCatalogServiceServer
-	err error
+	err     error
+	slow    map[string]bool // GetProduct for these ids waits until the caller's deadline
+	fail    map[string]bool // GetProduct for these ids fails (Unavailable)
+	invalid map[string]bool // GetProduct rejects these ids (InvalidArgument)
+
+	mu    sync.Mutex
+	asked []string // ids GetProduct was called with
+}
+
+func (f *fakeCatalog) wasAsked(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Contains(f.asked, id)
 }
 
 func (f *fakeCatalog) ListProducts(context.Context, *pb.Empty) (*pb.ListProductsResponse, error) {
@@ -60,11 +83,22 @@ func (f *fakeCatalog) ListProducts(context.Context, *pb.Empty) (*pb.ListProducts
 	return &pb.ListProductsResponse{Products: testProducts}, nil
 }
 
-func (f *fakeCatalog) GetProduct(_ context.Context, in *pb.GetProductRequest) (*pb.Product, error) {
-	if f.err != nil {
+func (f *fakeCatalog) GetProduct(ctx context.Context, in *pb.GetProductRequest) (*pb.Product, error) {
+	f.mu.Lock()
+	f.asked = append(f.asked, in.GetId())
+	f.mu.Unlock()
+	switch {
+	case f.err != nil:
 		return nil, f.err
+	case f.fail[in.GetId()]:
+		return nil, status.Errorf(codes.Unavailable, "product %q unavailable", in.GetId())
+	case f.invalid[in.GetId()]:
+		return nil, status.Errorf(codes.InvalidArgument, "malformed product id %q", in.GetId())
+	case f.slow[in.GetId()]:
+		<-ctx.Done()
+		return nil, status.FromContextError(ctx.Err()).Err()
 	}
-	for _, p := range testProducts {
+	for _, p := range slices.Concat(testProducts, recommendedProducts) {
 		if p.GetId() == in.GetId() {
 			return p, nil
 		}
@@ -226,7 +260,9 @@ func TestBrowsePagesFallBackToUSDWhenCurrencyFails(t *testing.T) {
 			handler: func(fe *frontendServer) http.HandlerFunc { return fe.viewCartHandler },
 			req:     httptest.NewRequest(http.MethodGet, "/cart", nil),
 			// 2 × 19.99 + 18.99 + shipping 8.99, all in USD.
-			want: []string{"$39.98", "$18.99", "$8.99", "$67.96", `id="currency-fallback-checkout"`},
+			// The order is charged in the cookie's currency (EUR), and the cart says so.
+			want: []string{"$39.98", "$18.99", "$8.99", "$67.96", `id="currency-fallback-checkout"`,
+				"your order is charged in", "EUR, converted when you place it"},
 		},
 	}
 	for name, page := range pages {
@@ -331,9 +367,9 @@ func TestCheckoutFailsWhenCheckoutCannotConvert(t *testing.T) {
 	}
 }
 
-func TestPlacedOrderIsConfirmedWhenCurrencyListFails(t *testing.T) {
-	// The order went through before the currency service failed. Upstream answered 500 here,
-	// which invites the user to pay a second time.
+func TestPlacedOrderIsConfirmedWithoutCurrencyCalls(t *testing.T) {
+	// The order went through. Upstream then fetched the currency list for a selector this page
+	// hides, and answered 500 when the currency service was down, inviting a second payment.
 	s := newShop(t, currencyDown())
 
 	code, body := serve(t, s.fe.placeOrderHandler, checkoutRequest(), "EUR")
@@ -349,13 +385,19 @@ func TestPlacedOrderIsConfirmedWhenCurrencyListFails(t *testing.T) {
 	if n := s.checkout.orders.Load(); n != 1 {
 		t.Errorf("placed %d orders, want 1", n)
 	}
+	if list, convert := s.currency.calls(); list+convert != 0 {
+		t.Errorf("confirmation page made %d currency calls, want 0", list+convert)
+	}
 }
 
-func TestAssistantPageSurvivesCurrencyFailure(t *testing.T) {
+func TestAssistantPageMakesNoCurrencyCall(t *testing.T) {
 	s := newShop(t, currencyDown())
 	code, _ := serve(t, s.fe.assistantHandler, httptest.NewRequest(http.MethodGet, "/assistant", nil), "EUR")
 	if code != http.StatusOK {
 		t.Errorf("status %d, want 200", code)
+	}
+	if list, convert := s.currency.calls(); list+convert != 0 {
+		t.Errorf("assistant page made %d currency calls, want 0", list+convert)
 	}
 }
 
@@ -422,3 +464,117 @@ func TestSlowRecommendationsDoNotHoldUpPages(t *testing.T) {
 		})
 	}
 }
+
+func TestCurrencyBudgetIgnoresSlowRecommendations(t *testing.T) {
+	// CURRENCY_TIMEOUT counts only time inside currency calls. Recommendations that use their whole
+	// 250 ms deadline must not push a healthy currency service into the USD fallback.
+	for name, page := range map[string]struct {
+		handler func(*frontendServer) http.HandlerFunc
+		req     func() *http.Request
+	}{
+		"product": {productPage, productRequest},
+		"cart":    {cartPage, cartRequest},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newShop(t, healthyCurrency())
+			s.fe.currencyTimeout = 50 * time.Millisecond
+			s.recommendations.ids = []string{"66VCHSJNUP"}
+			s.recommendations.block.Store(true)
+
+			code, body := serve(t, page.handler(s.fe), page.req(), "EUR")
+			if code != http.StatusOK || strings.Contains(body, notice) || !strings.Contains(body, "€") {
+				t.Errorf("status %d, notice shown %v, euro shown %v; want 200, no fallback, EUR prices",
+					code, strings.Contains(body, notice), strings.Contains(body, "€"))
+			}
+		})
+	}
+}
+
+func TestRecommendationsLookUpOnlyTheFourShown(t *testing.T) {
+	// Five ids, but the page shows four: the fifth is never looked up, so its slowness can't cost
+	// the page the other four.
+	s := newShop(t, healthyCurrency())
+	s.recommendations.ids = []string{"REC1", "REC2", "REC3", "REC4", "REC5"}
+	s.catalog.slow = map[string]bool{"REC5": true}
+
+	code, body := serve(t, s.fe.productHandler, productRequest(), "USD")
+	if code != http.StatusOK {
+		t.Fatalf("status %d, want 200", code)
+	}
+	for _, name := range []string{"Rec-One", "Rec-Two", "Rec-Three", "Rec-Four"} {
+		if !strings.Contains(body, name) {
+			t.Errorf("recommendation %s missing", name)
+		}
+	}
+	if s.catalog.wasAsked("REC5") {
+		t.Error("the fifth recommendation was looked up although the page shows four")
+	}
+}
+
+func TestRecommendationsKeepTheProductsThatArrive(t *testing.T) {
+	// One recommended product fails and one is too slow: the page keeps the other two.
+	s := newShop(t, healthyCurrency())
+	s.recommendations.ids = []string{"REC1", "REC2", "REC3", "REC4"}
+	s.catalog.fail = map[string]bool{"REC2": true}
+	s.catalog.slow = map[string]bool{"REC4": true}
+
+	start := time.Now()
+	code, body := serve(t, s.fe.productHandler, productRequest(), "USD")
+	if code != http.StatusOK {
+		t.Fatalf("status %d, want 200", code)
+	}
+	for name, want := range map[string]bool{"Rec-One": true, "Rec-Two": false, "Rec-Three": true, "Rec-Four": false} {
+		if strings.Contains(body, name) != want {
+			t.Errorf("recommendation %s shown: %v, want %v", name, !want, want)
+		}
+	}
+	if elapsed := time.Since(start); elapsed > recommendationsTimeout+2*time.Second {
+		t.Errorf("page took %v; the slow product should cost at most about %v", elapsed, recommendationsTimeout)
+	}
+}
+
+func productRequestFor(id string) *http.Request {
+	r := httptest.NewRequest(http.MethodGet, "/product/"+id, nil)
+	return mux.SetURLVars(r, map[string]string{"id": id})
+}
+
+func addToCartRequest(id string) *http.Request {
+	form := url.Values{"product_id": {id}, "quantity": {"1"}}
+	r := httptest.NewRequest(http.MethodPost, "/cart", strings.NewReader(form.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return r
+}
+
+func TestBadProductIdsAreClientErrors(t *testing.T) {
+	// Anyone can request /product/<anything>. A product that doesn't exist must not be a 500,
+	// which would count against the SLOs and page the on-call.
+	cases := map[string]struct {
+		handler func(*frontendServer) http.HandlerFunc
+		req     *http.Request
+		want    int
+	}{
+		"unknown product page":     {productPage, productRequestFor("NO-SUCH-PRODUCT"), http.StatusNotFound},
+		"rejected product id page": {productPage, productRequestFor("BAD"), http.StatusBadRequest},
+		"add unknown product":      {addToCartPage, addToCartRequest("NO-SUCH-PRODUCT"), http.StatusNotFound},
+		"add rejected product id":  {addToCartPage, addToCartRequest("BAD"), http.StatusBadRequest},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := newShop(t, healthyCurrency())
+			s.catalog.invalid = map[string]bool{"BAD": true}
+			if code, _ := serve(t, c.handler(s.fe), c.req, "USD"); code != c.want {
+				t.Errorf("status %d, want %d", code, c.want)
+			}
+		})
+	}
+}
+
+func TestCatalogOutageOnProductPageIsStillA500(t *testing.T) {
+	s := newShop(t, healthyCurrency())
+	s.catalog.err = status.Error(codes.Unavailable, "catalog down")
+	if code, _ := serve(t, s.fe.productHandler, productRequest(), "USD"); code != http.StatusInternalServerError {
+		t.Errorf("status %d, want 500", code)
+	}
+}
+
+func addToCartPage(fe *frontendServer) http.HandlerFunc { return fe.addToCartHandler }

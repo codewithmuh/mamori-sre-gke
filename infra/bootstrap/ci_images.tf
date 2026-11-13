@@ -20,26 +20,25 @@ resource "google_service_account_iam_member" "ci_images_wif" {
   member             = "principal://iam.googleapis.com/${local.pool}/subject/${var.github_subject_prefix}:ref:refs/heads/main"
 }
 
-# Write access to Artifact Registry is deliberately not granted in this root. It is a binding on
-# the repository itself, in infra/envs/lab/iam.tf next to gke_nodes_pull (requested in #28):
+# Push access to the one repository the images go to, granted on the repository itself. It lives in
+# this root, which survives `make down`, so the images (and this grant) outlast the lab.
 #
-# - The repository mamori is created by the lab root and deleted by `make down`. This root is
-#   applied once, before the lab exists, so it can't bind to the repository.
-# - A project-level grant limited by an IAM condition on resource.name grants nothing: Artifact
-#   Registry is not among the services that pass resource attributes to IAM Conditions
-#   (https://cloud.google.com/iam/docs/conditions-resource-attributes), so the condition never
-#   matches.
-# - A project-level grant without a condition would also reach the spend-guard repository, which
-#   Cloud Run functions builds and deploys the spend-guard function from.
-# - Resource Manager tags (a tag value bound to the repository and resource.matchTag() in the
-#   condition) would work, but need a tag key and value here, Tag User for tf-apply and a tag
-#   binding in the lab root anyway: more parts for the same scope.
+# Narrower than any project-level grant: Artifact Registry doesn't pass resource names to IAM
+# Conditions (https://cloud.google.com/iam/docs/conditions-resource-attributes), so a project grant
+# could not be limited to this repository, and would also reach the spend-guard repository that
+# Cloud Run functions builds and deploys the spend-guard function from.
 #
-# A repository-level binding is exactly one repository wide and lives and dies with it. tf-apply
-# can already set repository IAM (roles/artifactregistry.admin), and it is not a project-level
-# grant, so local.lab_grantable_roles stays as it is.
+# Writer can push and tag images and attach referrers (cosign signatures and attestations); it
+# can't delete images or tags, or change the repository or its IAM.
+resource "google_artifact_registry_repository_iam_member" "ci_images_push" {
+  project    = google_artifact_registry_repository.mamori.project
+  location   = google_artifact_registry_repository.mamori.location
+  repository = google_artifact_registry_repository.mamori.name
+  role       = "roles/artifactregistry.writer"
+  member     = google_service_account.ci_images.member
+}
 
 output "ci_images_sa" {
-  description = "Email of the service account that pushes images from main (images.yml); the lab root grants it Artifact Registry Writer on the mamori repository."
+  description = "Email of the service account that pushes images from main (images.yml)."
   value       = google_service_account.ci_images.email
 }

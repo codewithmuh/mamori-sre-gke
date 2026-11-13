@@ -13,7 +13,7 @@ Run the tests with the Go version the image is built with:
 
 ```sh
 docker run --rm -v "$PWD":/src -w /src \
-  golang:1.27.0-alpine@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc \
+  golang:1.27.3-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 \
   go test ./...
 ```
 

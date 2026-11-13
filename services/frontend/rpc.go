@@ -14,12 +14,15 @@
 //
 // Modified by the mamori-sre-gke project: currency calls go through fe.currency,
 // getShippingQuote returns the quote in USD (the caller converts it together with the other
-// prices of the page), and getRecommendations has a deadline. See CHANGES.md.
+// prices of the page), and getRecommendations has a deadline and looks up only the products it
+// shows, in parallel, keeping those that arrive. See CHANGES.md.
 
 package main
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"time"
 
 	pb "github.com/GoogleCloudPlatform/microservices-demo/src/frontend/genproto"
@@ -109,6 +112,9 @@ func (fe *frontendServer) getShippingQuote(ctx context.Context, items []*pb.Cart
 // threshold (docs/prd.md), an estimate to tune with measured latency. getAd uses 100 ms the same way.
 const recommendationsTimeout = 250 * time.Millisecond
 
+// maxRecommendations is how many recommended products fit the pages (upstream's "first four").
+const maxRecommendations = 4
+
 func (fe *frontendServer) getRecommendations(ctx context.Context, userID string, productIDs []string) ([]*pb.Product, error) {
 	ctx, cancel := context.WithTimeout(ctx, recommendationsTimeout)
 	defer cancel()
@@ -118,18 +124,39 @@ func (fe *frontendServer) getRecommendations(ctx context.Context, userID string,
 	if err != nil {
 		return nil, err
 	}
-	out := make([]*pb.Product, len(resp.GetProductIds()))
-	for i, v := range resp.GetProductIds() {
-		p, err := fe.getProduct(ctx, v)
-		if err != nil {
-			return nil, errors.Wrapf(err, "failed to get recommended product info (#%s)", v)
+	// Look up only the products the page shows, all at once, and keep the ones that arrive within
+	// the deadline: one slow or missing product must not cost the page every recommendation.
+	// Upstream fetched all of them one after another and kept the first four only afterwards.
+	ids := resp.GetProductIds()
+	if len(ids) > maxRecommendations {
+		ids = ids[:maxRecommendations]
+	}
+	products := make([]*pb.Product, len(ids))
+	errs := make([]error, len(ids))
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		wg.Go(func() { products[i], errs[i] = fe.getProduct(ctx, id) })
+	}
+	wg.Wait()
+
+	out := make([]*pb.Product, 0, len(ids))
+	var firstErr error
+	var failed []string
+	for i, p := range products {
+		if errs[i] != nil {
+			if firstErr == nil {
+				firstErr = errs[i]
+			}
+			failed = append(failed, ids[i])
+			continue
 		}
-		out[i] = p
+		out = append(out, p)
 	}
-	if len(out) > 4 {
-		out = out[:4] // take only first four to fit the UI
+	if firstErr != nil {
+		// The callers log this and still show the products in out.
+		return out, errors.Wrapf(firstErr, "failed to get recommended product info (#%s)", strings.Join(failed, ", #"))
 	}
-	return out, err
+	return out, nil
 }
 
 func (fe *frontendServer) getAd(ctx context.Context, ctxKeys []string) ([]*pb.Ad, error) {
