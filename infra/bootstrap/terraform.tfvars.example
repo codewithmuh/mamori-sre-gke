@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars (gitignored) or export TF_VAR_* instead; `make bootstrap` does the latter.
+project_id         = "mamori-lab-123456"
+billing_account_id = "000000-000000-000000"
+
+# Defaults, shown for reference:
+# region                   = "asia-northeast1"
+# github_repository        = "codewithmuh/mamori-sre-gke"
+# github_apply_environment = "lab"

@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars (gitignored) or export TF_VAR_* instead; Make and CI do the latter.
+project_id         = "mamori-lab-123456"
+billing_account_id = "000000-000000-000000"
+
+# Defaults, shown for reference:
+# zone                        = "asia-northeast1-a"
+# frontend_hostname           = "mamori.codewithmuh.com"
+# monthly_budget_usd          = 200
+# spend_guard_threshold       = 1.0
+# spend_guard_dry_run         = false
+# armor_rate_limit_per_minute = 600
+
+# Limit who can reach the public control-plane endpoint (empty list = any address, IAM still
+# required). The address below is from the documentation range; use your own.
+# master_authorized_networks = [
+#   { cidr_block = "203.0.113.10/32", display_name = "home" },
+# ]
