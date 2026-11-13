@@ -1,0 +1,322 @@
+name: images
+
+# Builds every container image of the repository: tools/*/Dockerfile, services/*/Dockerfile and
+# agent/Dockerfile, each named after its directory.
+#
+# - Pull requests: Go tests for services/* modules (tools/* are tested by ci.yml), docker build,
+#   Trivy scan of the image. Nothing leaves the runner.
+# - main: build and scan (no tests again: the pull request ran them), then a separate, minimal
+#   job pushes the scanned image to Artifact Registry as
+#   asia-northeast1-docker.pkg.dev/<project>/mamori/<name>:<git sha>, signs it with cosign
+#   (keyless) and attaches the SBOM as a signed attestation. Skipped while the repository variable
+#   GCP_WIF_PROVIDER is unset.
+# - Releases: release.yml calls this workflow with the version (or run it by hand with one); the
+#   images are built from tag v<version>, which must be on main, and published as :<version>.
+#   Manifests in deploy/ use version tags. The registry's tags are immutable.
+#
+# Only the publish job can get an OIDC token (to act as ci-images and to sign). It runs no
+# repository code, tests or scanners: it loads the image the build job scanned, pushes and signs it.
+# How to verify a signature: docs/images.md.
+on:
+  pull_request:
+    paths:
+      - tools/**
+      - services/**
+      - agent/**
+      - .github/workflows/images.yml
+  push:
+    branches: [main]
+    paths: # same list as for pull requests
+      - tools/**
+      - services/**
+      - agent/**
+      - .github/workflows/images.yml
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release to publish (X.Y.Z, built from tag vX.Y.Z). Empty publishes main as :<git sha> only.
+        type: string
+        required: false
+        default: ""
+  workflow_call:
+    inputs:
+      version:
+        description: Release to publish (X.Y.Z, built from tag vX.Y.Z).
+        type: string
+        required: true
+
+# Least privilege by default; only the publish job may ask GitHub for an OIDC token.
+permissions:
+  contents: read
+
+# Cancel superseded pull request runs. Every other run gets its own group, so no publish waits for
+# or cancels another.
+concurrency:
+  group: images-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash # adds -o pipefail to GitHub's default
+
+env:
+  # Release being published (workflow_call, workflow_dispatch); empty for pushes and pull requests.
+  VERSION: ${{ inputs.version }}
+  TRIVY_VERSION: v0.76.1 # keep in step with ci.yml
+  COSIGN_VERSION: v3.1.4
+  REGION: asia-northeast1
+
+jobs:
+  discover:
+    name: Find images
+    runs-on: ubuntu-24.04 # pinned: upgrade deliberately, not when GitHub moves "latest"
+    outputs:
+      images: ${{ steps.find.outputs.images }}
+      sha: ${{ steps.source.outputs.sha }}
+      publish: ${{ steps.source.outputs.publish }}
+    steps:
+      - name: Check the inputs
+        env:
+          PUBLISHING_CONFIGURED: ${{ vars.GCP_WIF_PROVIDER != '' }}
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+        run: |
+          if [[ $PUBLISHING_CONFIGURED == true && -z $PROJECT_ID ]]; then
+            echo "::error::GCP_WIF_PROVIDER is set but GCP_PROJECT_ID is not (see make bootstrap)."
+            exit 1
+          fi
+          if [[ -n $VERSION && ! $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version must look like 1.2.3, got '${VERSION}'"
+            exit 1
+          fi
+          # A release that silently isn't published would leave deploy/ pointing at a missing tag.
+          if [[ -n $VERSION && $PUBLISHING_CONFIGURED != true ]]; then
+            echo "::error::Publishing ${VERSION} needs the repository variables from infra/bootstrap (GCP_WIF_PROVIDER, GCP_PROJECT_ID)."
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A release builds its tag; full history, to check below that the tag is on main.
+          ref: ${{ inputs.version && format('refs/tags/v{0}', inputs.version) || '' }}
+          fetch-depth: ${{ inputs.version && '0' || '1' }}
+          persist-credentials: false
+      - name: Pin the commit to build
+        id: source
+        env:
+          PUBLISH: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.GCP_WIF_PROVIDER != '' }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          # Only code that went through review on main may be published under a version: a tag
+          # can point at any commit, including one from an unmerged branch.
+          if [[ -n $VERSION ]] && ! git merge-base --is-ancestor "$sha" origin/main; then
+            echo "::error::Tag v${VERSION} (${sha}) is not on main; refusing to publish it."
+            exit 1
+          fi
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "publish=${PUBLISH}" >> "$GITHUB_OUTPUT"
+      - name: List Dockerfiles
+        id: find
+        run: |
+          shopt -s nullglob
+          images='[]'
+          for dockerfile in tools/*/Dockerfile services/*/Dockerfile agent/Dockerfile; do
+            [[ -f $dockerfile ]] || continue # agent/ may not exist yet
+            dir=$(dirname "$dockerfile")
+            name=$(basename "$dir")
+            if [[ ! $name =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+              echo "::error file=${dockerfile}::'${name}' can't be an image name (lowercase letters, digits and dashes only)"
+              exit 1
+            fi
+            # Go tests here only for services/; tools/* modules are tested by ci.yml.
+            go=false
+            if [[ $dir == services/* && -f $dir/go.mod ]]; then go=true; fi
+            images=$(jq -c --arg name "$name" --arg dir "$dir" --argjson go "$go" \
+              '. + [{name: $name, dir: $dir, go: $go}]' <<<"$images")
+          done
+          # tools/x and services/x would push to the same registry path.
+          dupes=$(jq -r 'group_by(.name) | map(select(length > 1) | .[0].name) | join(", ")' <<<"$images")
+          if [[ -n $dupes ]]; then
+            echo "::error::Two image directories share a name: ${dupes}"
+            exit 1
+          fi
+          if [[ $images == '[]' ]]; then
+            echo "::notice::No Dockerfiles under tools/, services/ or agent/ yet; nothing to build."
+          fi
+          echo "images=${images}" >> "$GITHUB_OUTPUT"
+          jq . <<<"$images"
+
+  build:
+    name: Build ${{ matrix.image.name }} (tests, build, scan)
+    needs: discover
+    if: needs.discover.outputs.images != '[]'
+    runs-on: ubuntu-24.04 # pinned: upgrade deliberately, not when GitHub moves "latest"
+    # No id-token here: tests, the build and the scanners run without any way to get cloud or
+    # signing credentials.
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.discover.outputs.images) }}
+    env:
+      LOCAL_IMAGE: local/${{ matrix.image.name }}:${{ needs.discover.outputs.sha }}
+      DIR: ${{ matrix.image.dir }}
+      PUBLISH: ${{ needs.discover.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A release builds exactly the commit discover checked; otherwise the triggering commit.
+          ref: ${{ inputs.version && needs.discover.outputs.sha || '' }}
+          persist-credentials: false
+      # Tests run on pull requests; the publish path builds what the reviewed pull request tested.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: matrix.image.go && github.event_name == 'pull_request'
+        with:
+          go-version-file: ${{ matrix.image.dir }}/go.mod # uses its toolchain directive
+          cache-dependency-path: ${{ matrix.image.dir }}/go.sum
+      - name: Go tests (race detector)
+        if: matrix.image.go && github.event_name == 'pull_request'
+        working-directory: ${{ matrix.image.dir }}
+        run: go test -race -count=1 ./...
+      - name: Build
+        # linux/amd64: the cluster's nodes (e2-standard-2). No BuildKit attestations: the signed
+        # SBOM is attached by cosign when the image is published.
+        run: docker build --pull --platform linux/amd64 --provenance=false --sbom=false -t "$LOCAL_IMAGE" "$DIR"
+      - name: Scan the image (fixable HIGH and CRITICAL fail the job)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: image
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Generate the SBOM (SPDX)
+        if: env.PUBLISH == 'true'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: image
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          format: spdx-json
+          output: out/sbom.spdx.json
+      - name: Save the image for the publish job
+        if: env.PUBLISH == 'true'
+        run: |
+          mkdir -p out
+          docker save -o out/image.tar "$LOCAL_IMAGE"
+          (cd out && sha256sum image.tar sbom.spdx.json > SHA256SUMS)
+      - name: Hand the image over
+        if: env.PUBLISH == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-${{ matrix.image.name }}
+          path: out/
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    name: Publish ${{ matrix.image.name }}
+    needs: [discover, build]
+    # Only from main (the only ref Google lets impersonate ci-images), once bootstrap is applied,
+    # and only if every image built and passed its scan.
+    if: needs.discover.outputs.images != '[]' && needs.discover.outputs.publish == 'true'
+    runs-on: ubuntu-24.04 # pinned: upgrade deliberately, not when GitHub moves "latest"
+    permissions:
+      contents: read
+      id-token: write # Google credentials through Workload Identity Federation, and the Sigstore certificate for keyless signing
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.discover.outputs.images) }}
+    env:
+      LOCAL_IMAGE: local/${{ matrix.image.name }}:${{ needs.discover.outputs.sha }}
+      SHA: ${{ needs.discover.outputs.sha }}
+      IMAGE: asia-northeast1-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/mamori/${{ matrix.image.name }}
+    # No checkout, no tests, no scanners: this job only moves the scanned image and signs it.
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: image-${{ matrix.image.name }}
+          path: in
+      - name: Load the image the build job scanned
+        run: |
+          (cd in && sha256sum --check --strict SHA256SUMS)
+          docker load -i in/image.tar
+      - id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_CI_IMAGES_SA || format('ci-images@{0}.iam.gserviceaccount.com', vars.GCP_PROJECT_ID) }}
+          token_format: access_token
+          access_token_lifetime: 1200s # push, sign and attest take minutes
+          create_credentials_file: false # nothing on disk that a later step could leak
+      - name: Log in to Artifact Registry
+        env:
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+        run: docker login --username oauth2accesstoken --password-stdin "https://${REGION}-docker.pkg.dev" <<<"$ACCESS_TOKEN"
+      - name: Push
+        id: push
+        # The repository has immutable tags: a tag, once pushed, always names the same digest.
+        # - A release pushes only :<version>, a build of its tag. (The tagged commit may already be
+        #   on the registry as :<sha> from main, as a different build of the same source.)
+        # - Otherwise :<sha>. If that commit is already there (a re-run, or a manual run of a
+        #   commit main already published), nothing is pushed and the existing image is signed
+        #   again, which only adds a signature; so a re-run also repairs a publish that failed
+        #   after its push.
+        run: |
+          digest_of() { docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' 2>/dev/null | jq -r .digest; }
+          if [[ -n $VERSION ]]; then
+            tag=$VERSION
+            if [[ $(digest_of "${IMAGE}:${tag}") == sha256:* ]]; then
+              echo "::error::${IMAGE}:${tag} already exists; version tags are never replaced. Cut a new release."
+              exit 1
+            fi
+          else
+            tag=$SHA
+          fi
+          if [[ -z $VERSION && $(digest_of "${IMAGE}:${tag}") == sha256:* ]]; then
+            echo "::notice::${IMAGE}:${tag} is already published; signing that image again instead of pushing."
+          else
+            docker tag "$LOCAL_IMAGE" "${IMAGE}:${tag}"
+            docker push --quiet "${IMAGE}:${tag}"
+          fi
+          digest=$(digest_of "${IMAGE}:${tag}")
+          if [[ ! $digest =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Could not read the digest of ${IMAGE}:${tag}"
+            exit 1
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "tags=${tag}" >> "$GITHUB_OUTPUT"
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+      - name: Sign (keyless, with this workflow's GitHub identity)
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        # Signs the digest, so the signature covers every tag that points at it.
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+      - name: Attach the SBOM as a signed attestation
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign attest --yes --type spdxjson --predicate in/sbom.spdx.json "${IMAGE}@${DIGEST}"
+      - name: Summary
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          TAGS: ${{ steps.push.outputs.tags }}
+          IDENTITY: ${{ github.server_url }}/${{ github.repository }}/.github/workflows/images.yml@refs/heads/main
+        run: |
+          {
+            echo "### ${IMAGE}"
+            echo "- digest \`${DIGEST}\`, tags: \`${TAGS}\`, built from \`${SHA}\`"
+            echo "- verify (see docs/images.md):"
+            echo '```sh'
+            echo "cosign verify ${IMAGE}@${DIGEST} \\"
+            echo "  --certificate-identity '${IDENTITY}' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Log out of Artifact Registry
+        if: always()
+        run: docker logout "https://${REGION}-docker.pkg.dev" || true
