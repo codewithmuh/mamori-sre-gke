@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
@@ -515,4 +517,146 @@ func TestNewProposalID(t *testing.T) {
 	if !idPattern.MatchString(id) {
 		t.Fatalf("id %q does not match the id pattern", id)
 	}
+}
+
+func TestEditedMessageIsRefused(t *testing.T) {
+	h := newHarness(t)
+	p := h.propose(t, restartRequest("inc-1"))
+	shown := blockTexts(proposalBlocks(p))
+	// Someone with a bot token rewrote the header to show a harmless action.
+	tampered := slices.Clone(shown)
+	tampered[0] = "plain_text:Proposed action: restart deployment/adservice"
+	for _, s := range [][]string{tampered, nil, shown[:len(shown)-1]} {
+		h.svc.HandleInteraction(context.Background(), Interaction{
+			UserID: "U0APPROVER", ChannelID: "C0EXEC0001", MessageTS: fakeTS, ActionID: actionIDApprove, ProposalID: p.ID, Shown: s,
+		})
+	}
+	if got := h.status(t, p.ID); got.Status != statusPending || len(h.cluster.executed) != 0 {
+		t.Fatalf("status %s, executed %d", got.Status, len(h.cluster.executed))
+	}
+	if ev := h.logs.events(t); !slices.Contains(ev, "approval_denied:content-mismatch") {
+		t.Errorf("events = %v", ev)
+	}
+	h.click(p, "U0APPROVER", actionIDApprove) // the real message still works
+	if got := h.status(t, p.ID); got.Status != statusExecuted {
+		t.Fatalf("status = %s", got.Status)
+	}
+}
+
+func TestOpenProposalsAreCapped(t *testing.T) {
+	h := newHarness(t)
+	for i := range maxOpenProposals {
+		h.propose(t, restartRequest(fmt.Sprintf("inc-%d", i)))
+	}
+	_, err := h.svc.Propose(context.Background(), restartRequest("inc-more"))
+	if r := asRefusal(t, err); r.reason != reasonTooManyOpen || httpStatus(r.reason) != 429 {
+		t.Fatalf("refusal = %v", r)
+	}
+	// The same request again is still answered (it is not a new proposal).
+	if p := h.propose(t, restartRequest("inc-0")); p.Status != statusPending {
+		t.Fatalf("retry = %+v", p)
+	}
+}
+
+func TestRationaleIsShortenedInState(t *testing.T) {
+	h := newHarness(t)
+	req := restartRequest("inc-1")
+	req.Rationale = strings.Repeat("<&>", maxRationaleLen/3)
+	p := h.propose(t, req)
+	if len(p.Rationale) > maxStoredRationale || !strings.HasSuffix(p.Rationale, "…") {
+		t.Fatalf("stored rationale is %d bytes", len(p.Rationale))
+	}
+	if got := h.status(t, p.ID); got.Rationale != p.Rationale {
+		t.Error("state and response differ")
+	}
+	// The audit log keeps the whole text.
+	for _, m := range h.logs.lines(t) {
+		if m["event"] == eventReceived && len(m["rationale"].(string)) != len(req.Rationale) {
+			t.Errorf("audit rationale is %d bytes, want %d", len(m["rationale"].(string)), len(req.Rationale))
+		}
+	}
+}
+
+// Fill the state far past the ConfigMap limit with final proposals whose text would triple
+// in size under HTML escaping: proposing and approving must keep working.
+func TestStateCannotOverflow(t *testing.T) {
+	h := newHarness(t)
+	big := strings.Repeat("<&>", maxRationaleLen/3)
+	_, err := h.store.Update(context.Background(), func(st *State) error {
+		for i := range 2 * maxFinalProposals {
+			id := fmt.Sprintf("p-old-%04d", i)
+			st.Proposals[id] = &Proposal{ID: id, Status: statusRejected, IncidentID: id, Rationale: big,
+				Action:    Action{Type: actionRestart, Namespace: targetNamespace, Target: "deployment/frontend", Params: map[string]any{}},
+				CreatedAt: h.clock.now().Add(-time.Duration(2*maxFinalProposals-i) * time.Minute)}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("filling the state: %v", err)
+	}
+	p := h.propose(t, restartRequest("inc-new"))
+	h.click(p, "U0APPROVER", actionIDApprove)
+	if got := h.status(t, p.ID); got.Status != statusExecuted {
+		t.Fatalf("status = %s", got.Status)
+	}
+	cm, err := h.client.CoreV1().ConfigMaps("mamori-agent").Get(context.Background(), stateMapName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(cm.Data[stateKey]); n > maxStateBytes {
+		t.Fatalf("state is %d bytes, limit %d", n, maxStateBytes)
+	}
+	if _, ok := h.store.Get(fmt.Sprintf("p-old-%04d", 2*maxFinalProposals-1)); !ok {
+		t.Error("the newest final proposals should survive; the oldest go first")
+	}
+}
+
+// A Reject click or an expiry that read the proposal while it was still pending must not
+// overwrite an approval that is already running, and must not hide its outcome.
+func TestRejectOrExpiryCannotOverrideRunningAction(t *testing.T) {
+	h := newHarness(t)
+	p := h.propose(t, restartRequest("inc-1"))
+	started, release := make(chan struct{}), make(chan struct{})
+	h.cluster.onExecute = func() { close(started); <-release }
+	done := make(chan struct{})
+	go func() {
+		h.click(p, "U0APPROVER", actionIDApprove)
+		close(done)
+	}()
+	<-started
+	h.svc.close(context.Background(), p.ID, statusPending, statusRejected, "", "", "U0SECOND", false)
+	h.clock.add(time.Hour)
+	h.svc.expire(context.Background(), p)
+	close(release)
+	<-done
+
+	got := h.status(t, p.ID)
+	if got.Status != statusExecuted || got.DecidedBy != "U0APPROVER" {
+		t.Fatalf("got %+v", got)
+	}
+	want := []string{"proposal_received:", "approved:", "executed:"}
+	if ev := h.logs.events(t); !slices.Equal(ev, want) {
+		t.Errorf("events = %v, want %v", ev, want)
+	}
+}
+
+func TestConflictIsRetriedOnce(t *testing.T) {
+	h := newHarness(t)
+	conflict := apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, "currencyservice", errors.New("object changed"))
+	h.cluster.execErrs = []error{conflict}
+	p := h.propose(t, restartRequest("inc-1"))
+	h.click(p, "U0APPROVER", actionIDApprove)
+	if got := h.status(t, p.ID); got.Status != statusExecuted {
+		t.Fatalf("status = %s (%s)", got.Status, got.Error)
+	}
+
+	// Two conflicts in a row: nothing was written, so it is blocked and the incident is free.
+	h.cluster.execErrs = []error{conflict, conflict}
+	q := h.propose(t, restartRequest("inc-2"))
+	h.click(q, "U0APPROVER", actionIDApprove)
+	got := h.status(t, q.ID)
+	if got.Status != statusBlocked || got.Reason != reasonConflict {
+		t.Fatalf("got %+v", got)
+	}
+	h.propose(t, restartRequest("inc-2"))
 }

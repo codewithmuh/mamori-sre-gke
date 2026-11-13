@@ -50,7 +50,8 @@ var (
 		reasonNotAllowed: true, reasonOutOfBounds: true, reasonAlreadyActed: true, reasonKillSwitch: true,
 		reasonInvalid: true, reasonUnauthorized: true, reasonApprovalUnavailable: true, reasonExpired: true,
 		reasonExecError: true, reasonInterrupted: true, reasonInternal: true,
-		"not-approver": true, "message-mismatch": true, "unknown-proposal": true, "config-unreadable": true,
+		reasonTooManyOpen: true, reasonRateLimited: true, reasonConflict: true,
+		"not-approver": true, "message-mismatch": true, "content-mismatch": true, "unknown-proposal": true, "config-unreadable": true,
 	}
 )
 

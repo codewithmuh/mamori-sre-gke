@@ -38,9 +38,9 @@ type settings struct {
 	authMode      string   // AUTH_MODE: tokenreview (default) or none (local runs only)
 	authAudience  string   // AUTH_AUDIENCE, default executor
 	authAllowed   []string // AUTH_ALLOWED_USERS, comma-separated
-	slackAppToken string   // SLACK_APP_TOKEN (xapp-...), Socket Mode
-	slackBotToken string   // SLACK_BOT_TOKEN (xoxb-...), chat:write
-	slackAPIURL   string   // SLACK_API_URL, default Slack's own; another workspace host or a local fake
+	slackAppToken string   // EXECUTOR_SLACK_APP_TOKEN (xapp-...), Socket Mode
+	slackBotToken string   // EXECUTOR_SLACK_BOT_TOKEN (xoxb-...), chat:write
+	slackAPIURL   string   // EXECUTOR_SLACK_API_URL, default Slack's own; another workspace host or a local fake
 	kubeconfig    string   // KUBECONFIG, for local runs outside the cluster
 }
 
@@ -57,9 +57,9 @@ func loadSettings(getenv func(string) string) (settings, error) {
 		opsAddr:       get("OPS_ADDR", ":9090"),
 		authMode:      get("AUTH_MODE", "tokenreview"),
 		authAudience:  get("AUTH_AUDIENCE", "executor"),
-		slackAppToken: get("SLACK_APP_TOKEN", ""),
-		slackBotToken: get("SLACK_BOT_TOKEN", ""),
-		slackAPIURL:   get("SLACK_API_URL", slack.APIURL),
+		slackAppToken: get("EXECUTOR_SLACK_APP_TOKEN", ""),
+		slackBotToken: get("EXECUTOR_SLACK_BOT_TOKEN", ""),
+		slackAPIURL:   get("EXECUTOR_SLACK_API_URL", slack.APIURL),
 		kubeconfig:    get("KUBECONFIG", ""),
 	}
 	for _, u := range strings.Split(get("AUTH_ALLOWED_USERS", "system:serviceaccount:mamori-agent:agent"), ",") {
@@ -82,16 +82,16 @@ func loadSettings(getenv func(string) string) (settings, error) {
 		errs = append(errs, fmt.Errorf("AUTH_MODE=%q must be tokenreview or none", s.authMode))
 	}
 	if (s.slackAppToken == "") != (s.slackBotToken == "") {
-		errs = append(errs, errors.New("set both SLACK_APP_TOKEN and SLACK_BOT_TOKEN, or neither"))
+		errs = append(errs, errors.New("set both EXECUTOR_SLACK_APP_TOKEN and EXECUTOR_SLACK_BOT_TOKEN, or neither"))
 	}
 	if s.slackAppToken != "" && !strings.HasPrefix(s.slackAppToken, "xapp-") {
-		errs = append(errs, errors.New("SLACK_APP_TOKEN must be an app-level token (xapp-...)"))
+		errs = append(errs, errors.New("EXECUTOR_SLACK_APP_TOKEN must be an app-level token (xapp-...)"))
 	}
 	if s.slackBotToken != "" && !strings.HasPrefix(s.slackBotToken, "xoxb-") {
-		errs = append(errs, errors.New("SLACK_BOT_TOKEN must be a bot token (xoxb-...)"))
+		errs = append(errs, errors.New("EXECUTOR_SLACK_BOT_TOKEN must be a bot token (xoxb-...)"))
 	}
 	if u, err := url.Parse(s.slackAPIURL); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || !strings.HasSuffix(u.Path, "/") {
-		errs = append(errs, fmt.Errorf("SLACK_API_URL=%q must be an http(s) URL ending in /", s.slackAPIURL))
+		errs = append(errs, fmt.Errorf("EXECUTOR_SLACK_API_URL=%q must be an http(s) URL ending in /", s.slackAPIURL))
 	}
 	return s, errors.Join(errs...)
 }
@@ -158,7 +158,7 @@ func run(ctx context.Context, getenv func(string) string, out io.Writer) int {
 	}
 
 	var ready atomic.Bool
-	return serve(ctx, log, svc, &api{svc: svc, auth: auth, log: log}, listener, promhttp.HandlerFor(reg, promhttp.HandlerOpts{}), s, &ready, live)
+	return serve(ctx, log, svc, &api{svc: svc, auth: auth, log: log, limiter: newProposalLimiter()}, listener, promhttp.HandlerFor(reg, promhttp.HandlerOpts{}), s, &ready, live)
 }
 
 func kubeConfig(path string) (*rest.Config, error) {

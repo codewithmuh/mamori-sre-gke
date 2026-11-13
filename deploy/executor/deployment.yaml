@@ -1,7 +1,6 @@
-# One replica: the state ConfigMap is written with optimistic concurrency, so two would still
-# be safe, but Slack would split clicks between two Socket Mode connections for no gain.
-# spec.replicas is left out on purpose, so `kubectl scale --replicas=0` (the hard stop in the
-# runbook) is not drift and Argo CD does not undo it. Recreate: never two at once.
+# At most one replica: the state ConfigMap is written with optimistic concurrency, so two would
+# still be safe, but Slack would split clicks between two Socket Mode connections for no gain.
+# Recreate: never two at once.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -12,6 +11,10 @@ metadata:
     app.kubernetes.io/part-of: mamori
     app.kubernetes.io/component: incident-response
 spec:
+  # 0 until the image exists: raise to 1 after the first image publish, at M5; see
+  # docs/images.md. Until then the pod would sit in ImagePullBackOff (PROJECT_ID placeholder)
+  # and Argo CD would show the app Degraded. The kill switch stays off either way.
+  replicas: 0
   strategy:
     type: Recreate
   selector:
@@ -55,13 +58,15 @@ spec:
               value: system:serviceaccount:mamori-agent:agent
             # Created by hand (docs/runbooks/executor.md), never in Git. Optional, so the pod
             # starts without them; it then refuses every proposal (nobody could approve).
-            - name: SLACK_APP_TOKEN
+            # Its own Slack app and tokens, never the agent's: a bot token can edit any message
+            # its app posted, so sharing one would let the agent rewrite a proposal message.
+            - name: EXECUTOR_SLACK_APP_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: executor-slack
                   key: app-token
                   optional: true
-            - name: SLACK_BOT_TOKEN
+            - name: EXECUTOR_SLACK_BOT_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: executor-slack

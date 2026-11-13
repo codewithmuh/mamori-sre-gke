@@ -24,7 +24,7 @@ func TestLoadSettings(t *testing.T) {
 		t.Fatalf("defaults = %+v", s)
 	}
 	s, err = loadSettings(env(map[string]string{
-		"AUTH_ALLOWED_USERS": " a , b ,", "SLACK_APP_TOKEN": "xapp-1", "SLACK_BOT_TOKEN": "xoxb-1", "AUTH_MODE": "none",
+		"AUTH_ALLOWED_USERS": " a , b ,", "EXECUTOR_SLACK_APP_TOKEN": "xapp-1", "EXECUTOR_SLACK_BOT_TOKEN": "xoxb-1", "AUTH_MODE": "none",
 	}))
 	if err != nil || len(s.authAllowed) != 2 || s.slackBotToken != "xoxb-1" || s.slackAPIURL != "https://slack.com/api/" {
 		t.Fatalf("custom = %+v, %v", s, err)
@@ -34,11 +34,11 @@ func TestLoadSettings(t *testing.T) {
 		{"POD_NAMESPACE": "Bad_NS"},
 		{"AUTH_MODE": "basic"},
 		{"AUTH_ALLOWED_USERS": " , "},
-		{"SLACK_APP_TOKEN": "xapp-1"},
-		{"SLACK_APP_TOKEN": "xoxb-1", "SLACK_BOT_TOKEN": "xoxb-1"},
-		{"SLACK_APP_TOKEN": "xapp-1", "SLACK_BOT_TOKEN": "xoxp-1"},
-		{"SLACK_API_URL": "ftp://slack.example/api/"},
-		{"SLACK_API_URL": "https://slack.example/api"},
+		{"EXECUTOR_SLACK_APP_TOKEN": "xapp-1"},
+		{"EXECUTOR_SLACK_APP_TOKEN": "xoxb-1", "EXECUTOR_SLACK_BOT_TOKEN": "xoxb-1"},
+		{"EXECUTOR_SLACK_APP_TOKEN": "xapp-1", "EXECUTOR_SLACK_BOT_TOKEN": "xoxp-1"},
+		{"EXECUTOR_SLACK_API_URL": "ftp://slack.example/api/"},
+		{"EXECUTOR_SLACK_API_URL": "https://slack.example/api"},
 	}
 	for _, b := range bad {
 		if _, err := loadSettings(env(b)); err == nil {

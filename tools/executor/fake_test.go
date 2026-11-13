@@ -121,6 +121,7 @@ func (n *fakeNotifier) Ephemeral(_ context.Context, _, _, text string) error {
 type fakeCluster struct {
 	mu         sync.Mutex
 	checkErr   error
+	execErrs   []error // returned by Execute, one per call, before execErr
 	execErr    error
 	checks     int
 	executed   []Action
@@ -140,6 +141,13 @@ func (c *fakeCluster) Execute(_ context.Context, a Action) (string, error) {
 	defer c.mu.Unlock()
 	if c.onExecute != nil {
 		c.onExecute()
+	}
+	if len(c.execErrs) > 0 {
+		err := c.execErrs[0]
+		c.execErrs = c.execErrs[1:]
+		if err != nil {
+			return "", err
+		}
 	}
 	if c.execErr != nil {
 		return "", c.execErr
@@ -282,6 +290,7 @@ func (h *harness) propose(t *testing.T, req proposalRequest) Proposal {
 func (h *harness) click(p Proposal, user, actionID string) {
 	h.svc.HandleInteraction(context.Background(), Interaction{
 		UserID: user, ChannelID: "C0EXEC0001", MessageTS: fakeTS, ActionID: actionID, ProposalID: p.ID,
+		Shown: blockTexts(proposalBlocks(p)), // what the executor posted, unchanged
 	})
 }
 

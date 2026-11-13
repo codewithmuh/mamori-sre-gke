@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -30,7 +31,10 @@ type IncidentAction struct {
 
 const (
 	stateKey = "state.json"
-	// A ConfigMap holds at most 1 MiB. Old final proposals are pruned well before that.
+	// A ConfigMap holds at most 1 MiB. Final proposals are pruned by age, by count and, as a
+	// last resort, by size (oldest first), so a write never fails for lack of room while
+	// final proposals are left. Open proposals are capped (maxOpenProposals) and their
+	// stored rationale is short (maxStoredRationale), so they always fit.
 	maxStateBytes      = 768 * 1024
 	stateRetention     = 30 * 24 * time.Hour
 	maxFinalProposals  = 300
@@ -82,6 +86,43 @@ func (st *State) prune(now time.Time) {
 	for id, ia := range st.Incidents {
 		if ia.At.Before(cutoff) {
 			delete(st.Incidents, id)
+		}
+	}
+}
+
+// encode writes the state as JSON. HTML escaping is off: it would turn every <, > and & in
+// a rationale into six bytes.
+func (st *State) encode() ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(st); err != nil {
+		return nil, fmt.Errorf("encode state: %w", err)
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
+// encodeWithin encodes the state, dropping the oldest final proposals until it fits in
+// limit bytes. Open proposals and incident records are never dropped here.
+func (st *State) encodeWithin(limit int) ([]byte, error) {
+	for {
+		raw, err := st.encode()
+		if err != nil || len(raw) <= limit {
+			return raw, err
+		}
+		var final []*Proposal
+		for _, p := range st.Proposals {
+			if !p.Status.open() {
+				final = append(final, p)
+			}
+		}
+		if len(final) == 0 {
+			return nil, fmt.Errorf("state is %d bytes, over the %d-byte limit, with no final proposals left to drop", len(raw), limit)
+		}
+		slices.SortFunc(final, func(a, b *Proposal) int { return a.CreatedAt.Compare(b.CreatedAt) })
+		// Drop a tenth (at least one) per round, so a big overflow needs few re-encodes.
+		for _, p := range final[:max(1, len(final)/10)] {
+			delete(st.Proposals, p.ID)
 		}
 	}
 }
@@ -146,12 +187,9 @@ func (s *configMapStore) Update(ctx context.Context, fn func(*State) error) (*St
 			return nil, err
 		}
 		st.prune(s.now())
-		raw, err := json.Marshal(st)
+		raw, err := st.encodeWithin(maxStateBytes)
 		if err != nil {
-			return nil, fmt.Errorf("encode state: %w", err)
-		}
-		if len(raw) > maxStateBytes {
-			return nil, fmt.Errorf("state is %d bytes, over the %d-byte limit", len(raw), maxStateBytes)
+			return nil, err
 		}
 		if cm.Data == nil {
 			cm.Data = map[string]string{}

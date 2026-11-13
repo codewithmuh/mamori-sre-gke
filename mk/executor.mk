@@ -16,7 +16,7 @@ EXECUTOR_EVENTS := proposal_received|approved|rejected|executed|blocked|failed|a
 executor-kill: ## Executor: kill switch ON. New proposals are refused; approved ones are blocked before they run
 	@$(call require-tools,kubectl)
 	kubectl -n $(EXECUTOR_NS) patch configmap executor-config --type merge -p '{"data":{"enabled":"false"}}'
-	@echo "Executor is OFF. Check: make executor-status. Hard stop as well: kubectl -n $(EXECUTOR_NS) scale deploy/executor --replicas=0"
+	@echo "Executor is OFF. Check: make executor-status. Hard stop: see docs/runbooks/executor.md"
 
 executor-enable: ## Executor: kill switch OFF. Approved actions may run again (each still needs a Slack approval)
 	@$(call require-tools,kubectl)
@@ -43,13 +43,15 @@ executor-audit: ## Executor: audit events from the running pod's log (SINCE=24h;
 	@kubectl -n $(EXECUTOR_NS) logs deploy/executor --since=$(SINCE) | grep -E '"event":"($(EXECUTOR_EVENTS))"' || echo "no audit events in the last $(SINCE)"
 
 # Reads the tokens from the environment; printf is a shell builtin, so they never appear in a
-# process list or in the shell history.
-executor-slack-secret: ## Executor: create or replace Secret executor-slack from SLACK_APP_TOKEN and SLACK_BOT_TOKEN
+# process list or in the shell history. The names carry EXECUTOR_ on purpose: the agent has its
+# own Slack app and its own variable (AGENT_SLACK_BOT_TOKEN), so one shell cannot hand the
+# executor's bot token to the agent, which could then edit proposal messages.
+executor-slack-secret: ## Executor: create or replace Secret executor-slack from EXECUTOR_SLACK_APP_TOKEN and EXECUTOR_SLACK_BOT_TOKEN
 	@$(call require-tools,kubectl)
-	@[ -n "$${SLACK_APP_TOKEN:-}" ] && [ -n "$${SLACK_BOT_TOKEN:-}" ] || \
-		{ echo "error: export SLACK_APP_TOKEN (xapp-...) and SLACK_BOT_TOKEN (xoxb-...) first" >&2; exit 1; }
+	@[ -n "$${EXECUTOR_SLACK_APP_TOKEN:-}" ] && [ -n "$${EXECUTOR_SLACK_BOT_TOKEN:-}" ] || \
+		{ echo "error: export EXECUTOR_SLACK_APP_TOKEN (xapp-...) and EXECUTOR_SLACK_BOT_TOKEN (xoxb-...) first" >&2; exit 1; }
 	@kubectl -n $(EXECUTOR_NS) create secret generic executor-slack \
-		--from-file=app-token=<(printf %s "$$SLACK_APP_TOKEN") \
-		--from-file=bot-token=<(printf %s "$$SLACK_BOT_TOKEN") \
+		--from-file=app-token=<(printf %s "$$EXECUTOR_SLACK_APP_TOKEN") \
+		--from-file=bot-token=<(printf %s "$$EXECUTOR_SLACK_BOT_TOKEN") \
 		--dry-run=client -o yaml | kubectl apply -f -
 	kubectl -n $(EXECUTOR_NS) rollout restart deploy/executor

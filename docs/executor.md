@@ -53,12 +53,12 @@ executor, decides whether that proposal is allowed, asks a human, and runs it wi
 | 5 | Allow-list: action type, namespace `boutique`, Deployment or kind listed; `rollback` never | `policy.go` | Anything not listed |
 | 6 | Bounds: `1 <= min <= replicas <= max <= 5` per Deployment | `policy.go` | Scaling to zero or to 50 |
 | 7 | Live checks: target exists; fault label; not tracked by Argo CD; no HPA; Git does not set replicas | `kube.go` | Actions that are unsafe or would be undone at once |
-| 8 | One action per incident; one open proposal per incident | `service.go`, `store.go` | Action loops, "try everything" |
-| 9 | Approval: clicker on the list, click from this proposal's own message in the configured channel, before expiry | `service.go` | Anyone else, copied buttons, stale proposals |
+| 8 | One action per incident; one open proposal per incident; at most 5 open proposals in all (429 `too-many-open`); at most 10 POSTs at once, then one per 6 s (429 `rate-limited`) | `service.go`, `api.go` | Action loops, "try everything", flooding Slack or the state |
+| 9 | Approval: clicker on the list, click from this proposal's own message in the configured channel, the message still showing exactly what the executor posted, before expiry | `service.go`, `slack.go` | Anyone else, copied buttons, an edited message, stale proposals |
 | 10 | Guards 3, 5, 6 and 7 again at approval, and the kill switch once more right before the write | `service.go` | Changes made while the proposal waited |
 | 11 | RBAC: only the verbs and resources below | `deploy/executor/rbac.yaml` | Anything the code does not do |
-| 12 | Admission policies: delete only labelled faults; restart patch may change only the restart annotation; scale 1 to 5 | `deploy/executor/admission-policy.yaml` | A bug in the executor, or its token used elsewhere |
-| 13 | Preconditions on delete (UID and resourceVersion) and on scale (resourceVersion) | `kube.go` | Acting on an object that changed after the check |
+| 12 | Admission policies: delete only labelled faults; a restart patch may change only the restart annotation of a listed Deployment (no owner references, finalizers, labels, annotations or rollout settings); scale only listed Deployments, 1 to 5 | `deploy/executor/admission-policy.yaml` | A bug in the executor, or its token used elsewhere |
+| 13 | Preconditions on delete (UID) and on scale (resourceVersion); on a conflict the action is checked again and tried once more, then blocked | `kube.go`, `service.go` | Acting on an object that changed after the check |
 | 14 | Audit line for every step; metrics | `service.go`, `metrics.go` | Silent actions |
 
 ## Actions and GitOps (the open point in design.md)
@@ -108,6 +108,12 @@ Service account `executor` in `mamori-agent`. Everything it can do:
 | `mamori-agent` | `configmaps` `executor-state` (resourceNames) | get, update | proposals, incidents already acted on | Cannot create it; Argo CD does |
 | cluster | `authentication.k8s.io` `tokenreviews` | create | check the agent's token | Verifies tokens only |
 
+The name lists in the restart and scale policies mirror `restart.deployments` and `scale` in `executor-config`;
+`tools/executor/manifests_test.go` fails if they drift apart, and also checks that RBAC's delete rights, the fault-delete
+policy and the code's fault kinds are the same list. Locking owner references matters: a patch that set an owner on a
+Deployment would make the garbage collector delete it, and that delete comes from the garbage collector, not the
+executor, so the fault-delete policy would never see it.
+
 Not granted, on purpose: pods (no exec, no delete, no logs), Secrets, `create` of anything in `boutique`, `list` or
 `watch` of anything but HPAs, any other namespace, Argo CD Applications, RBAC objects. A restart replaces pods through
 the Deployment, so `maxUnavailable` and the PodDisruptionBudgets (#27) pace it, instead of deleting pods directly.
@@ -129,8 +135,11 @@ resourceVersion (optimistic concurrency): two writers can never both claim the s
 | A database or a volume | More to run and pay for; a volume ties the pod to a zone |
 | **One ConfigMap, only this one writable** | No new machinery; `resourceNames` gives the executor exactly this object; readable with `kubectl` during an incident |
 
-Limits: a ConfigMap holds at most 1 MiB, so final proposals are pruned after 30 days and beyond 300. The state is not
-the audit record: the audit log in Cloud Logging is. The Argo CD Application ignores `/data` on this ConfigMap (and
+Limits: a ConfigMap holds at most 1 MiB. Final proposals are pruned after 30 days, beyond 300, and, if the state would
+still exceed 768 KiB, oldest first until it fits. Open proposals are capped at 5 and keep only the first 1,000 bytes of
+the agent's rationale (the full text is in the `proposal_received` audit line); JSON is written without HTML escaping,
+so `<` stays one byte. Together that keeps every write possible. The state is not the audit record: the audit log in
+Cloud Logging is. The Argo CD Application ignores `/data` on this ConfigMap (and
 `RespectIgnoreDifferences` keeps syncs from overwriting it); the manifest in Git has no data at all.
 
 If the executor stops in the middle of an action, the proposal is still `approved` in the state. On start it is marked
@@ -144,20 +153,34 @@ If the executor stops in the middle of an action, the proposal is still `approve
 - **Sticks:** Git holds only the starting value (`"false"`). The Argo CD Application ignores `/data/enabled`, so
   self-heal never flips it back. Other config keys still change only through Git.
 - **Fails closed:** a missing ConfigMap, a typo (`True`, `yes`) or an invalid `config.yaml` count as off.
-- **Hard stop:** `kubectl -n mamori-agent scale deploy/executor --replicas=0`. The Deployment has no `replicas` in Git
-  for exactly this reason, so Argo CD leaves it at zero.
+- **Hard stop:** set `replicas: 0` in `deploy/executor/deployment.yaml` by PR, or, faster, turn off auto-sync of the
+  `executor` Application and scale to 0 (runbook). A plain `kubectl scale` would be undone by self-heal, because
+  `replicas` is in Git.
+- **Shipped at zero replicas:** until the image exists in Artifact Registry (the first image publish, at M5; see
+  `docs/images.md`), the Deployment ships with `replicas: 0`, so the pod does not sit in ImagePullBackOff and Argo CD
+  does not show the app Degraded. Raise it to 1 by PR then. The kill switch stays off either way.
 
 ## Slack approval
 
 - **Socket Mode:** the executor opens an outbound WebSocket with an app-level token (`xapp-`, scope
   `connections:write`); clicks arrive over it. No public endpoint, no Ingress, no signing secret: the connection is
   authenticated by the token. Posting uses a bot token (`xoxb-`, scope `chat:write`). Both live in Secret
-  `executor-slack`, created by hand, never in Git.
+  `executor-slack`, created by hand, never in Git (`make executor-slack-secret` reads `EXECUTOR_SLACK_APP_TOKEN` and
+  `EXECUTOR_SLACK_BOT_TOKEN`).
+- **Separate Slack apps for the agent and the executor.** A bot token can edit every message its app posted. If the
+  agent held the executor's bot token, it could rewrite a proposal message to show a harmless action while the button
+  approves another. So each has its own app and its own variables (`AGENT_SLACK_BOT_TOKEN` for the agent), and on
+  every click the executor compares the message's text and buttons with what it posted for that proposal; any
+  difference, or a missing message, refuses the click (`approval_denied`, reason `content-mismatch`).
 - **What counts as an approval:** a `block_actions` click on the Approve button, by a user id in `slack.approvers`,
   in `slack.channel`, on the message whose timestamp the executor stored for that proposal, before `expiresAt`. A
   click by anyone else is answered privately and logged as `approval_denied`; the proposal stays open.
 - **Approve has a confirm dialog** that restates the action, so a stray click does not run it.
-- **Outcome:** the message is rewritten to show the result (buttons removed) and the result is posted in its thread.
+- **Outcome:** after the action, the message is rewritten to show the result (buttons removed) and the result is
+  posted in its thread. Nothing is posted between approval and action, so a slow Slack never delays the action.
+  Outcomes are recorded with their own time budget even if the click's time is up. A Reject or an expiry that
+  arrives while an approved action runs changes nothing: a running action can only end as executed, failed or
+  blocked.
 - **Expiry:** after `proposalTTL` (default 15 minutes) the proposal expires; a late click does nothing.
 
 ## Failure modes
@@ -169,6 +192,8 @@ If the executor stops in the middle of an action, the proposal is still `approve
 | Socket Mode stops for good (token revoked or wrong) | `slack_disconnected` logged, gauge 0, `/healthz` fails, so the kubelet restarts the container (CrashLoopBackOff while the token stays bad) | It does not stay up looking healthy while nobody can approve |
 | Kubernetes API slow at approval | Proposal stays pending; the approver is asked to click again | No half-approved state |
 | Kubernetes API error during the action | `failed`; incident stays claimed; a human checks | Unknown outcome: no retry by machine |
+| The target changed between check and write (409 conflict) | Checked again and tried once more; a second conflict ends as `blocked` (reason `conflict`) and frees the incident | A conflict means nothing was written |
+| The agent loops or floods | 429 `rate-limited` or `too-many-open`; Slack and the state stay small | Bounded by design |
 | Executor restarts mid-action | `failed`, reason `interrupted`, on start | Same |
 | `executor-config` missing or invalid | Everything refused with `kill-switch` | Fails closed |
 | `executor-state` missing | Pod not ready; the agent cannot connect | It cannot know which incidents had an action |

@@ -11,16 +11,29 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"golang.org/x/time/rate"
 )
 
-const maxBodyBytes = 64 << 10
+const (
+	maxBodyBytes = 64 << 10
+	// The agent sends one proposal per investigation, so this is far above normal use.
+	proposalInterval = 6 * time.Second
+	proposalBurst    = 10
+)
+
+func newProposalLimiter() *rate.Limiter {
+	return rate.NewLimiter(rate.Every(proposalInterval), proposalBurst)
+}
 
 // api serves the contract's two endpoints on :8080. Only the agent can reach this port
 // (NetworkPolicy), and POST also needs the agent's token.
 type api struct {
-	svc  *Service
-	auth authenticator
-	log  *slog.Logger
+	svc     *Service
+	auth    authenticator
+	log     *slog.Logger
+	limiter *rate.Limiter // nil = no limit (tests)
 }
 
 func (a *api) routes() http.Handler {
@@ -47,6 +60,15 @@ func writeRefusal(w http.ResponseWriter, r *refusal) {
 
 func (a *api) createProposal(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	// First, before the body or a TokenReview: a looping agent must not flood Slack, the
+	// state or the API server.
+	if a.limiter != nil && !a.limiter.Allow() {
+		ref := refuse(reasonRateLimited, "too many proposals; at most %d at once and one per %s after that", a.limiter.Burst(), proposalInterval)
+		a.svc.audit(ctx, slog.LevelWarn, eventBlocked, "", "proposal refused: "+ref.msg,
+			Proposal{ID: a.svc.newID(), Status: statusBlocked, Reason: ref.reason, Error: ref.msg})
+		writeRefusal(w, ref)
+		return
+	}
 	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok {
 		token = "" // no bearer token at all

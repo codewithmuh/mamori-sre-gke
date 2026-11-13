@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -169,12 +171,13 @@ func TestTruncate(t *testing.T) {
 	}
 }
 
-func interactiveEvent(user, channel, ts string, actions ...*slack.BlockAction) socketmode.Event {
+func interactiveEvent(user, channel, ts string, blocks []slack.Block, actions ...*slack.BlockAction) socketmode.Event {
 	cb := slack.InteractionCallback{
 		Type:      slack.InteractionTypeBlockActions,
 		User:      slack.User{ID: user},
 		Channel:   slack.Channel{GroupConversation: slack.GroupConversation{Conversation: slack.Conversation{ID: channel}}},
 		Container: slack.Container{MessageTs: ts},
+		Message:   slack.Message{Msg: slack.Msg{Blocks: slack.Blocks{BlockSet: blocks}}},
 	}
 	cb.ActionCallback.BlockActions = actions
 	return socketmode.Event{Type: socketmode.EventTypeInteractive, Data: cb, Request: &socketmode.Request{EnvelopeID: "env-1"}}
@@ -192,7 +195,7 @@ func TestSocketDispatch(t *testing.T) {
 	if testutil.ToFloat64(h.svc.metrics.slackConnected) != 1 {
 		t.Error("connected gauge not set")
 	}
-	l.dispatch(ctx, interactiveEvent("U0APPROVER", "C0EXEC0001", fakeTS,
+	l.dispatch(ctx, interactiveEvent("U0APPROVER", "C0EXEC0001", fakeTS, proposalBlocks(p),
 		&slack.BlockAction{ActionID: "unrelated", Value: p.ID},
 		&slack.BlockAction{ActionID: actionIDApprove, Value: p.ID}), ack)
 	h.svc.Wait(ctx)
@@ -222,7 +225,7 @@ func TestInteractionsFromFallbacks(t *testing.T) {
 	}
 	cb.ActionCallback.BlockActions = []*slack.BlockAction{nil, {ActionID: actionIDReject, Value: "p-9"}}
 	got := interactionsFrom(cb)
-	if len(got) != 1 || got[0] != (Interaction{UserID: "U1", ChannelID: "C1", MessageTS: "9.9", ActionID: actionIDReject, ProposalID: "p-9"}) {
+	if len(got) != 1 || !reflect.DeepEqual(got[0], Interaction{UserID: "U1", ChannelID: "C1", MessageTS: "9.9", ActionID: actionIDReject, ProposalID: "p-9"}) {
 		t.Fatalf("got %+v", got)
 	}
 }
@@ -299,5 +302,44 @@ func TestShutdownKeepsLiveness(t *testing.T) {
 	time.Sleep(50 * time.Millisecond) // let RunContext's goroutine notice the cancel
 	if err := live.err(); err != nil {
 		t.Errorf("shutdown failed liveness: %v", err)
+	}
+}
+
+// The click carries the message as Slack stored it. After a JSON round trip (how Slack sends it)
+// the texts must still equal what the executor builds, or every approval would be refused.
+func TestBlockTextsSurviveJSON(t *testing.T) {
+	p := sampleProposal()
+	want := blockTexts(proposalBlocks(p))
+	raw, err := json.Marshal(slack.Message{Msg: slack.Msg{Blocks: slack.Blocks{BlockSet: proposalBlocks(p)}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got slack.Message
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(blockTexts(got.Blocks.BlockSet), want) {
+		t.Fatalf("after JSON:\n%q\nwant\n%q", blockTexts(got.Blocks.BlockSet), want)
+	}
+	for _, needle := range []string{"button:" + actionIDApprove + ":p-1:primary", "button:" + actionIDReject + ":p-1:danger", "plain_text:Run this action?"} {
+		if !slices.Contains(want, needle) {
+			t.Errorf("texts lack %q: %q", needle, want)
+		}
+	}
+	// Any change to what is shown changes the texts.
+	other := p
+	other.Action.Target = "virtualservice/frontend"
+	if slices.Equal(blockTexts(proposalBlocks(other)), want) {
+		t.Error("a different target must give different texts")
+	}
+	// Blocks and elements the executor never posts are listed by type, so they never match.
+	extra := blockTexts([]slack.Block{
+		slack.NewDividerBlock(),
+		slack.NewContextBlock("", slack.NewImageBlockElement("https://example.invalid/x.png", "x")),
+		slack.NewActionBlock("", slack.NewDatePickerBlockElement("d")),
+		&slack.ActionBlock{Type: slack.MBTAction},
+	})
+	if !slices.Equal(extra, []string{"block:divider", "element:mixed_image", "element:datepicker"}) {
+		t.Errorf("extra = %q", extra)
 	}
 }

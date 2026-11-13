@@ -240,7 +240,61 @@ func interactionsFrom(cb slack.InteractionCallback) []Interaction {
 		if a == nil || (a.ActionID != actionIDApprove && a.ActionID != actionIDReject) {
 			continue
 		}
-		out = append(out, Interaction{UserID: cb.User.ID, ChannelID: channel, MessageTS: ts, ActionID: a.ActionID, ProposalID: a.Value})
+		out = append(out, Interaction{UserID: cb.User.ID, ChannelID: channel, MessageTS: ts, ActionID: a.ActionID, ProposalID: a.Value,
+			Shown: blockTexts(cb.Message.Blocks.BlockSet)})
+	}
+	return out
+}
+
+// blockTexts lists every piece of text and every button of a message, in order, so the
+// message an approver clicked on can be compared with what the executor posted for that
+// proposal. Unknown blocks and elements are listed by type, so adding one is a mismatch.
+func blockTexts(blocks []slack.Block) []string {
+	var out []string
+	add := func(t *slack.TextBlockObject) {
+		if t != nil {
+			out = append(out, t.Type+":"+t.Text)
+		}
+	}
+	for _, b := range blocks {
+		switch b := b.(type) {
+		case *slack.HeaderBlock:
+			add(b.Text)
+		case *slack.SectionBlock:
+			add(b.Text)
+			for _, f := range b.Fields {
+				add(f)
+			}
+		case *slack.ContextBlock:
+			for _, e := range b.ContextElements.Elements {
+				if t, ok := e.(*slack.TextBlockObject); ok {
+					add(t)
+				} else {
+					out = append(out, "element:"+string(e.MixedElementType()))
+				}
+			}
+		case *slack.ActionBlock:
+			if b.Elements == nil {
+				continue
+			}
+			for _, e := range b.Elements.ElementSet {
+				btn, ok := e.(*slack.ButtonBlockElement)
+				if !ok {
+					out = append(out, "element:"+string(e.ElementType()))
+					continue
+				}
+				out = append(out, "button:"+btn.ActionID+":"+btn.Value+":"+string(btn.Style))
+				add(btn.Text)
+				if c := btn.Confirm; c != nil {
+					add(c.Title)
+					add(c.Text)
+					add(c.Confirm)
+					add(c.Deny)
+				}
+			}
+		default:
+			out = append(out, "block:"+string(b.BlockType()))
+		}
 	}
 	return out
 }

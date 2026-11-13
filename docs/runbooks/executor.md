@@ -22,17 +22,18 @@ make executor-status               # shows enabled: false, the pod, open proposa
   too. An action already in its API call (well under a second) finishes.
 - Argo CD does not undo it: the Application ignores that one key.
 
-Hard stop, if the process itself misbehaves:
+Hard stop, if the process itself misbehaves. `replicas` is in Git, so pause the Application first or self-heal
+scales it back up within seconds:
 
 ```bash
-kubectl -n mamori-agent scale deploy/executor --replicas=0   # sticks: replicas is not in Git
-# later: kubectl -n mamori-agent scale deploy/executor --replicas=1
+kubectl -n argocd patch application executor --type merge -p '{"spec":{"syncPolicy":{"automated":null}}}'
+kubectl -n mamori-agent scale deploy/executor --replicas=0
+# afterwards: a PR that sets replicas: 0 in deploy/executor/deployment.yaml makes it permanent;
+# to resume, scale back to 1 and restore the Application's syncPolicy (re-apply deploy/apps/executor.yaml).
 ```
 
-If you suspect the executor's own identity is being misused: hard stop, then
-`kubectl -n boutique delete rolebinding executor` (Argo CD recreates it on the next sync unless you also
-`make executor-kill` and pause the `executor` Application:
-`kubectl -n argocd patch application executor --type merge -p '{"spec":{"syncPolicy":{"automated":null}}}'`).
+If you suspect the executor's own identity is being misused: hard stop as above (auto-sync off), then
+`kubectl -n boutique delete rolebinding executor`.
 
 ## Check what it did
 
@@ -118,7 +119,19 @@ The agent's call gets a 4xx with `reason`; the same reason is in the `blocked` a
 | `not-allowed` | Not on the allow-list, wrong namespace, `rollback`, not a labelled fault, HPA or Git owns replicas, target missing | Expected for unsafe proposals. For rollback: revert the commit in Git |
 | `out-of-bounds` | Replicas outside the configured bounds | Change bounds by PR if they are wrong |
 | `already-acted` | The incident already had an action, or another proposal is open | See above |
+| `too-many-open` (429) | 5 proposals are already pending or approved | Decide them in Slack, or wait for them to expire |
+| `rate-limited` (429) | More than 10 POSTs at once, then more than one per 6 s | The agent is looping: check its log; `make executor-kill` if in doubt |
 | `unauthorized` | The caller's token is not the agent's | Check the agent's projected token (audience `executor`) |
+
+`blocked` after approval with reason `conflict`: the target kept changing between the check and the write (checked
+again and tried twice); nothing was changed and the incident is free for a new proposal.
+
+A click answered privately with "the message no longer shows what this proposal would run" (`approval_denied`,
+reason `content-mismatch`): the Slack message was edited after the executor posted it. Treat it as a security event:
+something holding a bot token of the executor's Slack app changed it. Rotate the executor's bot token, check that the
+agent has its own Slack app, and leave the kill switch on until then. If every click on unedited messages shows this,
+Slack changed how it returns message text: the pod log line "the clicked message differs from the proposal" shows the
+first difference.
 
 `blocked` after approval with "denied by Kubernetes (RBAC or admission policy)": the API server refused the request.
 That means the code and the cluster disagree; keep the kill switch on and look at the error text and
@@ -126,14 +139,16 @@ That means the code and the cluster disagree; keep the kill switch on and look a
 
 ## Turn it on (first time, M5)
 
-1. **Slack app.** At api.slack.com/apps create an app in the workspace. Turn on Socket Mode; it asks for an app-level
+0. **The pod:** after the first image publish (see `docs/images.md`), set `replicas: 1` in
+   `deploy/executor/deployment.yaml` by PR. It ships at 0 so it does not sit in ImagePullBackOff before then.
+1. **Slack app, its own:** not the agent's app. At api.slack.com/apps create an app for the executor in the workspace. Turn on Socket Mode; it asks for an app-level
    token with scope `connections:write` (`xapp-...`). Under Interactivity, leave it on (Socket Mode needs no URL).
    Under OAuth, add bot scope `chat:write` and install; copy the bot token (`xoxb-...`). Invite the bot to the
    approval channel (`/invite @<app>`).
 2. **Tokens into the cluster** (never into Git):
 
    ```bash
-   export SLACK_APP_TOKEN=xapp-...  SLACK_BOT_TOKEN=xoxb-...   # from a password manager, not typed into history
+   export EXECUTOR_SLACK_APP_TOKEN=xapp-...  EXECUTOR_SLACK_BOT_TOKEN=xoxb-...   # from a password manager, not typed into history
    make executor-slack-secret
    ```
 

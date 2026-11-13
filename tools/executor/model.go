@@ -41,6 +41,9 @@ const (
 	reasonUnauthorized        = "unauthorized"
 	reasonNotFound            = "not-found"
 	reasonApprovalUnavailable = "approval-unavailable"
+	reasonTooManyOpen         = "too-many-open"
+	reasonRateLimited         = "rate-limited"
+	reasonConflict            = "conflict"
 	reasonExpired             = "expired"
 	reasonExecError           = "execution-error"
 	reasonInterrupted         = "interrupted"
@@ -134,6 +137,8 @@ func httpStatus(reason string) int {
 		return http.StatusUnprocessableEntity
 	case reasonKillSwitch:
 		return http.StatusLocked
+	case reasonTooManyOpen, reasonRateLimited:
+		return http.StatusTooManyRequests
 	case reasonApprovalUnavailable:
 		return http.StatusServiceUnavailable
 	default:

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -32,6 +33,9 @@ type Interaction struct {
 	MessageTS  string
 	ActionID   string
 	ProposalID string
+	// Shown is the text of the message the button was on, as Slack delivered it
+	// (blockTexts). It must equal what the executor posted for this proposal.
+	Shown []string
 }
 
 // Button action ids on the proposal message.
@@ -41,10 +45,19 @@ const (
 	actorExecutor   = "executor"
 	actorAgent      = "agent"
 	executeTimeout  = 10 * time.Second
-	// interactionTimeout bounds one click from start to recorded outcome. On shutdown serve
-	// waits up to shutdownTimeout for it, inside the pod's 30 s termination grace period.
+	// interactionTimeout bounds the checks and the Kubernetes call of one click. The outcome
+	// is then recorded with its own budget (recordTimeout, slackTimeout), even if the click's
+	// context has ended. On shutdown serve waits up to shutdownTimeout for all of it.
 	interactionTimeout = 20 * time.Second
+	recordTimeout      = 10 * time.Second
+	slackTimeout       = 5 * time.Second
 	shutdownTimeout    = 25 * time.Second
+	// maxOpenProposals caps pending and approved proposals together, so a looping or injected
+	// agent cannot fill Slack or the state ConfigMap. More get 429 too-many-open.
+	maxOpenProposals = 5
+	// maxStoredRationale is how much of the agent's rationale the state and Slack keep. The
+	// full text is in the proposal_received audit line.
+	maxStoredRationale = 1000
 )
 
 // Service holds the rules: every path into a write goes through approve and execute.
@@ -101,10 +114,10 @@ func (s *Service) Propose(ctx context.Context, req proposalRequest) (Proposal, e
 		IncidentID:      req.IncidentID,
 		InvestigationID: req.InvestigationID,
 		Action:          req.Action,
-		Rationale:       req.Rationale,
+		Rationale:       truncate(req.Rationale, maxStoredRationale),
 		CreatedAt:       now,
 	}
-	s.audit(ctx, slog.LevelInfo, eventReceived, actorAgent, "proposal received: "+describe(p.Action), p, "rationale", p.Rationale)
+	s.audit(ctx, slog.LevelInfo, eventReceived, actorAgent, "proposal received: "+describe(p.Action), p, "rationale", req.Rationale)
 	if r := validateRequest(req); r != nil {
 		return s.refused(ctx, p, r)
 	}
@@ -157,8 +170,13 @@ func (s *Service) propose(ctx context.Context, p Proposal) (Proposal, error) {
 		if ia, ok := st.Incidents[p.IncidentID]; ok {
 			return refuse(reasonAlreadyActed, "incident %s already had an action (proposal %s)", p.IncidentID, ia.ProposalID)
 		}
+		open := 0
 		for _, q := range st.Proposals {
-			if q.IncidentID != p.IncidentID || !q.Status.open() {
+			if !q.Status.open() {
+				continue
+			}
+			open++
+			if q.IncidentID != p.IncidentID {
 				continue
 			}
 			// The agent retries once on a timeout; the same request again gets the same answer.
@@ -168,6 +186,9 @@ func (s *Service) propose(ctx context.Context, p Proposal) (Proposal, error) {
 				return nil
 			}
 			return refuse(reasonAlreadyActed, "proposal %s for incident %s is still %s; one action per incident", q.ID, p.IncidentID, q.Status)
+		}
+		if open >= maxOpenProposals {
+			return refuse(reasonTooManyOpen, "%d proposals are already waiting for a decision; decide or let them expire first", open)
 		}
 		cp := p
 		st.Proposals[p.ID] = &cp
@@ -253,6 +274,15 @@ func (s *Service) HandleInteraction(ctx context.Context, in Interaction) {
 		s.ephemeral(ctx, in, fmt.Sprintf("Proposal %s is already %s.", p.ID, p.Status))
 		return
 	}
+	// The approver must have seen exactly what will run. If anyone edited the message (a
+	// leaked bot token can chat.update it), the click does not count.
+	if want := blockTexts(proposalBlocks(p)); !slices.Equal(in.Shown, want) {
+		i, shown, expected := firstDiff(in.Shown, want)
+		s.log.WarnContext(ctx, "the clicked message differs from the proposal", "proposalId", p.ID,
+			"index", i, "shown", shown, "expected", expected)
+		deny("content-mismatch", "The message no longer shows what this proposal would run, so your click was ignored.", p)
+		return
+	}
 	if !s.now().Before(p.ExpiresAt) {
 		s.expire(ctx, p)
 		s.ephemeral(ctx, in, fmt.Sprintf("Proposal %s expired at %s; nothing was done.", p.ID, p.ExpiresAt.UTC().Format(time.RFC3339)))
@@ -260,7 +290,7 @@ func (s *Service) HandleInteraction(ctx context.Context, in Interaction) {
 	}
 
 	if in.ActionID == actionIDReject {
-		s.close(ctx, p.ID, statusRejected, "", "", in.UserID, false)
+		s.close(ctx, p.ID, statusPending, statusRejected, "", "", in.UserID, false)
 		return
 	}
 	s.approve(ctx, p, cfg, in.UserID)
@@ -270,7 +300,9 @@ func (s *Service) ephemeral(ctx context.Context, in Interaction, text string) {
 	if s.notifier == nil {
 		return
 	}
-	if err := s.notifier.Ephemeral(ctx, in.ChannelID, in.UserID, text); err != nil {
+	nctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), slackTimeout)
+	defer cancel()
+	if err := s.notifier.Ephemeral(nctx, in.ChannelID, in.UserID, text); err != nil {
 		s.log.WarnContext(ctx, "could not send ephemeral Slack message", "error", err.Error())
 	}
 }
@@ -279,11 +311,11 @@ func (s *Service) ephemeral(ctx context.Context, in Interaction, text string) {
 // the incident, and runs the action.
 func (s *Service) approve(ctx context.Context, p Proposal, cfg *Config, user string) {
 	if !cfg.Enabled {
-		s.close(ctx, p.ID, statusBlocked, reasonKillSwitch, "the executor was switched off before approval", user, false)
+		s.close(ctx, p.ID, statusPending, statusBlocked, reasonKillSwitch, "the executor was switched off before approval", user, false)
 		return
 	}
 	if r := checkPolicy(cfg, p.Action); r != nil {
-		s.close(ctx, p.ID, statusBlocked, r.reason, "no longer allowed: "+r.msg, user, false)
+		s.close(ctx, p.ID, statusPending, statusBlocked, r.reason, "no longer allowed: "+r.msg, user, false)
 		return
 	}
 	if err := s.cluster.Check(ctx, p.Action); err != nil {
@@ -294,7 +326,7 @@ func (s *Service) approve(ctx context.Context, p Proposal, cfg *Config, user str
 			s.notifyReply(ctx, p, "The executor could not check the cluster just now, so nothing was done. The proposal is still open: try again.")
 			return
 		}
-		s.close(ctx, p.ID, statusBlocked, r.reason, r.msg, user, false)
+		s.close(ctx, p.ID, statusPending, statusBlocked, r.reason, r.msg, user, false)
 		return
 	}
 
@@ -316,7 +348,7 @@ func (s *Service) approve(ctx context.Context, p Proposal, cfg *Config, user str
 	var r *refusal
 	switch {
 	case errors.As(err, &r):
-		s.close(ctx, p.ID, statusBlocked, r.reason, r.msg, user, false)
+		s.close(ctx, p.ID, statusPending, statusBlocked, r.reason, r.msg, user, false)
 		return
 	case errors.Is(err, errNotOpen):
 		return
@@ -326,7 +358,7 @@ func (s *Service) approve(ctx context.Context, p Proposal, cfg *Config, user str
 		return
 	}
 	s.audit(ctx, slog.LevelInfo, eventApproved, user, "proposal approved: "+describe(approved.Action), approved)
-	s.notifyUpdate(ctx, approved)
+	// No Slack update here: the outcome follows within seconds and rewrites the message once.
 	s.execute(ctx, approved)
 }
 
@@ -335,33 +367,65 @@ func (s *Service) execute(ctx context.Context, p Proposal) {
 	cfg, err := s.config.Get(ctx)
 	switch {
 	case err != nil:
-		s.close(ctx, p.ID, statusBlocked, reasonKillSwitch, fmt.Sprintf("configuration unreadable right before execution: %v", err), actorExecutor, true)
+		s.close(ctx, p.ID, statusApproved, statusBlocked, reasonKillSwitch, fmt.Sprintf("configuration unreadable right before execution: %v", err), actorExecutor, true)
 		return
 	case !cfg.Enabled:
-		s.close(ctx, p.ID, statusBlocked, reasonKillSwitch, "the executor was switched off right before execution", actorExecutor, true)
+		s.close(ctx, p.ID, statusApproved, statusBlocked, reasonKillSwitch, "the executor was switched off right before execution", actorExecutor, true)
 		return
 	}
 
 	start := s.now()
-	execCtx, cancel := context.WithTimeout(ctx, executeTimeout)
-	result, err := s.cluster.Execute(execCtx, p.Action)
-	cancel()
+	result, err := s.run(ctx, p.Action)
+	if apierrors.IsConflict(err) {
+		// A conflict means the object changed between the check and the write, and nothing
+		// was written. Execute checks everything again, so one more try is safe.
+		s.log.WarnContext(ctx, "the target changed during the action; checking again and retrying once", "proposalId", p.ID, "error", err.Error())
+		result, err = s.run(ctx, p.Action)
+	}
 	elapsed := s.now().Sub(start)
 	if err != nil {
 		var r *refusal
-		if errors.As(err, &r) || apierrors.IsForbidden(err) {
+		switch {
+		case errors.As(err, &r) || apierrors.IsForbidden(err):
 			// A guard (code, RBAC or admission policy) stopped it before anything changed.
 			reason, msg := blockReason(err)
 			s.metrics.observe(p.Action.Type, "blocked", elapsed)
-			s.close(ctx, p.ID, statusBlocked, reason, msg, actorExecutor, true)
-			return
+			s.close(ctx, p.ID, statusApproved, statusBlocked, reason, msg, actorExecutor, true)
+		case apierrors.IsConflict(err):
+			// Still changing: nothing was written, so the incident is free for a new proposal.
+			s.metrics.observe(p.Action.Type, "blocked", elapsed)
+			s.close(ctx, p.ID, statusApproved, statusBlocked, reasonConflict,
+				"the target kept changing while the action ran; nothing was changed: "+err.Error(), actorExecutor, true)
+		default:
+			s.metrics.observe(p.Action.Type, "failed", elapsed)
+			s.closeWith(ctx, p.ID, statusApproved, statusFailed, reasonExecError, err.Error(), actorExecutor, false, "", "durationMs", elapsed.Milliseconds())
 		}
-		s.metrics.observe(p.Action.Type, "failed", elapsed)
-		s.closeWith(ctx, p.ID, statusFailed, reasonExecError, err.Error(), actorExecutor, false, "", "durationMs", elapsed.Milliseconds())
 		return
 	}
 	s.metrics.observe(p.Action.Type, "executed", elapsed)
-	s.closeWith(ctx, p.ID, statusExecuted, "", "", actorExecutor, false, result, "durationMs", elapsed.Milliseconds(), "result", result)
+	s.closeWith(ctx, p.ID, statusApproved, statusExecuted, "", "", actorExecutor, false, result, "durationMs", elapsed.Milliseconds(), "result", result)
+}
+
+func (s *Service) run(ctx context.Context, a Action) (string, error) {
+	execCtx, cancel := context.WithTimeout(ctx, executeTimeout)
+	defer cancel()
+	return s.cluster.Execute(execCtx, a)
+}
+
+// firstDiff returns the first index where a and b differ, and the values there ("" if absent).
+func firstDiff(a, b []string) (int, string, string) {
+	at := func(s []string, i int) string {
+		if i < len(s) {
+			return s[i]
+		}
+		return ""
+	}
+	for i := range max(len(a), len(b)) {
+		if at(a, i) != at(b, i) || i >= len(a) || i >= len(b) {
+			return i, at(a, i), at(b, i)
+		}
+	}
+	return -1, "", ""
 }
 
 // blockReason turns a check error into a reason and message for a blocked proposal.
@@ -377,31 +441,36 @@ func blockReason(err error) (string, string) {
 }
 
 func (s *Service) expire(ctx context.Context, p Proposal) {
-	s.close(ctx, p.ID, statusExpired, reasonExpired, fmt.Sprintf("nobody decided within %s", p.ExpiresAt.Sub(p.CreatedAt)), actorExecutor, false)
+	s.close(ctx, p.ID, statusPending, statusExpired, reasonExpired, fmt.Sprintf("nobody decided within %s", p.ExpiresAt.Sub(p.CreatedAt)), actorExecutor, false)
 }
 
-func (s *Service) close(ctx context.Context, id string, status Status, reason, msg, actor string, release bool) {
-	s.closeWith(ctx, id, status, reason, msg, actor, release, "")
+func (s *Service) close(ctx context.Context, id string, from, to Status, reason, msg, actor string, release bool) {
+	s.closeWith(ctx, id, from, to, reason, msg, actor, release, "")
 }
 
-// closeWith moves a proposal to a final status, writes the audit line, and tells Slack.
-// release frees the incident again, for guards that stopped an approved action before it
-// changed anything.
-func (s *Service) closeWith(ctx context.Context, id string, status Status, reason, msg, actor string, release bool, result string, extra ...any) {
+// closeWith moves a proposal from status `from` to the final status `to`, writes the audit
+// line, and tells Slack. If the proposal is no longer in `from` (a Reject or an expiry racing
+// an approval, say), nothing changes: a running action can only end as executed, failed or
+// blocked, and a pending one only as rejected, expired or blocked. release frees the incident
+// again, for guards that stopped an approved action before it changed anything.
+// The outcome is recorded even if the click's context has ended.
+func (s *Service) closeWith(ctx context.Context, id string, from, to Status, reason, msg, actor string, release bool, result string, extra ...any) {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	defer cancel()
 	now := s.now()
 	var closed Proposal
-	_, err := s.store.Update(ctx, func(st *State) error {
+	_, err := s.store.Update(rctx, func(st *State) error {
 		cur, ok := st.Proposals[id]
-		if !ok || !cur.Status.open() {
+		if !ok || cur.Status != from {
 			return errNotOpen
 		}
 		if cur.Status == statusPending {
 			cur.DecidedAt, cur.DecidedBy = &now, actor
 		}
-		if status == statusExecuted || status == statusFailed {
+		if to == statusExecuted || to == statusFailed {
 			cur.ExecutedAt = &now
 		}
-		cur.Status, cur.Reason, cur.Error, cur.Result = status, reason, msg, result
+		cur.Status, cur.Reason, cur.Error, cur.Result = to, reason, msg, result
 		if release {
 			if ia, ok := st.Incidents[cur.IncidentID]; ok && ia.ProposalID == cur.ID {
 				delete(st.Incidents, cur.IncidentID)
@@ -411,18 +480,19 @@ func (s *Service) closeWith(ctx context.Context, id string, status Status, reaso
 		return nil
 	})
 	if errors.Is(err, errNotOpen) {
+		s.log.InfoContext(rctx, "proposal is no longer "+string(from)+"; outcome not changed", "proposalId", id, "wanted", string(to))
 		return
 	}
 	if err != nil {
-		s.log.ErrorContext(ctx, "could not record the outcome", "proposalId", id, "status", string(status), "error", err.Error())
+		s.log.ErrorContext(rctx, "could not record the outcome", "proposalId", id, "status", string(to), "error", err.Error())
 		return
 	}
 
 	event, level, text := eventFor(closed)
-	s.audit(ctx, level, event, actor, text, closed, extra...)
+	s.audit(rctx, level, event, actor, text, closed, extra...)
 	s.refreshPending()
-	s.notifyUpdate(ctx, closed)
-	s.notifyReply(ctx, closed, statusText(closed))
+	s.notifyUpdate(rctx, closed)
+	s.notifyReply(rctx, closed, statusText(closed))
 }
 
 // eventFor maps a final status to its audit event. An expiry is logged as "rejected" with
@@ -446,7 +516,9 @@ func (s *Service) notifyUpdate(ctx context.Context, p Proposal) {
 	if s.notifier == nil || p.SlackTS == "" {
 		return
 	}
-	if err := s.notifier.Update(ctx, p); err != nil {
+	nctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), slackTimeout)
+	defer cancel()
+	if err := s.notifier.Update(nctx, p); err != nil {
 		s.log.WarnContext(ctx, "could not update the Slack message", "proposalId", p.ID, "error", err.Error())
 	}
 }
@@ -455,7 +527,9 @@ func (s *Service) notifyReply(ctx context.Context, p Proposal, text string) {
 	if s.notifier == nil || p.SlackTS == "" {
 		return
 	}
-	if err := s.notifier.Reply(ctx, p, text); err != nil {
+	nctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), slackTimeout)
+	defer cancel()
+	if err := s.notifier.Reply(nctx, p, text); err != nil {
 		s.log.WarnContext(ctx, "could not reply in the Slack thread", "proposalId", p.ID, "error", err.Error())
 	}
 }
@@ -485,7 +559,7 @@ func (s *Service) Recover(ctx context.Context) error {
 	}
 	for _, p := range s.store.Open() {
 		if p.Status == statusApproved {
-			s.close(ctx, p.ID, statusFailed, reasonInterrupted,
+			s.close(ctx, p.ID, statusApproved, statusFailed, reasonInterrupted,
 				"the executor restarted while this action was running; check the cluster by hand", actorExecutor, false)
 		}
 	}

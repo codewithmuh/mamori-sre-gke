@@ -297,7 +297,7 @@ func TestRemoveFault(t *testing.T) {
 		t.Fatal("no delete")
 	}
 	pre := del.GetDeleteOptions().Preconditions
-	if pre == nil || *pre.UID != "uid-f01-currency-abort" || *pre.ResourceVersion != "42" {
+	if pre == nil || *pre.UID != "uid-f01-currency-abort" || pre.ResourceVersion != nil {
 		t.Errorf("preconditions = %+v", pre)
 	}
 	_, err = dyn.Resource(faultKinds["virtualservice"]).Namespace(targetNamespace).Get(context.Background(), "f01-currency-abort", metav1.GetOptions{})

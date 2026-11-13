@@ -144,6 +144,7 @@ func TestHTTPStatus(t *testing.T) {
 	want := map[string]int{
 		reasonInvalid: 400, reasonUnauthorized: 401, reasonNotAllowed: 403, reasonNotFound: 404,
 		reasonAlreadyActed: 409, reasonOutOfBounds: 422, reasonKillSwitch: 423, reasonApprovalUnavailable: 503, "x": 500,
+		reasonTooManyOpen: 429, reasonRateLimited: 429,
 	}
 	for reason, code := range want {
 		if got := httpStatus(reason); got != code {

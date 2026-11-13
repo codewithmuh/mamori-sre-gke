@@ -248,12 +248,14 @@ func (k *kubeCluster) removeFault(ctx context.Context, target string) (string, e
 		return "", err
 	}
 	kind, name, _ := parseTarget(target)
-	uid, rv := obj.GetUID(), obj.GetResourceVersion()
-	// The preconditions make the API server delete exactly the object checked above: if it
-	// was replaced or relabelled since, the delete fails instead.
+	uid := obj.GetUID()
+	// The UID precondition makes the API server delete exactly the object checked above, not
+	// a new one with the same name. No resourceVersion precondition: controllers (Chaos Mesh)
+	// update their objects' status all the time, and the admission policy checks the label
+	// again on the object as it is at delete time.
 	policy := metav1.DeletePropagationBackground
 	err = k.dyn.Resource(faultKinds[kind]).Namespace(targetNamespace).Delete(ctx, name, metav1.DeleteOptions{
-		Preconditions:     &metav1.Preconditions{UID: &uid, ResourceVersion: &rv},
+		Preconditions:     &metav1.Preconditions{UID: &uid},
 		PropagationPolicy: &policy,
 	})
 	if err != nil {

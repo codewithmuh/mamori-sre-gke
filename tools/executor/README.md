@@ -12,14 +12,16 @@ client-go fakes and a fake Slack.
 
 ```
 agent ──POST /v1/proposals──▶ executor
+                               0. under the rate limit?        10 at once, then one per 6 s, else 429 rate-limited
                                1. caller is the agent?        TokenReview of its projected token (audience "executor")
                                2. kill switch on?              executor-config enabled == "true", else 423 kill-switch
                                3. allow-list and bounds?       403 not-allowed / 422 out-of-bounds
                                4. live checks                  target exists; fault label; no HPA; Git doesn't set replicas
-                               5. incident free?               no other open or acted proposal, else 409 already-acted
+                               5. incident free?               no other open or acted proposal, else 409 already-acted;
+                                                              at most 5 open in all, else 429 too-many-open
                                6. store as pending, post to Slack with Approve / Reject      ──▶ 202 {proposalId, pending}
 human clicks Approve ─(Socket Mode)─▶ executor
-                               7. clicker on the approver list? click from the proposal's own message? not expired?
+                               7. clicker on the approver list? click from the proposal's own message, unedited? not expired?
                                8. kill switch, allow-list, bounds and live checks again
                                9. claim the incident (atomic write to executor-state), audit "approved"
                               10. kill switch once more, then the Kubernetes call     ──▶ executed / failed / blocked
@@ -49,6 +51,8 @@ Service `executor.mamori-agent.svc:8080`. Only pods labelled `app.kubernetes.io/
 | 401 | `unauthorized` | No token, or not the agent's |
 | 403 | `not-allowed` | Type not allowed (rollback always), other namespace, target not listed, not a labelled fault, HPA owns replicas, Git sets replicas, target missing |
 | 409 | `already-acted` | The incident already had an action, or another proposal for it is open |
+| 429 | `too-many-open` | 5 proposals are already pending or approved |
+| 429 | `rate-limited` | More than 10 POSTs at once, then more than one per 6 s |
 | 422 | `out-of-bounds` | `replicas` outside the bounds for that Deployment |
 | 423 | `kill-switch` | Switched off, config unreadable or invalid, or no way to approve (no Slack tokens, channel or approvers) |
 | 503 | `approval-unavailable` | Posting to Slack failed; nothing is pending |
@@ -58,7 +62,8 @@ Error bodies are `{"error": "<text>", "reason": "<reason>"}`.
 `GET /v1/proposals/{id}` (no token needed) returns `proposalId`, `status`
 (`pending|approved|rejected|executed|failed|expired|blocked`), `incidentId`, `investigationId`, `action`, `rationale`,
 `createdAt`, `expiresAt`, `decidedAt`, `decidedBy`, `executedAt`, `reason`, `error`, `result`, `slackChannel`,
-`slackTs`. Empty fields are left out. Unknown id: 404 `not-found`.
+`slackTs`. Empty fields are left out. `rationale` keeps the first 1,000 bytes; the full text is in the
+`proposal_received` audit line. Unknown id: 404 `not-found`.
 
 ## Actions
 
@@ -66,7 +71,7 @@ Error bodies are `{"error": "<text>", "reason": "<reason>"}`.
 |---|---|---|---|
 | `restart` | `deployment/<name>` in `restart.deployments` | Sets `kubectl.kubernetes.io/restartedAt` on the pod template (what `kubectl rollout restart` does) | Not listed, missing, paused |
 | `scale` | `deployment/<name>` in `scale`, `params.replicas` | Sets replicas through the `scale` subresource | Outside the bounds, an HPA targets it, Git sets `spec.replicas`, already at that count |
-| `remove-fault` | `<kind>/<name>`, kind in `removeFault.kinds` | Deletes that one object, with UID and resourceVersion preconditions | No label `mamori.dev/fault: "true"`, tracked by Argo CD, already deleting, missing |
+| `remove-fault` | `<kind>/<name>`, kind in `removeFault.kinds` | Deletes that one object, with a UID precondition | No label `mamori.dev/fault: "true"`, tracked by Argo CD, already deleting, missing |
 | `rollback` | | Never runs: always 403 with advice to revert in Git | Always |
 
 Fault kinds: `virtualservice`, `sidecar` (networking.istio.io/v1), `authorizationpolicy` (security.istio.io/v1),
@@ -92,8 +97,8 @@ Environment (set in [deploy/executor/deployment.yaml](../../deploy/executor/depl
 | `AUTH_MODE` | `tokenreview` | `none` turns caller checks off: local runs only |
 | `AUTH_AUDIENCE` | `executor` | Audience the agent's projected token must carry |
 | `AUTH_ALLOWED_USERS` | `system:serviceaccount:mamori-agent:agent` | Comma-separated |
-| `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN` | none | `xapp-...` (Socket Mode) and `xoxb-...` (`chat:write`), from Secret `executor-slack`. Without them every proposal is refused |
-| `SLACK_API_URL` | `https://slack.com/api/` | Another Slack host, or a local fake Slack for an end-to-end test |
+| `EXECUTOR_SLACK_APP_TOKEN`, `EXECUTOR_SLACK_BOT_TOKEN` | none | `xapp-...` (Socket Mode) and `xoxb-...` (`chat:write`) of the executor's own Slack app (never the agent's), from Secret `executor-slack`. Without them every proposal is refused |
+| `EXECUTOR_SLACK_API_URL` | `https://slack.com/api/` | Another Slack host, or a local fake Slack for an end-to-end test |
 | `KUBECONFIG` | none | Local runs outside the cluster |
 
 State survives restarts in ConfigMap `executor-state` (key `state.json`): recent proposals, and the incidents that

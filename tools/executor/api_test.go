@@ -4,14 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"golang.org/x/time/rate"
 )
 
 type stubAuth struct{ err error }
@@ -220,5 +224,26 @@ func TestOpsHandler(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("metrics lack %q", want)
 		}
+	}
+}
+
+func TestAPIRateLimit(t *testing.T) {
+	h := newHarness(t)
+	srv := httptest.NewServer((&api{svc: h.svc, auth: stubAuth{}, log: h.svc.log, limiter: rate.NewLimiter(rate.Every(time.Hour), 2)}).routes())
+	defer srv.Close()
+	for i := range 2 {
+		if code, body := post(t, srv.URL, strings.Replace(validBody, "inc-7", fmt.Sprintf("inc-r%d", i), 1)); code != 202 {
+			t.Fatalf("request %d = %d %v", i, code, body)
+		}
+	}
+	code, body := post(t, srv.URL, strings.Replace(validBody, "inc-7", "inc-r9", 1))
+	if code != 429 || body["reason"] != reasonRateLimited {
+		t.Fatalf("got %d %v", code, body)
+	}
+	if ev := h.logs.events(t); !slices.Contains(ev, "blocked:rate-limited") {
+		t.Errorf("events = %v", ev)
+	}
+	if l := newProposalLimiter(); l.Burst() != proposalBurst {
+		t.Errorf("burst = %d", l.Burst())
 	}
 }
