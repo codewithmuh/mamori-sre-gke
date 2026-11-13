@@ -17,7 +17,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadConfig() error = %v", err)
 	}
-	if got := cfg.targetURL.String(); got != "http://istio-ingressgateway.istio-ingress.svc.cluster.local" {
+	if got := cfg.targetURL.String(); got != "http://istio-ingressgateway.istio-ingress.svc.cluster.local:8080" {
 		t.Errorf("targetURL = %q", got)
 	}
 	if cfg.host != "mamori.codewithmuh.com" {

@@ -14,7 +14,9 @@ import (
 
 // Defaults match the in-cluster deployment in deploy/prober.
 const (
-	defaultTargetURL = "http://istio-ingressgateway.istio-ingress.svc.cluster.local"
+	// The ingress gateway's cluster-internal port: same routes as the public port 80, but not
+	// behind the public rate limit and not exposed by the GKE Gateway.
+	defaultTargetURL = "http://istio-ingressgateway.istio-ingress.svc.cluster.local:8080"
 	defaultHost      = "mamori.codewithmuh.com"
 	defaultInterval  = 60 * time.Second
 	// Longer than the route timeouts #27 plans for the public route (6 s for GET, 10 s for POST),

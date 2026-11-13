@@ -128,17 +128,19 @@ func (p *prober) handleRun(w http.ResponseWriter, r *http.Request) {
 	p.writeJSON(w, http.StatusOK, resp)
 }
 
-// runMany runs a journey `runs` times, cfg.runConcurrency at a time, each in its own session.
-// It reports false if ctx ended first; probes that finished before that are still counted in the
-// metrics, because they did happen.
+// runMany runs a journey `runs` times, cfg.runConcurrency at a time. Each worker is one
+// returning shopper (its slot's cookie jar), so a call adds no new sessions to redis-cart after
+// the first. It reports false if ctx ended first; probes that finished before that are still
+// counted in the metrics, because they did happen.
 func (p *prober) runMany(ctx context.Context, j journey, runs int) ([]probeResult, bool) {
 	results := make([]probeResult, runs)
 	next := make(chan int)
 	var wg sync.WaitGroup
-	for range min(p.cfg.runConcurrency, runs) {
+	for w := range min(p.cfg.runConcurrency, runs) {
+		jar := p.runJars[j.id][w]
 		wg.Go(func() {
 			for i := range next {
-				res := p.probe(ctx, j)
+				res := p.probe(ctx, j, jar)
 				if !res.cancelled {
 					p.metrics.record(res, sourceOnDemand)
 				}

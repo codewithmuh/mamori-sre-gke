@@ -6,8 +6,11 @@ metadata:
     app.kubernetes.io/name: prober
     app.kubernetes.io/part-of: mamori
 spec:
-  # One prober. Two would double the probe rate and still share the cluster's failure domain.
-  replicas: 1
+  # Raise to 1 after the first image publish; see docs/images.md. Until the image exists in
+  # Artifact Registry (and scripts/set-registry.sh has replaced PROJECT_ID), a pod would sit in
+  # ImagePullBackOff, keep this app unhealthy and hold Argo CD's root sync at wave 5.
+  # Then one prober: two would double the probe rate and still share the cluster's failure domain.
+  replicas: 0
   revisionHistoryLimit: 3
   selector:
     matchLabels:
@@ -42,12 +45,14 @@ spec:
           image: asia-northeast1-docker.pkg.dev/PROJECT_ID/mamori/prober:0.1.0
           imagePullPolicy: IfNotPresent
           env:
-            # The journeys go through the in-cluster ingress gateway with the public Host header,
-            # so they follow the shopper's path from the gateway on: Istio Gateway and
-            # VirtualService, frontend, and every service behind it. The load balancer, Cloud
-            # Armor, TLS and DNS in front of it are not covered (see tools/prober/README.md).
+            # The journeys go through the ingress gateway's cluster-internal port 8080 with the
+            # public Host header, so they follow the shopper's path from the gateway on: Istio
+            # Gateway and VirtualService, frontend, and every service behind it. Port 8080 is not
+            # behind the public rate limit (probes never compete with shoppers for it) and the GKE
+            # Gateway doesn't expose it. The load balancer, Cloud Armor, TLS and DNS in front of the
+            # public port 80 are not covered (see tools/prober/README.md).
             - name: PROBER_TARGET_URL
-              value: http://istio-ingressgateway.istio-ingress.svc.cluster.local
+              value: http://istio-ingressgateway.istio-ingress.svc.cluster.local:8080
             - name: PROBER_HOST
               value: mamori.codewithmuh.com
             - name: PROBER_INTERVAL

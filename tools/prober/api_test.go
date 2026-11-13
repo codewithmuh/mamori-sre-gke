@@ -67,13 +67,27 @@ func TestRunOnDemand(t *testing.T) {
 	if !strings.Contains(logs.String(), `"event":"on_demand_run_completed","cuj":"checkout","runs":3,"successes":3,"failures":0`) {
 		t.Errorf("log lacks the summary line:\n%s", logs)
 	}
-	// Each run is its own shopper: three home-page sessions.
-	sessions := map[string]bool{}
-	for _, r := range shop.recorded() {
-		sessions[r.session] = true
+	// Each worker is one shopper: three runs at up to 4 at a time make at most three sessions,
+	// and a second call reuses the worker slots instead of adding carts to redis-cart.
+	sessions := func() map[string]bool {
+		s := map[string]bool{}
+		for _, r := range shop.recorded() {
+			s[r.session] = true
+		}
+		return s
 	}
-	if len(sessions) != 3 {
-		t.Errorf("%d sessions, want 3", len(sessions))
+	// (Which worker takes which run is up to the scheduler, so only the upper bounds are fixed.)
+	if first := sessions(); len(first) > 3 {
+		t.Errorf("%d sessions for 3 runs, want at most 3", len(first))
+	}
+	if rec := postRun(t, t.Context(), p, `{"cuj":"checkout","runs":7}`); rec.Code != http.StatusOK {
+		t.Fatalf("second call = %d %s", rec.Code, rec.Body)
+	}
+	if all := sessions(); len(all) > 4 {
+		t.Errorf("%d sessions after 10 runs with 4 workers, want at most 4", len(all))
+	}
+	if n := shop.cartKeys(); n > 4 {
+		t.Errorf("redis-cart would hold %d carts, want at most 4", n)
 	}
 }
 

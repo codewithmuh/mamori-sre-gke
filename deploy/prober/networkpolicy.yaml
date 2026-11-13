@@ -40,7 +40,8 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
-    # The gateway pods serve plain HTTP on 80 (deploy/istio/gateway-values.yaml).
+    # The gateway's cluster-internal port, plain HTTP (deploy/istio/gateway-values.yaml). The
+    # public port 80 isn't needed: the prober never uses it.
     - to:
         - namespaceSelector:
             matchLabels:
@@ -50,4 +51,4 @@ spec:
               istio: ingressgateway
       ports:
         - protocol: TCP
-          port: 80
+          port: 8080

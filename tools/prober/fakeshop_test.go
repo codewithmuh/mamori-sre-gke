@@ -115,6 +115,13 @@ func (f *fakeShop) cartItems() int {
 	return n
 }
 
+// cartKeys is how many carts redis-cart would hold, empty ones included.
+func (f *fakeShop) cartKeys() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.carts)
+}
+
 func (f *fakeShop) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The Istio Gateway accepts one host; Envoy answers 404 for any other.
 	if r.Host != testHost {
@@ -225,7 +232,7 @@ func (f *fakeShop) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		f.mu.Lock()
 		items := f.carts[session]
-		delete(f.carts, session)
+		f.carts[session] = []string{} // checkoutservice calls EmptyCart, see below
 		f.mu.Unlock()
 		if len(items) == 0 {
 			f.errorPage(w, http.StatusInternalServerError, "failed to complete the order: cart is empty")
@@ -233,8 +240,10 @@ func (f *fakeShop) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		f.page(w, f.orderPage())
 	case "POST /cart/empty":
+		// cartservice v0.10.7 (RedisCartStore.EmptyCartAsync) stores an empty cart under the
+		// session id, with no expiry; the key stays.
 		f.mu.Lock()
-		delete(f.carts, session)
+		f.carts[session] = []string{}
 		f.mu.Unlock()
 		w.Header().Set("location", f.prefix+"/")
 		w.WriteHeader(http.StatusFound)

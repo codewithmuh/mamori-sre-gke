@@ -64,8 +64,9 @@ during the gap, so a real outage in that time goes unseen by the prober. The mes
 
    | What you see | Cause | Fix |
    |---|---|---|
+   | No pod; the Deployment shows `0/0` | It ships with `replicas: 0` until the first image publish | Once the image is in Artifact Registry (`docs/images.md`), set `replicas: 1` in `deploy/prober/deployment.yaml` in a pull request; `kubectl scale` doesn't last, because Argo CD self-heals |
    | `CrashLoopBackOff`, log line `invalid configuration` | A bad `PROBER_*` value in `deploy/prober/deployment.yaml` (the line lists every problem) | Fix it in Git; Argo CD syncs |
-   | `ImagePullBackOff` | `PROJECT_ID` still in the image name (run `scripts/set-registry.sh`), or the image was never pushed | Push the image (CI, #28) or fix the reference |
+   | `ImagePullBackOff` | `PROJECT_ID` still in the image name (run `scripts/set-registry.sh`), or the image was never pushed. The unhealthy `prober` app also holds Argo CD's root sync at wave 5, so later waves don't apply | Push the image (CI, #28) or fix the reference; if that takes a while, set `replicas: 0` again |
    | `Pending` | No room: a Spot node was preempted or the pool is at 0 (spend guard, see [spend-guard.md](spend-guard.md)) | Wait for the node, or `make resume` |
    | Restarts, liveness failures, log `scheduled probes stopped making progress` | A probe loop hung (a bug) | The restart is the mitigation; collect logs and open an issue |
    | No pod and no Deployment | The Argo CD Application `prober` is missing or failing | `kubectl -n argocd get application prober`; check its sync status |
@@ -90,10 +91,14 @@ decide whether the **shop** or the **probe path** is broken: compare with the me
 your own.
 
 ```bash
-kubectl -n istio-ingress port-forward svc/istio-ingressgateway 8081:80 &
-curl -sS -o /dev/null -w '%{http_code}\n' -H 'Host: mamori.codewithmuh.com' http://127.0.0.1:8081/
-curl -sS -o /dev/null -w '%{http_code}\n' https://mamori.codewithmuh.com/        # the public path
+kubectl -n istio-ingress port-forward svc/istio-ingressgateway 8081:8080 8082:80 &
+curl -sS -o /dev/null -w '%{http_code}\n' -H 'Host: mamori.codewithmuh.com' http://127.0.0.1:8081/   # the prober's port
+curl -sS -o /dev/null -w '%{http_code}\n' -H 'Host: mamori.codewithmuh.com' http://127.0.0.1:8082/   # the public port
+curl -sS -o /dev/null -w '%{http_code}\n' https://mamori.codewithmuh.com/                            # the public path
 ```
+
+If only the internal port fails, the gateway's port 8080 setup is broken (its Service port, the Istio Gateway server
+on 8080, or the VirtualService binding), not the shop.
 
 **The shop is broken** (your own requests fail too, the mesh shows 5xx from the frontend): the prober is right. Go to
 the journey runbooks and the incident process. Typical errors in the probe log:
@@ -109,11 +114,11 @@ the journey runbooks and the incident process. Typical errors in the probe log:
 
 | Error | Likely cause | Fix |
 |---|---|---|
-| `GET /: status 404, want 200` with no detail | Envoy has no route for the Host header: `PROBER_HOST` and the host in `deploy/online-boutique/public-gateway.yaml` differ | Make them equal |
+| `GET /: status 404, want 200` with no detail | Envoy has no route for this host on port 8080: `PROBER_HOST` differs from the host the gateway's port-8080 server accepts (`deploy/online-boutique/`), or the VirtualService isn't bound to that server | Make them match |
 | `dial tcp: lookup istio-ingressgateway...: no such host` or `i/o timeout` on DNS | DNS egress blocked or kube-dns down | Check the DNS rule in `deploy/prober/networkpolicy.yaml`, `kubectl -n kube-system get pods -l k8s-app=kube-dns` |
-| `dial tcp 10.x.x.x:80: i/o timeout` | Egress to the gateway pods blocked (labels or port changed) | The gateway pods must carry `istio: ingressgateway` and serve on 80 |
-| `connection refused` | Gateway pods not running | `kubectl -n istio-ingress get pods` |
-| `status 429 ... (gateway rate limit)` | The gateway's local rate limit sheds load: shoppers get 429s too, so this is real user pain unless only the prober is affected | See the resilience docs; check the request rate |
+| `dial tcp 10.x.x.x:8080: i/o timeout` | Egress to the gateway pods blocked (labels or port changed) | The gateway pods must carry `istio: ingressgateway` and serve the internal port on 8080 |
+| `connection refused` | Gateway pods not running, or the Service has no port 8080 | `kubectl -n istio-ingress get pods,svc` |
+| `status 429 ... (gateway rate limit)` | The internal port has no rate limit, so the limit now covers port 8080 too: the gateway's rate-limit config (EnvoyFilter in `istio-ingress`) matches more than the public port | Scope the limit to the public listener again (resilience docs) |
 | `the page has no "Hot Products"` | The page changed (the frontend fork, #28) or rendered only partly | If the shop works in a browser, update the markers in `tools/prober/journey.go` |
 
 ## One journey fails

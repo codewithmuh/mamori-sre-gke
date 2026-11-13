@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"math/rand/v2"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,8 +16,11 @@ type prober struct {
 	log     *slog.Logger
 	pick    func(n int) int // which product a shopper looks at
 
-	beats    []heartbeat // one per scheduled journey, fixed before the server starts
-	busy     sync.Map    // journey id -> struct{}: an on-demand run is in progress
+	beats []heartbeat // one per scheduled journey, fixed before the server starts
+	// runJars holds the on-demand sessions: per journey, one cookie jar per worker slot, reused
+	// across calls. Fixed at start; a call only uses its own journey's slots, one per worker.
+	runJars  map[string][]http.CookieJar
+	busy     sync.Map // journey id -> struct{}: an on-demand run is in progress
 	ready    atomic.Bool
 	stopping atomic.Bool
 }
@@ -33,6 +37,12 @@ func newProber(cfg config, m *metrics, log *slog.Logger) *prober {
 		metrics: m,
 		log:     log,
 		pick:    func(n int) int { return rand.IntN(n) }, //nolint:gosec // G404: picks a product to look at, not a secret
+		runJars: map[string][]http.CookieJar{},
+	}
+	for _, j := range journeys {
+		for range cfg.runConcurrency {
+			p.runJars[j.id] = append(p.runJars[j.id], newJar())
+		}
 	}
 	now := time.Now().UnixNano()
 	for _, id := range cfg.scheduled {
@@ -55,9 +65,11 @@ func (p *prober) startSchedules(ctx context.Context, wg *sync.WaitGroup) {
 	}
 }
 
-// runSchedule probes one journey every interval until ctx ends. A probe never overlaps the next
-// one of the same journey: if a probe overruns, the runs it missed are skipped, not caught up.
+// runSchedule probes one journey every interval until ctx ends, always as the same shopper (one
+// cookie jar for the loop). A probe never overlaps the next one of the same journey: if a probe
+// overruns, the runs it missed are skipped, not caught up.
 func (p *prober) runSchedule(ctx context.Context, hb heartbeat, offset time.Duration) {
+	jar := newJar()
 	next := time.Now().Add(offset)
 	timer := time.NewTimer(offset)
 	defer timer.Stop()
@@ -68,7 +80,7 @@ func (p *prober) runSchedule(ctx context.Context, hb heartbeat, offset time.Dura
 		case <-timer.C:
 		}
 		hb.last.Store(time.Now().UnixNano())
-		res := p.probe(ctx, hb.journey)
+		res := p.probe(ctx, hb.journey, jar)
 		if res.cancelled {
 			return
 		}

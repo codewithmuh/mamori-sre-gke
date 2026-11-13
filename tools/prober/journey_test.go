@@ -30,7 +30,7 @@ func TestJourneysSucceed(t *testing.T) {
 			p, _ := testProber(t, shop)
 			j, _ := journeyByID(tt.cuj)
 
-			res := p.probe(t.Context(), j)
+			res := p.probe(t.Context(), j, newJar())
 
 			if !res.ok || res.err != "" || res.failedStep != "" {
 				t.Fatalf("probe failed: step %q: %s", res.failedStep, res.err)
@@ -62,8 +62,9 @@ func TestProbeActsLikeOneShopper(t *testing.T) {
 	shop := newFakeShop(t)
 	p, _ := testProber(t, shop)
 	j, _ := journeyByID(cujCheckout)
+	jar := newJar()
 
-	if res := p.probe(t.Context(), j); !res.ok {
+	if res := p.probe(t.Context(), j, jar); !res.ok {
 		t.Fatalf("probe failed: %s", res.err)
 	}
 	reqs := shop.recorded()
@@ -105,11 +106,48 @@ func TestProbeActsLikeOneShopper(t *testing.T) {
 		t.Errorf("order form has %d fields, want %d: %v", len(order), len(want), order)
 	}
 
-	// The next probe is a new shopper.
+	// The same jar is the same returning shopper; a new jar is a new one.
 	shop.reset()
-	p.probe(t.Context(), j)
+	p.probe(t.Context(), j, jar)
+	if next := shop.recorded()[0].session; next != reqs[0].session {
+		t.Errorf("second probe with the same jar used session %q, want %q", next, reqs[0].session)
+	}
+	shop.reset()
+	p.probe(t.Context(), j, newJar())
 	if next := shop.recorded()[0].session; next == reqs[0].session {
-		t.Errorf("second probe reused session %q", next)
+		t.Errorf("probe with a new jar reused session %q", next)
+	}
+}
+
+func TestReusedSessionKeepsAnEmptyCart(t *testing.T) {
+	shop := newFakeShop(t)
+	p, _ := testProber(t, shop)
+	jar := newJar()
+	for _, id := range []string{cujAddToCart, cujViewCart, cujAddToCart} {
+		j, _ := journeyByID(id)
+		if res := p.probe(t.Context(), j, jar); !res.ok {
+			t.Fatalf("%s failed: %s", id, res.err)
+		}
+		if n := shop.cartItems(); n != 0 {
+			t.Fatalf("after %s the session's cart holds %d items, want 0", id, n)
+		}
+	}
+	// A failed clean-up leaves the item; the next probe's clean-up removes it.
+	shop.setFault("POST /cart/empty", fault{status: 500, body: "failed to empty cart"})
+	j, _ := journeyByID(cujAddToCart)
+	p.probe(t.Context(), j, jar)
+	if n := shop.cartItems(); n != 1 {
+		t.Fatalf("cart holds %d items after a failed clean-up, want 1", n)
+	}
+	shop.setFault("POST /cart/empty", fault{})
+	if res := p.probe(t.Context(), j, jar); !res.ok {
+		t.Fatalf("probe with a leftover item failed: %s", res.err)
+	}
+	if n := shop.cartItems(); n != 0 {
+		t.Errorf("cart holds %d items, want 0", n)
+	}
+	if n := shop.cartKeys(); n != 1 {
+		t.Errorf("redis-cart would hold %d carts, want 1 for one reused session", n)
 	}
 }
 
@@ -117,7 +155,7 @@ func TestProbeWithBasePath(t *testing.T) {
 	shop := newFakeShopWithPrefix(t, "/shop")
 	p, _ := testProber(t, shop)
 	for _, j := range journeys {
-		if res := p.probe(t.Context(), j); !res.ok {
+		if res := p.probe(t.Context(), j, newJar()); !res.ok {
 			t.Errorf("%s failed at %s: %s", j.id, res.failedStep, res.err)
 		}
 	}
@@ -235,7 +273,7 @@ func TestStepFailures(t *testing.T) {
 			})
 			j, _ := journeyByID(tt.cuj)
 
-			res := p.probe(t.Context(), j)
+			res := p.probe(t.Context(), j, newJar())
 
 			if res.ok || res.cancelled {
 				t.Fatalf("probe ok=%v cancelled=%v, want a failure", res.ok, res.cancelled)
@@ -265,7 +303,7 @@ func TestFailedProbeEmptiesItsCart(t *testing.T) {
 	p, _ := testProber(t, shop)
 	j, _ := journeyByID(cujCheckout)
 
-	if res := p.probe(t.Context(), j); res.ok {
+	if res := p.probe(t.Context(), j, newJar()); res.ok {
 		t.Fatal("probe succeeded, want a failure")
 	}
 	routes := shop.routes()
@@ -280,7 +318,7 @@ func TestCleanupFailureDoesNotFailProbe(t *testing.T) {
 	p, logs := testProber(t, shop)
 	j, _ := journeyByID(cujAddToCart)
 
-	if res := p.probe(t.Context(), j); !res.ok {
+	if res := p.probe(t.Context(), j, newJar()); !res.ok {
 		t.Fatalf("probe failed: %s", res.err)
 	}
 	if !strings.Contains(logs.String(), "could not empty the probe's cart") {
@@ -294,7 +332,7 @@ func TestStepTimeout(t *testing.T) {
 	p, _ := testProber(t, shop, func(c *config) { c.stepTimeout = 100 * time.Millisecond })
 	j, _ := journeyByID(cujViewCart)
 
-	res := p.probe(t.Context(), j)
+	res := p.probe(t.Context(), j, newJar())
 
 	if res.ok || res.failedStep != "view-cart" {
 		t.Fatalf("ok=%v failedStep=%q, want view-cart to fail", res.ok, res.failedStep)
@@ -313,7 +351,7 @@ func TestConnectionRefused(t *testing.T) {
 	shop.srv.Close()
 	j, _ := journeyByID(cujBrowse)
 
-	res := p.probe(t.Context(), j)
+	res := p.probe(t.Context(), j, newJar())
 
 	if res.ok || res.failedStep != "home" {
 		t.Fatalf("ok=%v failedStep=%q", res.ok, res.failedStep)
@@ -329,7 +367,7 @@ func TestOversizedPage(t *testing.T) {
 	p, _ := testProber(t, shop)
 	j, _ := journeyByID(cujBrowse)
 
-	res := p.probe(t.Context(), j)
+	res := p.probe(t.Context(), j, newJar())
 	if !strings.Contains(res.err, "larger than") {
 		t.Errorf("error = %q, want the size limit", res.err)
 	}
@@ -342,7 +380,7 @@ func TestCancelledProbeIsNotAResult(t *testing.T) {
 	j, _ := journeyByID(cujViewCart)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan probeResult)
-	go func() { done <- p.probe(ctx, j) }()
+	go func() { done <- p.probe(ctx, j, newJar()) }()
 	waitFor(t, "the cart request", func() bool { return slices.Contains(shop.routes(), "GET /cart") })
 
 	cancel()

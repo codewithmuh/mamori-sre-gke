@@ -39,6 +39,17 @@ func TestScheduleProbesEveryInterval(t *testing.T) {
 	if got := p.stuck(time.Now()); len(got) != 0 {
 		t.Errorf("stuck() = %v right after probing", got)
 	}
+	// Each loop is one returning shopper: two sessions in all, and only checkout's has a cart.
+	sessions := map[string]bool{}
+	for _, r := range shop.recorded() {
+		sessions[r.session] = true
+	}
+	if len(sessions) != 2 {
+		t.Errorf("%d sessions for two scheduled journeys, want 2", len(sessions))
+	}
+	if n := shop.cartKeys(); n != 1 {
+		t.Errorf("redis-cart would hold %d carts, want 1", n)
+	}
 }
 
 func TestScheduleNeverOverlaps(t *testing.T) {

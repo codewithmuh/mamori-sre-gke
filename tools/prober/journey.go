@@ -64,9 +64,9 @@ type journey struct {
 	steps []step
 }
 
-// journeys in PRD order. Every probe is a new shopper: a new cookie jar and new connections, and
-// it starts on the home page, because that is where a product id comes from. Any failed step
-// fails the probe; the steps after it don't run.
+// journeys in PRD order. Every probe opens new connections and starts on the home page, because
+// that is where a product id comes from. Any failed step fails the probe; the steps after it
+// don't run.
 var journeys = []journey{
 	{cujBrowse, []step{stepHome, stepProduct}},
 	// Stops at the 302 the frontend sends once cartservice has stored the item. Following it
@@ -113,7 +113,8 @@ type probeResult struct {
 	cancelled bool
 }
 
-// session is one shopper: its cookie jar holds the frontend's shop_session-id cookie.
+// session is one probe's view of a shopper. The cookie jar, which holds the frontend's
+// shop_session-id cookie, outlives the probe (see newJar); everything else is per probe.
 type session struct {
 	client      *http.Client
 	transport   *http.Transport
@@ -127,8 +128,18 @@ type session struct {
 	cartFilled   bool // an item may have gone in, and no order took it out
 }
 
-func (p *prober) newSession() *session {
+// newJar returns a cookie jar for one returning shopper. cartservice (v0.10.7) keeps a cart in
+// redis-cart under the session id for good: emptying it writes an empty cart, with no expiry,
+// instead of deleting the key. So every new session that adds an item leaves a key behind.
+// Reusing a jar reuses the session (until the frontend's 48-hour session cookie expires), which
+// keeps the prober to a handful of keys: one per scheduled journey loop and one per on-demand
+// worker slot (see prober.runJars).
+func newJar() http.CookieJar {
 	jar, _ := cookiejar.New(nil) // never fails without options
+	return jar
+}
+
+func (p *prober) newSession(jar http.CookieJar) *session {
 	// Proxy stays nil: the prober must reach the gateway directly, whatever the environment says.
 	tr := &http.Transport{
 		ForceAttemptHTTP2:   true,
@@ -150,9 +161,9 @@ func (p *prober) newSession() *session {
 	}
 }
 
-// probe runs one journey from a fresh session.
-func (p *prober) probe(ctx context.Context, j journey) probeResult {
-	s := p.newSession()
+// probe runs one journey as the shopper whose session cookie is in jar, over new connections.
+func (p *prober) probe(ctx context.Context, j journey, jar http.CookieJar) probeResult {
+	s := p.newSession(jar)
 	defer s.transport.CloseIdleConnections()
 
 	res := probeResult{cuj: j.id, ok: true}
@@ -174,8 +185,9 @@ func (p *prober) probe(ctx context.Context, j journey) probeResult {
 	}
 	res.duration = time.Since(start)
 
-	// Fresh sessions mean a new cart in redis-cart every probe; empty it so they don't pile up.
-	// Best effort, not part of the result, and short, so it adds little to on-demand calls.
+	// The session is reused, so empty its cart: otherwise every probe adds an item and the cart
+	// grows. Best effort (the next probe tries again), not part of the result, and short, so it
+	// adds little to on-demand calls.
 	if s.cartFilled {
 		cleanupCtx, cancel := context.WithTimeout(ctx, min(p.cfg.stepTimeout, cleanupTimeout))
 		if err := s.emptyCart(cleanupCtx); err != nil && ctx.Err() == nil {
@@ -361,7 +373,9 @@ func (pg page) wantStatus(want int) error {
 	}
 	msg := fmt.Sprintf("status %d, want %d", pg.status, want)
 	if pg.header.Get("X-Local-Rate-Limit") == "true" {
-		msg += " (gateway rate limit)" // the ingress gateway's Envoy local rate limit, not the shop
+		// The ingress gateway's Envoy local rate limit, not the shop. The prober's internal port
+		// has no limit, so on that port this means the gateway is misconfigured.
+		msg += " (gateway rate limit)"
 	}
 	if detail := responseDetail(pg.header, pg.body); detail != "" {
 		msg += ": " + detail
