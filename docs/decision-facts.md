@@ -105,6 +105,10 @@ REGULAR, zone `asia-northeast1-a` by default, fixed size 3, 30 GB pd-standard di
 | Self-hosted kube-prometheus-stack (with Grafana, Loki) | No list price; runs on the 3 nodes' CPU, memory and disks | Retention and storage sized by the maintainer; SLOs as PromQL rules rather than Cloud Monitoring SLO objects | Competes with the app for ≈ 5.8 vCPU | Storage, upgrades, retention and backups are the maintainer's | Chart 93.2.2 (2026-11-11), Apache-2.0 [9] |
 | Grafana Cloud free tier | $0 within limits | 10,000 active series, 50 GB logs, 50 GB traces, 14-day retention, 3 users, 100,000 API synthetic test executions/month [10] | Includes Incident Response & Management for 3 users (see D6) [10] | Managed; agents in-cluster | SaaS |
 
+**Pinned in this repo:** google provider 8.9.0 (`infra/bootstrap`, `infra/envs/lab`, `infra/envs/datadog`); Datadog
+provider 4.27.0 (`infra/envs/datadog`); OpenTelemetry Collector 0.164.0 (contrib image in
+`deploy/observability/otel-collector.yaml`). The table lists the latest upstream releases.
+
 **Already fixed:** not answered in PLAN.md section 8. M1 (issue #6) creates the cluster with Managed Service for
 Prometheus on.
 
@@ -144,6 +148,9 @@ Common facts: an SLI is "the number of good events divided by the total number o
 request-driven services is availability, latency and quality [1]. "A critical user journey is a sequence of tasks that
 is a core part of a given user's experience" [1]. The workbook's multiwindow, multi-burn-rate table for a 99.9 % SLO
 pages at 14.4× over 1 h (5 min short window) and 6× over 6 h (30 min), and tickets at 1× over 3 days (6 h) [5].
+
+**Pinned in this repo:** Istio charts 1.31.4 (`deploy/apps/istio-*.yaml`). The Istio facts above come from the
+current reference on istio.io [2].
 
 **Already fixed:** not answered in PLAN.md section 8. PLAN.md section 4 names the journeys: browse (home and product
 page), add to cart, checkout, maybe view cart.
@@ -186,6 +193,9 @@ CI to Google Cloud and plan comments:
 | tfcmt | Fork of tfnotify "enhancing tfnotify in many ways including Terraform >= v0.15 support"; GitHub only [11] | v4.14.20 (2026-10-27), MIT [11] |
 | dflook/terraform-github-actions | Plan action attaches the plan to the PR as a comment; the apply action fails "if the plan is not found or has changed" [12] | v3.1.3 (2026-11-10); no LICENSE file in the repository [12] |
 
+**Pinned in this repo:** Argo CD chart 10.11.6, which is Argo CD v3.5.6 (`ARGOCD_CHART_VERSION` in `Makefile`);
+google provider 8.9.0 (`infra/**/versions.tf`). The tables list the latest upstream releases.
+
 **Already fixed:** not answered in PLAN.md section 8. M1 branches already assume: Argo CD from its Helm chart plus a
 root app-of-apps (issue #8); a WIF pool limited to this repository, with `tf-plan` open to any branch and `tf-apply`
 only to the GitHub environment `lab` (issue #6).
@@ -222,6 +232,8 @@ only to the GitHub environment `lab` (issue #6).
 | PagerDuty Free + Slack Free (listed in PLAN.md) | $0. PagerDuty Professional is $21/user/month (annual) or $25 (monthly) [1] | PagerDuty Free: 5 users, 1 on-call schedule, 1 escalation policy, 100 SMS or phone notifications a month; email and push included; status pages not included [1]. Slack Free: 90 days of history visible, content older than 1 year deleted, up to 10 apps [2][3] | Events API v2: integration key sent as `routing_key`; payload ≤ 512 KB; rate limits are dynamic, retry 429s [4]. Cloud Monitoring's PagerDuty channel uses Events API v1 with a service key; you can't close a Monitoring alert from PagerDuty; all severities arrive as "critical" unless mapped [5]. Alertmanager's `pagerduty_config` uses `routing_key` for Events API v2 [6]. Slack interactive buttons work over Socket Mode without a public Request URL; Socket Mode apps can't be listed in the public Slack Marketplace [7] | SaaS; Alertmanager v0.35.0 (2026-11-09), Apache-2.0 [8] |
 | ntfy (ntfy.sh or self-hosted) | ntfy.sh paid plans $5, $10, $20 a month, with 3, 20, 50 phone calls [9] | Anonymous ntfy.sh: 250 messages a day per IP, 5 emails, 0 phone calls [10] | Can be self-hosted [9] | Apache-2.0 and GPLv2; v2.37.2 (2026-11-04) [11] |
 | Grafana Cloud IRM (free tier) | $0 within limits | 3 active IRM users a month [12] | The self-hosted Grafana OnCall OSS entered maintenance on 2025-03-11 and was archived on 2026-03-24 [13] | SaaS |
+
+**Pinned in this repo:** PagerDuty Terraform provider 3.37.0 (`infra/envs/oncall`).
 
 **Already fixed (PLAN.md section 8):** PagerDuty free plan for paging; Slack free workspace for incident chat and
 approvals.
@@ -261,6 +273,10 @@ approvals.
 | LitmusChaos | Network-fault helper Pods run privileged with `hostPID` and `NET_ADMIN`/`SYS_ADMIN` [10]; faults take `CONTAINER_RUNTIME` and `SOCKET_PATH` [11] | Pod (delete, CPU, memory, network, DNS, HTTP) and node (drain, taint, CPU, memory, restart) faults [11] | Privileged helper Pods, so the same Pod Security question as Chaos Mesh [10] | 3.33.0 (2026-10-15), CNCF incubating since 2022-01-11, Apache-2.0 [8][12] |
 | Istio fault injection only, plus Spot preemptions and `kubectl` | No privileged components beyond the mesh | HTTP/gRPC delays and aborts [3]; node loss from Spot; Pod deletion by hand | Fewer components on ≈ 5.8 vCPU | As above |
 
+**Pinned in this repo:** Istio charts `base`, `istiod` and `gateway` 1.31.4 (`deploy/apps/istio-*.yaml`); Chaos Mesh
+chart and images 2.8.7 (`deploy/apps/chaos-mesh.yaml`, `deploy/chaos-mesh/values.yaml`). The table lists the latest
+upstream releases.
+
 **Already fixed:** not answered in PLAN.md section 8. D2 (GKE Standard) allows privileged DaemonSets; D1's Istio
 component gives every Online Boutique Pod a sidecar.
 
@@ -296,6 +312,11 @@ component gives every Online Boutique Pod a sidecar.
 | Claude on Vertex AI ("Claude Models on Google Cloud (Google managed)"), global endpoint (listed in PLAN.md) | Global: Opus 5.5 $4/$20, Sonnet 5.5 $2/$10, Haiku 5.5 $0.10/$0.50 (prompts up to 100k tokens) [1]. Multi-region and regional endpoints cost 10 % more [2] | Regional endpoints serve Claude Sonnet 4.6 and earlier only; newer models are on global or the `us`/`eu` multi-regions [2]. Not supported there: Files API, Message Batches, Models API, code execution, web fetch, MCP connector, Managed Agents, server-side fallbacks [2]. Quotas set by Google Cloud [2] | The $300 trial credit can't be used for partner generative AI models; trial accounts can't use Marketplace or request quota increases [3] | IAM role with `aiplatform.endpoints.predict`, e.g. `roles/aiplatform.user`; Application Default Credentials [2]. From GKE: Workload Identity Federation for GKE, which must be enabled on Standard clusters; a Kubernetes ServiceAccount can be granted IAM roles directly [8] |
 | Claude API direct (Anthropic) | Same list prices: Opus 5.5 $4/$20, Sonnet 5.5 $2/$10, Haiku 5.5 $0.10/$0.50 [4] | Usage tiers with monthly spend caps (Start tier $500); an organization can set its own lower spend limit, and requests fail once it is reached [5] | Billed by Anthropic, outside the Google Cloud bill [4] | API keys (personal or service account, with optional expiry), or Workload Identity Federation: a short-lived token exchanged from an OIDC issuer such as Google Cloud or Kubernetes service accounts [6] |
 | Claude Models on Google Cloud (Anthropic managed) | Billed through Google Cloud Marketplace in Claude Consumption Units ($0.01 each) [7] | Setup needs permission to buy in Google Cloud Marketplace; creates a new Anthropic organization; location `global`; its SDK client is in beta [7] | Not reachable on a trial account, which can't use Marketplace [3] | Google credentials through ADC; IAM roles `roles/claude.user` and others [7] |
+
+**Pinned in this repo:** model `claude-opus-5-5` on Vertex AI's global endpoint (`AGENT_PROVIDER=vertex`,
+`AGENT_VERTEX_REGION=global`), with `claude-opus-5` as the client-side refusal fallback
+(`agent/src/mamori_agent/config.py`, `deploy/agent/deployment.yaml`). Claude Opus 5 on the global endpoint: $5/$25 per
+million input/output tokens [1].
 
 **Already fixed (PLAN.md section 8):** Claude through Vertex AI; the account is upgraded to paid at the start of M5.
 PLAN.md section 6 estimates ~$20–40 for the evaluation.
@@ -361,6 +382,9 @@ bounds, restart, remove a fault rule) and one action per incident, an audit log 
 | Kyverno | YAML and CEL; CEL policy types `ValidatingPolicy`, `MutatingPolicy`, `GeneratingPolicy`, `DeletingPolicy`, `ImageValidatingPolicy` [7] | Validate, mutate, generate, clean up; image verification; reports in the OpenReport format [7] | Works through admission controls and background scans; complements the built-in admission policies [11] | v1.20.0 (2026-11-12), CNCF graduated 2026-03-16, Apache-2.0 [5][6] |
 | Built-in ValidatingAdmissionPolicy | CEL [8] | `validationActions`: `Deny`, `Warn`, `Audit` (failures recorded in the API audit event) [8] | Nothing to install; validation only | Stable since Kubernetes v1.30 [8] |
 | GKE Policy Controller | Gatekeeper constraints, with a prebuilt policy library and bundles [9] | Audit and admission control; a Google Cloud console dashboard shows compliance and enforcement status [9] | Installed on clusters connected to a fleet [9]; included in GKE "at no extra cost" [10] | "Based on the open source Open Policy Agent Gatekeeper project" [9] |
+
+**Pinned in this repo:** Gatekeeper chart 3.23.1 (`deploy/apps/gatekeeper.yaml`) and image v3.23.1 by digest
+(`deploy/gatekeeper/values.yaml`), the same as the latest upstream release in the table.
 
 **Already fixed:** not answered in PLAN.md section 8. PLAN.md (M6) wants readiness policies from a public
 production-readiness checklist and a weekly evidence bundle from CI.
