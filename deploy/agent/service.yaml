@@ -1,0 +1,18 @@
+# agent.mamori-agent.svc:8080: the investigation API and /metrics. ClusterIP only; people reach
+# it with `kubectl -n mamori-agent port-forward svc/agent 8080`.
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent
+  namespace: mamori-agent
+  labels:
+    app.kubernetes.io/name: agent
+    app.kubernetes.io/part-of: mamori
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: agent
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

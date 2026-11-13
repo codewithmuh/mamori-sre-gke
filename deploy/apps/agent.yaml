@@ -1,0 +1,32 @@
+# Wave 7: the AI incident agent (deploy/agent) in namespace mamori-agent, which it shares with the
+# executor (deploy/apps/executor.yaml, #25). Neither Application ships a Namespace object: both
+# let Argo CD create it with the same labels, so pruning one app never deletes the other's pods.
+# No istio-injection label: the agent and executor run without sidecars.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: agent
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "7"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/codewithmuh/mamori-sre-gke.git
+    targetRevision: main
+    path: deploy/agent
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mamori-agent
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    managedNamespaceMetadata:
+      labels:
+        app.kubernetes.io/part-of: mamori
+        pod-security.kubernetes.io/enforce: restricted

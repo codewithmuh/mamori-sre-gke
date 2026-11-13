@@ -1,0 +1,77 @@
+# Who may talk to the agent, and where it may go. Dataplane V2 enforces this (infra/envs/lab/gke.tf).
+#
+# In: only Managed Prometheus collectors (gmp-system) on 8080 for /metrics. Starting a manual
+# investigation costs money, so no other pod can reach the API; people use kubectl port-forward,
+# which enters the pod's own network namespace and needs Kubernetes RBAC instead.
+#
+# Out:
+# - DNS (kube-dns);
+# - the executor in this namespace, TCP 8080 (its policy admits only this pod, #25);
+# - the GKE metadata server, for Workload Identity tokens (GKE network policy docs:
+#   169.254.169.252/32 on 987 and 988, and on Dataplane V2 169.254.169.254/32 on 80 and 8080);
+# - HTTPS anywhere: Google APIs (Vertex AI, Pub/Sub, Monitoring, Logging, Trace), the Kubernetes
+#   API server, Slack and GitHub. Kubernetes NetworkPolicy can't match host names, so this is the
+#   narrowest standard rule; only port 443 is open.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent
+  namespace: mamori-agent
+  labels:
+    app.kubernetes.io/name: agent
+    app.kubernetes.io/part-of: mamori
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gmp-system
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: executor
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - ipBlock:
+            cidr: 169.254.169.252/32
+      ports:
+        - protocol: TCP
+          port: 987
+        - protocol: TCP
+          port: 988
+    - to:
+        - ipBlock:
+            cidr: 169.254.169.254/32
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 8080
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443

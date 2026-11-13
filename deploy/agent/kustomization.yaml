@@ -1,0 +1,21 @@
+# The AI incident agent (agent/, docs/agent.md). Read-only everywhere: it proposes one action to
+# the executor (#25, same namespace) and never changes the cluster itself (D9).
+#
+# No `namespace:` here on purpose: the RoleBindings for pod logs and Argo CD live in boutique,
+# istio-ingress and argocd, and kustomize's namespace field would move them into mamori-agent.
+# Every object sets its namespace itself. The namespace mamori-agent is created by Argo CD
+# (CreateNamespace in deploy/apps/agent.yaml), shared with the executor's Application.
+#
+# Out of band, once (never in Git): the optional Slack Secret
+#   kubectl -n mamori-agent create secret generic agent-slack \
+#     --from-literal=bot-token=xoxb-... --from-literal=channel=C0123456789
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - serviceaccount.yaml
+  - rbac.yaml
+  - deployment.yaml
+  - service.yaml
+  - networkpolicy.yaml
+  - podmonitoring.yaml
