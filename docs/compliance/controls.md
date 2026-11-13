@@ -91,8 +91,8 @@ probe.
 
 Not exempt on purpose: `istio-ingress` (the gateway is our configuration), `boutique`, and every
 namespace M2–M6 adds. The Datadog Agent (M3, namespace `datadog`) will show up in audit during its
-14-day window: a node agent like that typically runs as root with host access. That is accurate, so
-it stays visible.
+14-day window: its Agent runs as root and keeps its capabilities (gator on the chart's render: PR-01,
+PR-08, PR-09, PR-10). That is accurate, so it stays visible.
 
 **Images:**
 
@@ -125,9 +125,23 @@ it stays visible.
 | PR-02 (×2) | `istio-ingress/istio-ingressgateway` | No probes in Git. On the cluster only the liveness probe is missing: injection adds a readiness probe on 15021 | Decide before warn: Istio's gateway template sets readiness only; if Envoy crashes, the container exits and the kubelet restarts it. Documented exception, or a liveness probe if the chart allows one |
 | PR-11 (×12) | every Online Boutique Deployment | Upstream pods carry only `app: <service>` | Patch in `deploy/online-boutique/kustomization.yaml`: `app.kubernetes.io/part-of: mamori` on every object and pod template, `app.kubernetes.io/name: <service>` on each pod template (requested from #32). Checked: with it, PR-01 and PR-11 drop to 0 |
 
-Expected on the cluster (audit sees the running Pods, Istio's injected containers included):
-PR-01 2, PR-02 3, PR-11 12, everything else 0; after the requested patch, PR-02 3 only. Workloads that
-M2–M6 add will show up as they arrive. Not yet measured.
+With every M2–M6 area merged (prober, observability, agent, executor, resilience, SLOs, load test,
+Chaos Mesh; checked on the combined tree), Git adds one finding: PR-02 ×2 on the k6 Job in
+`loadtest`, which has no probes. Probes mean little for a batch Job; decide with the load generator.
+PR-04 is 0: the OpenTelemetry Collector (observability, loadtest), k6 and Datadog images are on the
+allow-list.
+
+Expected on the cluster (audit sees the running Pods, Istio's injected containers included; not yet
+measured):
+
+- **Always:** PR-01 2, PR-02 3 (load generator ×2, gateway liveness), PR-11 12, everything else 0.
+  After the requested Online Boutique patch: PR-02 3 only.
+- **While a capacity test runs:** PR-02 +2 for each k6 Pod.
+- **During the 14-day Datadog window:** each Agent Pod (DaemonSet, one per node) adds PR-08, PR-09
+  and PR-10 ×3 each (agent and both init containers: root, privilege escalation allowed, capabilities
+  not dropped); the Cluster Agent adds PR-01 2, PR-08 2, PR-09 1, PR-10 2. On 3 nodes that is PR-01 2,
+  PR-08 11, PR-09 10, PR-10 11 (gator on the chart's render, times the Pod count). Expected for a node
+  agent and left visible on purpose (see Exemptions); they go when the window ends.
 
 ## Reading the results
 
@@ -181,7 +195,7 @@ afterwards.
 ## Test
 
 ```sh
-deploy/policy/check.sh             # gator verify: 15 tests, 63 cases
+deploy/policy/check.sh             # gator verify: 15 tests, 66 cases
 deploy/policy/check.sh --render    # plus deploy/validate.sh and gator test on what it renders
 deploy/policy/check.sh /tmp/render # gator test on an existing RENDER_DIR=/tmp/render deploy/validate.sh
 ```

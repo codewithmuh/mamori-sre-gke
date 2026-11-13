@@ -1,0 +1,138 @@
+# Passes PR-03 and PR-04: every third-party image the judged namespaces run, spelled as the
+# manifests spell them (OpenTelemetry Collector builds, k6, Datadog's digest-only images). One
+# container each, in a single Pod only to keep the test short.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: third-party-images
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: third-party-images
+    app.kubernetes.io/part-of: mamori
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: otel-collector
+      image: otel/opentelemetry-collector-contrib:0.164.0@sha256:340c9ca6a36617084c6661bdc4f0fe92b7cda5a805d61673ec8db375fddc522b
+      ports:
+        - containerPort: 13133
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          memory: 64Mi
+      readinessProbe:
+        httpGet:
+          path: /healthz
+          port: 13133
+      livenessProbe:
+        httpGet:
+          path: /healthz
+          port: 13133
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+    - name: k6-metrics
+      image: otel/opentelemetry-collector:0.164.0@sha256:28b6d41ac51bff6b41ba5e8fe503569ffb9d6a1ea90f7a78419e86f34e44f750
+      ports:
+        - containerPort: 13134
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          memory: 64Mi
+      readinessProbe:
+        httpGet:
+          path: /healthz
+          port: 13134
+      livenessProbe:
+        httpGet:
+          path: /healthz
+          port: 13134
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+    - name: k6
+      image: grafana/k6:2.3.0@sha256:2dd4756ec6e14e62778916e1eb850108e4b499304c02df56760fa0bdb0fba0b8
+      ports:
+        - containerPort: 6565
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          memory: 64Mi
+      readinessProbe:
+        httpGet:
+          path: /healthz
+          port: 6565
+      livenessProbe:
+        httpGet:
+          path: /healthz
+          port: 6565
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+    - name: datadog-agent
+      image: registry.datadoghq.com/agent@sha256:4aa71f1f624e36ed4d04568e4ad3f323af14426db07d2f9ed98869f6d0bdbbd3
+      ports:
+        - containerPort: 5555
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          memory: 64Mi
+      readinessProbe:
+        httpGet:
+          path: /healthz
+          port: 5555
+      livenessProbe:
+        httpGet:
+          path: /healthz
+          port: 5555
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+    - name: datadog-cluster-agent
+      image: registry.datadoghq.com/cluster-agent@sha256:b0538b18ec71bab1d17bced0380008213d46ad70174cdeafdf3025d1865f67e2
+      ports:
+        - containerPort: 5005
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          memory: 64Mi
+      readinessProbe:
+        httpGet:
+          path: /healthz
+          port: 5005
+      livenessProbe:
+        httpGet:
+          path: /healthz
+          port: 5005
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL

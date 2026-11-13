@@ -73,6 +73,10 @@ tests:
         object: cases/ar-meshed-pod-istio-init.yaml
         assertions:
           - violations: no
+      - name: third-party-images
+        object: cases/pod-third-party-images.yaml
+        assertions:
+          - violations: no
       - name: latest-tag
         object: cases/ar-pr03-latest-tag.yaml
         assertions:
@@ -99,6 +103,10 @@ tests:
         object: cases/ar-meshed-pod-istio-init.yaml
         assertions:
           - violations: no
+      - name: third-party-images
+        object: cases/pod-third-party-images.yaml
+        assertions:
+          - violations: no
       - name: unknown-registry
         object: cases/ar-pr04-unknown-registry.yaml
         assertions:
@@ -109,6 +117,11 @@ tests:
         assertions:
           - violations: 1
             message: "istio-mirror"
+      - name: lookalike-registry-host
+        object: cases/ar-pr04-lookalike-registry-host.yaml
+        assertions:
+          - violations: 1
+            message: "registry.datadoghq.com.attacker.example"
   - name: pr-05-no-privileged
     template: ../templates/k8spspprivilegedcontainer.yaml
     constraint: ../constraints/pr-05-no-privileged.yaml

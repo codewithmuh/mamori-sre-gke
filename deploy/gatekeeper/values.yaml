@@ -57,8 +57,9 @@ constraintViolationsLimit: 50
 
 # Log each admission request that breaks a constraint as a JSON line in Cloud Logging, dryrun
 # included (the line says "denied admission" even then; its constraint_action field says dryrun).
-# Audit logs each finding it sees as event_type violation_audited either way. Both feed the weekly
-# evidence bundle.
+# Audit logs each finding it sees as event_type violation_audited either way. The logs are for
+# tracing a finding back to a request or a time; the weekly evidence bundle reads only the
+# Constraints' status (totalViolations and the stored findings).
 logDenies: true
 
 # Argo CD applies the chart's CRDs itself (Helm crds/ directory), so the pre-install Job that

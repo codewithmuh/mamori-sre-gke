@@ -21,10 +21,17 @@ spec:
       - apiGroups: [""]
         kinds: ["Pod"]
   parameters:
-    # Exact match, or prefix match where the entry ends in "*". Prefixes end in "/" or ":" so that,
-    # say, "redis-evil" can't pass as "redis".
+    # Exact match, or prefix match where the entry ends in "*" (only at the end, so the project ID
+    # can't be a wildcard). Prefixes end in "/", ":" or "@" so that, say, "redis-evil" can't pass as
+    # "redis". Entries are written the way the manifests spell the image.
+    #
+    # Only namespaces that are judged need their images here. The exempt ones (docs/compliance/
+    # controls.md) also pull from quay.io/argoproj and ecr-public.aws.com (Argo CD),
+    # ghcr.io/chaos-mesh, registry.k8s.io and docker.io/library/busybox (Chaos Mesh and its fault
+    # reaper) and openpolicyagent/gatekeeper.
     allowedImages:
-      # Our own images (tools, agent, the frontend fork). scripts/set-registry.sh replaces PROJECT_ID.
+      # Our own images (prober, agent, executor, the frontend fork). scripts/set-registry.sh
+      # replaces PROJECT_ID here and in the manifests.
       - "asia-northeast1-docker.pkg.dev/PROJECT_ID/mamori/*"
       # Upstream Online Boutique v0.10.7, pinned by digest in deploy/online-boutique.
       - "us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/*"
@@ -33,5 +40,16 @@ spec:
       # Docker Hub official images Online Boutique uses (redis-cart, the load generator's wait step).
       - "redis:*"
       - "busybox:*"
+      # OpenTelemetry Collector: contrib build in observability (#19), core build next to k6 in
+      # loadtest (#29). Both Docker Hub, pinned by digest.
+      - "otel/opentelemetry-collector-contrib:*"
+      - "otel/opentelemetry-collector:*"
+      # k6 load test Jobs in loadtest (#29); they run only during a capacity test.
+      - "grafana/k6:*"
+      # Datadog Agent and Cluster Agent in datadog, during the 14-day window only (#22,
+      # deploy/optional/datadog). The chart writes them by digest alone, e.g.
+      # registry.datadoghq.com/agent@sha256:...
+      - "registry.datadoghq.com/agent@*"
+      - "registry.datadoghq.com/cluster-agent@*"
       # Istio's gateway placeholder (see pr-03-no-latest-tag.yaml).
       - "auto"

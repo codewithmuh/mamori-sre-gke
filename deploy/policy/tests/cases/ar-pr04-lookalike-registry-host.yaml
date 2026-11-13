@@ -1,0 +1,60 @@
+# Breaks the rule on purpose: PR-04, a registry host that only starts like Datadog's (registry.datadoghq.com.attacker.example).
+# Written as the AdmissionReview request the API server sends to Gatekeeper: it is a test
+# input, not a manifest to deploy, and repo scanners such as Trivy don't read it as one.
+apiVersion: admission.k8s.io/v1
+kind: AdmissionReview
+request:
+  uid: ar-pr04-lookalike-registry-host
+  kind:
+    group: ""
+    version: v1
+    kind: Pod
+  resource:
+    group: ""
+    version: v1
+    resource: pods
+  namespace: boutique
+  name: lookalike-registry-host
+  operation: CREATE
+  userInfo:
+    username: gator-test
+  object:
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: lookalike-registry-host
+      namespace: boutique
+      labels:
+        app.kubernetes.io/name: lookalike-registry-host
+        app.kubernetes.io/part-of: mamori
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: registry.datadoghq.com.attacker.example/agent@sha256:4aa71f1f624e36ed4d04568e4ad3f323af14426db07d2f9ed98869f6d0bdbbd3
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
