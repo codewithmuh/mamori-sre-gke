@@ -11,13 +11,14 @@ repository's supply chain adds no dependencies of its own.
 ## Usage
 
 ```bash
-evidence -inputs bundle/inputs -out bundle
+evidence -inputs bundle/inputs -out bundle -expect ci,github,trivy,gitleaks,sbom
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `-inputs` | required | directory with the input files below |
 | `-out` | required | where `bundle.json` and `summary.md` go (created if missing) |
+| `-expect` | none | section keys this run should collect, comma-separated, or `all`; an expected section that is missing needs a look. Keys: `ci`, `github`, `trivy`, `gitleaks`, `sbom`, `terraformDrift`, `cluster`, `gatekeeper`, `argocd`, `slos` |
 | `-now` | current time | generation time, RFC 3339, for reproducible output |
 | `-repository`, `-commit`, `-ref`, `-workflow`, `-event`, `-run-id`, `-run-attempt`, `-run-url` | GitHub Actions' `GITHUB_*` variables | where the bundle came from |
 
@@ -32,10 +33,11 @@ why. Without either, the reason is "no input file and no reason recorded".
 | File | Written by | Section |
 |---|---|---|
 | `ci-runs.json` | `gh api` (workflow runs on `main`) | `ci` |
+| `github-settings.json` | read-only REST calls: `{"adminToken": bool, "responses": {"<name>": {"status": <HTTP>, "reason": "...", "body": <JSON>}}}` for `environment`, `environmentBranchPolicies`, `branch`, `branchRules`, `rulesets`, `branchProtection`, `workflowPermissions`, `actionsPermissions`; status 0 means not requested | `github` |
 | `trivy.json` | Trivy `--format json` | `trivy` |
 | `gitleaks.json` | gitleaks `--redact`, reduced with jq | `gitleaks` |
 | `sbom.spdx.json` | syft `-o spdx-json` | `sbom` |
-| `terraform-drift.json` | `terraform show -json` of a `plan -detailed-exitcode`, reduced with jq | `terraformDrift` |
+| `terraform-drift.json` | `terraform show -json` of a `plan -detailed-exitcode`, reduced on the runner with [`drift.jq`](drift.jq) to addresses, actions and attribute names | `terraformDrift` |
 | `gke-cluster.json` | GKE API `clusters.get`, reduced with jq | `cluster` |
 | `nodes.json` | `kubectl get nodes -o json` | `cluster` |
 | `gatekeeper-constraints.json` | `kubectl get constraints -o json` | `gatekeeper` |
@@ -43,7 +45,13 @@ why. Without either, the reason is "no input file and no reason recorded".
 | `slo-status.json` | Cloud Monitoring API (services, SLOs, `select_slo_*`), built with jq | `slos` |
 
 Samples of every input are in [`testdata/inputs`](testdata/inputs); the bundle they produce is in
-[`testdata/golden`](testdata/golden).
+[`testdata/golden`](testdata/golden). `testdata/inputs/terraform-drift.json` is `drift.jq` applied to
+[`testdata/plan/sample-plan.json`](testdata/plan/sample-plan.json); where `jq` is installed (GitHub's runners), a test
+checks that, and that no attribute value from the plan survives the reduction:
+
+```bash
+jq --argjson code 2 -f drift.jq testdata/plan/sample-plan.json   # regenerate the sample input
+```
 
 ## Develop and test
 

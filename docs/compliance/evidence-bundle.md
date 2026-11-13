@@ -35,17 +35,21 @@ evidence-2026-12-07-run4/
 | Area (`sections.<key>`) | Source | Collected as | Needs a look when |
 |---|---|---|---|
 | CI on main (`ci`) | GitHub API: newest completed run on `main` of each active workflow, started by `push`, `schedule` or `workflow_dispatch` | `GITHUB_TOKEN` with `actions: read` | the newest run of any workflow did not end in `success`, `skipped` or `neutral` |
+| GitHub settings (`github`) | GitHub API, read-only: environment `lab` (required reviewers, which branches may deploy), the rules that apply to `main`, every ruleset (tag rulesets included), and, with the optional token below, classic branch protection and the Actions settings (default `GITHUB_TOKEN` permissions, whether workflows can approve pull requests, SHA pinning). These controls exist only in GitHub's settings, not in Git | `GITHUB_TOKEN`; optional `EVIDENCE_ADMIN_READ_TOKEN` | a required control is missing (the [list](#github-settings-checks)), or a check failed even though the admin token was set |
 | Vulnerabilities and misconfigurations (`trivy`) | Trivy `fs` on the repository: vulnerabilities, misconfigurations, secrets, every severity | no credentials | a finding would fail CI's own Trivy step: HIGH or CRITICAL, and for vulnerabilities only those with a fix |
 | Secrets in Git history (`gitleaks`) | gitleaks over every commit fetched (all branches), `--redact`; only rule, file, line, commit and date are kept | no credentials | any finding |
 | Software bill of materials (`sbom`) | syft, SPDX 2.3 JSON, of the whole repository (Go modules, GitHub Actions, Terraform providers, ...) | no credentials | the SBOM lists no packages |
-| Terraform drift (`terraformDrift`) | `terraform plan -detailed-exitcode -lock=false` of `infra/envs/lab`; only resource addresses and actions leave the runner | `tf-plan` (read-only) | a resource would change, or something changed outside Terraform. A plan that would create everything, cluster included, is reported as "lab down", not as drift |
+| Terraform drift (`terraformDrift`) | `terraform plan -detailed-exitcode -lock=false` of `infra/envs/lab`, reduced on the runner by [`tools/evidence/drift.jq`](../../tools/evidence/drift.jq): resource addresses, actions and attribute names leave the runner, values never do. The public run log gets only the plan's summary line | `tf-plan` (read-only) | a resource would change, or something changed outside Terraform that this plan depends on (Terraform's `relevant_attributes`). Changes GKE and the spend guard make on their own (control-plane and node versions, node count) are recorded as `expected`; changes nothing in the plan uses as `irrelevant`. A plan that would create everything, cluster included, is reported as "lab down", not as drift |
 | Cluster versions and nodes (`cluster`) | GKE API (control plane, node pools) and the Kubernetes API (nodes) | `evidence-reader` | the cluster or a node pool isn't `RUNNING`, a node isn't Ready, or there are no nodes (the spend guard fired) |
 | Gatekeeper audit (`gatekeeper`) | `kubectl get constraints`: each constraint's readiness control (annotation `mamori.dev/control-id`, see [controls.md](controls.md)), enforcement action, and the audit's `totalViolations` and stored violations | `evidence-reader` | any violation, whatever the enforcement action (the policies start in `dryrun`) |
 | Argo CD applications (`argocd`) | `kubectl get applications.argoproj.io -A`: sync and health status, revisions | `evidence-reader` | an application isn't `Synced` and `Healthy`, or there are none |
 | SLOs and error budgets (`slos`) | Cloud Monitoring API: every SLO of every service, newest point of `select_slo_compliance` and `select_slo_budget_fraction` in the last hour | `evidence-reader` | an SLO's error budget is spent (0 % or less left). Under 25 % shows as `low` |
 
 A section that couldn't be collected keeps its place, with status `not collected` and the reason. It is never left
-out. Common reasons:
+out. The assemble job also tells `tools/evidence` which sections this run should have collected (`-expect`): the
+repository ones always; Terraform drift once `GCP_WIF_PROVIDER` is set; cluster, Gatekeeper, Argo CD and SLOs once it
+is set and the run is on `main`. An expected section that is missing needs a look, so a step that fails every week
+shows up as a problem, not as a quiet gap. That includes a lab that is down during the operated period. Common reasons:
 
 | Reason | Meaning |
 |---|---|
@@ -55,15 +59,16 @@ out. Common reasons:
 | `kubectl get constraints failed: error: the server doesn't have a resource type "constraints"` | Gatekeeper (#30) isn't installed, or has no constraint templates yet |
 | `kubectl get ... failed: ... Unable to connect to the server ...` | the control-plane endpoint refused GitHub's runners, for example because `master_authorized_networks` is set (see "Limits") |
 | `collected only on main ...` | a manual run on another branch: `evidence-reader` trusts `main` only |
+| `terraform plan failed (exit 1); see the summary line in the run log` | for example the secret `GCP_BILLING_ACCOUNT_ID` is missing, or `SLO_ENABLED` isn't `true` or `false` |
 | `the <step> step ended with: failure; see the run log` | the step failed; the run log has the error |
 
 ## Who can do what
 
 | Job | Identity | Can |
 |---|---|---|
-| `repo` | `GITHUB_TOKEN` | read the repository and its workflow runs |
+| `repo` | `GITHUB_TOKEN` (`contents: read`, `actions: read`); optionally `EVIDENCE_ADMIN_READ_TOKEN`, seen only by the GitHub settings step | read the repository, its workflow runs and its settings |
 | `drift` | `tf-plan` through the shared pool `github` | what `tf-plan` can: read the project and the state, take no lock (the plan runs with `-lock=false`) |
-| `cluster` | `evidence-reader` through its own pool `github-evidence` | read cluster metadata, list nodes and custom resources, read Cloud Monitoring. No secrets, no logs, no writes |
+| `cluster` | `evidence-reader` through its own pool `github-evidence` | read cluster metadata, list nodes and custom resources, read SLOs and their time series. No secrets, no logs, no notification channels, no writes |
 | `assemble` | `GITHUB_TOKEN` | sign and store the attestation; no Google Cloud access |
 
 `evidence-reader` is defined in [`infra/bootstrap/evidence_identity.tf`](../../infra/bootstrap/evidence_identity.tf):
@@ -71,8 +76,8 @@ out. Common reasons:
 | Role | Why |
 |---|---|
 | `roles/container.clusterViewer` | cluster and node pool versions from the GKE API; GKE also requires `container.clusters.get` before it authorises any Kubernetes API request |
-| `roles/monitoring.viewer` | services, SLOs and the `select_slo_*` time series |
-| custom `evidenceKubeReader`: `container.nodes.list`, `container.thirdPartyObjects.list` | nodes, Gatekeeper constraints and Argo CD Applications (custom resources). Narrower than `roles/container.viewer`, which can also read every ConfigMap, Role and Pod spec. GKE checks Kubernetes RBAC first and falls back to IAM, so no ClusterRole in the cluster is needed |
+| custom `evidenceReader`: `container.nodes.list`, `container.thirdPartyObjects.list` | nodes, Gatekeeper constraints and Argo CD Applications (custom resources). Narrower than `roles/container.viewer`, which can also read every ConfigMap, Role and Pod spec. GKE checks Kubernetes RBAC first and falls back to IAM, so no ClusterRole in the cluster is needed |
+| the same role: `monitoring.services.list`, `monitoring.services.get`, `monitoring.slos.list`, `monitoring.slos.get`, `monitoring.timeSeries.list` | services, SLOs and the `select_slo_*` time series. Narrower than `roles/monitoring.viewer`, which can also read notification channels, and so the alert email (personal data) and the PagerDuty channel. The `get` permissions are there because the docs don't say whether the selectors check them |
 
 **Why `evidence-reader` has its own workload identity pool.** In Workload Identity Federation a principal belongs to
 a pool, not to a provider, and the shared pool `github` accepts every workflow run of the repository: any branch, any
@@ -95,7 +100,31 @@ bootstrap they stay when `make down` destroys the lab, and `scripts/leftover-che
 the workflow derives the provider from `GCP_WIF_PROVIDER` (same project, pool `github-evidence`, provider
 `github-actions`) and the account from `GCP_PROJECT_ID` (`evidence-reader@<project>.iam.gserviceaccount.com`). An
 optional repository variable `GCP_ZONE` overrides the zone (default `asia-northeast1-a`). Until bootstrap is applied
-the cluster and SLO sections say "could not authenticate"; nothing fails.
+the cluster and SLO sections say "could not authenticate"; the run doesn't fail, and the bundle flags them.
+
+The drift job plans with the same inputs the lab was applied with; otherwise the plan shows them as changes. It reads
+the secret `GCP_BILLING_ACCOUNT_ID`, the optional secret `ALERT_EMAIL` (#21; personal data, empty means no email
+channel, see [oncall.md](../oncall.md)) and the repository variable `SLO_ENABLED` (#18; `true` once the journey SLOs and
+their alerts are on, otherwise `false`, the default). Keep `SLO_ENABLED` in step with what the lab was applied with:
+with SLOs on and the variable unset, the weekly plan would show every SLO and alert as to be deleted. Optional: `EVIDENCE_ADMIN_READ_TOKEN`, a fine-grained personal access
+token for this repository only, with **Administration: read** and nothing else, so the bundle can also check classic
+branch protection and the Actions settings, which `GITHUB_TOKEN` can't read. Give it an expiry and renew it; without it
+those checks say "not collected" and nothing else changes.
+
+### GitHub settings checks
+
+| Check (`id`) | Control | Required | Read with |
+|---|---|---|---|
+| `lab-environment` | environment `lab` exists | yes | `GITHUB_TOKEN` |
+| `lab-reviewers` | deployments to `lab` wait for a reviewer (the gate in front of `tf-apply`) | yes | `GITHUB_TOKEN` |
+| `lab-branches` | only `main` can deploy to `lab` (a custom branch rule for `main` alone, or protected branches only) | yes | `GITHUB_TOKEN` |
+| `main-pull-request` | changes reach `main` only through a pull request (a ruleset rule, or classic protection) | yes | `GITHUB_TOKEN`; classic details need the admin token |
+| `main-ci-result` | the `CI result` check must pass before merging | yes | `GITHUB_TOKEN` |
+| `main-history` | `main` can't be force-pushed or deleted | yes | `GITHUB_TOKEN`; classic details need the admin token |
+| `release-tags` | release tags can't be moved or deleted (an active tag ruleset with rules `deletion` and `update` or `non_fast_forward`) | yes | `GITHUB_TOKEN` |
+| `workflow-token-read` | workflows get a read-only `GITHUB_TOKEN` by default | yes | admin token |
+| `workflow-no-approvals` | workflows can't approve pull requests | yes | admin token |
+| `actions-sha-pinning` | GitHub enforces actions pinned to a full commit SHA | recommended (review already enforces it) | admin token |
 
 ## Schema `mamori.evidence/v1`
 
@@ -111,8 +140,8 @@ field doesn't. The [golden test](../../tools/evidence/testdata/golden/bundle.jso
 | `schemaVersion` | string | `mamori.evidence/v1` |
 | `generatedAt` | string, RFC 3339 UTC | when `tools/evidence` ran |
 | `source` | object | `repository`, `commit`, `ref`, `workflow`, `event`, `runId`, `runAttempt`, `runUrl` of the run that made the bundle |
-| `overview` | object | `sections` (9), `collected`, `notCollected`, `attention` (keys of collected sections that need a look) |
-| `sections` | object | the nine sections below, always all present, in this order: `ci`, `trivy`, `gitleaks`, `sbom`, `terraformDrift`, `cluster`, `gatekeeper`, `argocd`, `slos` |
+| `overview` | object | `sections` (10), `collected`, `notCollected`, `attention` (keys of the sections that need a look), `missingExpected` (keys of the sections this run should have collected but didn't) |
+| `sections` | object | the ten sections below, always all present, in this order: `ci`, `github`, `trivy`, `gitleaks`, `sbom`, `terraformDrift`, `cluster`, `gatekeeper`, `argocd`, `slos` |
 
 ### Every section
 
@@ -121,7 +150,8 @@ field doesn't. The [golden test](../../tools/evidence/testdata/golden/bundle.jso
 | `title` | string | human name, as in `summary.md` |
 | `status` | `"collected"` or `"not collected"` | |
 | `reason` | string | only when not collected: why |
-| `attention` | bool | collected, and the content needs a look (see the table above); always `false` when not collected |
+| `expected` | bool | this run was set up to collect the section (`-expect`) |
+| `attention` | bool | needs a look: collected and the content does (see the table above), or expected and not collected |
 | `headline` | string | one line; `"not collected: <reason>"` when not collected |
 | `inputs` | list | one entry per input file: `file`, `status`, `reason` (if not collected), `sha256` and `bytes` (if present) |
 | `data` | object | the section's content, below; absent when not collected |
@@ -134,10 +164,11 @@ section status `not collected` with reason `<file> is not valid: <error>`.
 | Section | Fields |
 |---|---|
 | `ci` | `branch` (`main`); `failing`; `workflows[]`: `name`, `path`, `event`, `conclusion`, `commit` (12 characters), `runNumber`, `finishedAt`, `url` |
+| `github` | `missing` (required controls missing), `notCollected`; `checks[]`: `id`, `control`, `required`, `status` (`ok`, `missing`, `not collected`), `detail` |
 | `trivy` | `trivyVersion`, `scannedAt`; `vulnerabilities`, `misconfigurations` (failed checks only), `secrets`: counts `critical`, `high`, `medium`, `low`, `unknown`; `ciGateFindings`; `findings[]` (HIGH and CRITICAL): `class` (`vulnerability`, `misconfiguration`, `secret`), `id`, `severity`, `target`, `package`, `installedVersion`, `fixedVersion`, `line`, `title`; `findingsTruncated` |
 | `gitleaks` | `findings`; `byRule` (rule → count); `items[]`: `rule`, `file`, `line`, `commit`, `date`; `itemsTruncated` |
 | `sbom` | `format` (`SPDX-2.3`), `documentName`, `created`, `creators[]`, `packages` (without the scanned directory itself), `byType` (package-URL type such as `golang` or `github` → count; `other` without a purl) |
-| `terraformDrift` | `root` (`infra/envs/lab`), `exitCode` (0 or 2), `result` (`no changes`, `changes`, `outputs only`, `lab down`), `counts` (`create`, `update`, `replace`, `delete`, `other`), `changes[]` and `changedOutsideTerraform[]`: `address`, `actions`; `changesTruncated` |
+| `terraformDrift` | `root` (`infra/envs/lab`), `exitCode` (0 or 2), `result` (`no changes`, `changes`, `outputs only`, `lab down`), `counts` (`create`, `update`, `replace`, `delete`, `other`), `changes[]`: `address`, `actions`; `changesTruncated`; `changedOutsideTerraform[]`: `address`, `actions`, `attributes` (top-level attribute names that changed), `relevantAttributes` (those the plan depends on), `verdict` (`relevant`, `expected`, `irrelevant`); `outsideCounts` (`relevant`, `expected`, `irrelevant`) |
 | `cluster` | `name`, `location`, `status`, `releaseChannel`, `controlPlaneVersion`; `nodePools[]`: `name`, `version`, `status`, `machineType`, `spot`, `autoscaling`; `nodesStatus`, `nodesReason` (the node list is a second input); `nodes[]`: `name`, `pool`, `kubeletVersion`, `ready`, `spot`, `createdAt`, `osImage`, `containerRuntime` |
 | `gatekeeper` | `constraints`, `totalViolations`, `violationsByAction` (action → count), `notAudited`, `lastAudit`; `items[]`: `kind`, `name`, `controlId` (e.g. `PR-02`; empty without the annotation), `enforcementAction` (default `deny`), `auditTimestamp`, `totalViolations`, `violations[]` (`kind`, `namespace`, `name`, `message`; as stored by the audit, which caps the list per constraint) |
 | `argocd` | `applications`, `syncedHealthy`; `items[]`: `name`, `namespace`, `project`, `syncStatus`, `healthStatus`, `targetRevision`, `syncedRevision`, `lastOperation`, `reconciledAt` |
@@ -198,5 +229,8 @@ running on `main` on a GitHub-hosted runner, could have signed it.
   #30 sets 50); `totalViolations` still counts all of them. The audit's full findings are in Cloud Logging
   (`event_type="violation_audited"` in `gatekeeper-system`).
 - **Artifacts expire after 90 days**; keep the bundles that the case study cites (see "Where to find it").
+- **Some GitHub settings need a token with Administration read.** Without the optional `EVIDENCE_ADMIN_READ_TOKEN`,
+  classic branch protection details and the Actions settings are "not collected"; rulesets, branch rules and the
+  `lab` environment are always read.
 - **The drift check needs `tf-plan` and the state bucket.** It reports what Terraform sees; resources Terraform
   doesn't manage (for example the Gateway's load balancer) aren't part of it.

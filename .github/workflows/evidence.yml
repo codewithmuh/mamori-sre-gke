@@ -65,6 +65,68 @@ jobs:
                       run_number, run_attempt, created_at, updated_at, html_url}'
             done | jq -s '.' > "${OUT}/ci-runs.json"
 
+      # Controls that live only in GitHub's settings. Read-only calls; environments, rulesets and
+      # branch rules need only actions: read and metadata. Branch protection details and the
+      # Actions settings need Administration read, which GITHUB_TOKEN can't have: they are read
+      # only with the optional secret EVIDENCE_ADMIN_READ_TOKEN (a fine-grained token for this
+      # repository with Administration read and nothing else), and this step alone sees it.
+      - name: GitHub settings (environment lab, rules on main and tags, Actions)
+        id: github
+        continue-on-error: true
+        env:
+          TOKEN: ${{ github.token }}
+          ADMIN_TOKEN: ${{ secrets.EVIDENCE_ADMIN_READ_TOKEN }}
+        run: |
+          parts="${RUNNER_TEMP}/github-parts"
+          mkdir -p "$parts"
+          # fetch NAME TOKEN PATH: writes {"NAME": {"status": <HTTP status>, "body": <JSON or null>}}
+          fetch() {
+            local name=$1 token=$2 path=$3 body="${parts}/$1.body" status
+            status=$(curl -sS --retry 3 --max-time 30 -o "$body" -w '%{http_code}' \
+              -H "Authorization: Bearer ${token}" -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/${path}" || true)
+            status=$((10#${status:-0}))
+            jq -e . "$body" > /dev/null 2>&1 || echo null > "$body"
+            jq -n --arg name "$name" --argjson status "$status" --slurpfile body "$body" \
+              '{($name): {status: $status, body: $body[0]}}' > "${parts}/${name}.json"
+          }
+          fetch environment "$TOKEN" environments/lab
+          fetch environmentBranchPolicies "$TOKEN" environments/lab/deployment-branch-policies
+          fetch branch "$TOKEN" branches/main
+          fetch branchRules "$TOKEN" rules/branches/main
+          # The list carries no rules, so read each ruleset.
+          fetch rulesetList "$TOKEN" "rulesets?includes_parents=true&per_page=100"
+          list_status=$(jq '.rulesetList.status' "${parts}/rulesetList.json")
+          details=()
+          if [[ $list_status == 200 ]]; then
+            for id in $(jq -r '.rulesetList.body[]?.id' "${parts}/rulesetList.json"); do
+              fetch "ruleset-${id}" "$TOKEN" "rulesets/${id}"
+              details+=("${parts}/ruleset-${id}.json")
+            done
+          fi
+          jq -n --argjson list "$list_status" '[inputs | to_entries[0].value] as $d | {rulesets:
+              (if $list != 200 then {status: $list, body: null}
+               elif all($d[]; .status == 200) then {status: 200, body: [$d[].body]}
+               else {status: ([$d[].status | select(. != 200)][0]), body: null} end)}' \
+            "${details[@]}" < /dev/null > "${RUNNER_TEMP}/rulesets.json"
+          rm -f "${parts}/rulesetList.json" "${details[@]}"
+          mv "${RUNNER_TEMP}/rulesets.json" "${parts}/rulesets.json"
+          admin=false
+          if [[ -n $ADMIN_TOKEN ]]; then
+            admin=true
+            fetch branchProtection "$ADMIN_TOKEN" branches/main/protection
+            fetch workflowPermissions "$ADMIN_TOKEN" actions/permissions/workflow
+            fetch actionsPermissions "$ADMIN_TOKEN" actions/permissions
+          else
+            for name in branchProtection workflowPermissions actionsPermissions; do
+              jq -n --arg name "$name" \
+                '{($name): {status: 0, reason: "no token with Administration read (optional secret EVIDENCE_ADMIN_READ_TOKEN)", body: null}}' \
+                > "${parts}/${name}.json"
+            done
+          fi
+          jq -s --argjson admin "$admin" '{adminToken: $admin, responses: add}' "${parts}"/*.json > "${RUNNER_TEMP}/github-settings.json"
+          mv "${RUNNER_TEMP}/github-settings.json" "${OUT}/github-settings.json"
+
       # Before Trivy, so its cache in the workspace can't end up in the SBOM.
       - name: SBOM of the repository (syft, SPDX JSON)
         id: sbom
@@ -104,6 +166,7 @@ jobs:
         if: always()
         env:
           CI_OUTCOME: ${{ steps.ci.outcome }}
+          GITHUB_OUTCOME: ${{ steps.github.outcome }}
           SBOM_OUTCOME: ${{ steps.sbom.outcome }}
           GITLEAKS_OUTCOME: ${{ steps.gitleaks.outcome }}
           TRIVY_OUTCOME: ${{ steps.trivy.outcome }}
@@ -117,6 +180,7 @@ jobs:
             fi
           }
           record ci-runs.json "$CI_OUTCOME" "CI results"
+          record github-settings.json "$GITHUB_OUTCOME" "GitHub settings"
           record sbom.spdx.json "$SBOM_OUTCOME" "syft"
           record gitleaks.json "$GITLEAKS_OUTCOME" "gitleaks"
           record trivy.json "$TRIVY_OUTCOME" "Trivy"
@@ -145,6 +209,11 @@ jobs:
       TF_INPUT: "0"
       TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
       TF_VAR_billing_account_id: ${{ secrets.GCP_BILLING_ACCOUNT_ID }} # a secret, so it is masked in public logs
+      # Plan with the settings the lab was applied with, or the plan shows them as changes:
+      # alert_email (#21, optional, empty means no email channel) is a secret because it is
+      # personal data; slo_enabled (#18) creates the SLOs and their alerts once set to true.
+      TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
+      TF_VAR_slo_enabled: ${{ vars.SLO_ENABLED || 'false' }} # a bool: an empty value wouldn't parse
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -171,25 +240,24 @@ jobs:
         continue-on-error: true
         env:
           TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
-        # -lock=false: a read-only check never takes or leaves a state lock. The plan file can hold
-        # sensitive values, so it stays on this runner; only resource addresses and actions are kept.
+        # -lock=false: a read-only check never takes or leaves a state lock. The plan file and the
+        # full plan text can hold sensitive values (a home address in master_authorized_networks,
+        # say), so they stay on this runner: the public log gets only the summary lines, and the
+        # bundle only resource addresses, actions and attribute names (tools/evidence/drift.jq).
         run: |
           terraform init -backend-config="bucket=${TF_STATE_BUCKET}" -backend-config="prefix=lab"
           set +e
           terraform plan -no-color -lock=false -detailed-exitcode -out=drift.tfplan > plan.txt 2>&1
           code=$?
           set -e
-          cat plan.txt
+          grep -E '^(Plan: |No changes\.|Error: )' plan.txt || echo "(no summary line in the plan output)"
           if [[ $code != 0 && $code != 2 ]]; then
-            echo "terraform plan failed (exit ${code}); see the run log" > "${OUT}/terraform-drift.json.reason"
+            echo "terraform plan failed (exit ${code}); see the summary line in the run log" > "${OUT}/terraform-drift.json.reason"
             exit 0
           fi
-          terraform show -json drift.tfplan | jq --argjson code "$code" '{
-            exitCode: $code,
-            changes: [.resource_changes[]? | select(.change.actions != ["no-op"] and .change.actions != ["read"])
-                      | {address, actions: .change.actions}],
-            drift: [.resource_drift[]? | {address, actions: .change.actions}]
-          }' > "${OUT}/terraform-drift.json"
+          terraform show -json drift.tfplan |
+            jq --argjson code "$code" -f "${GITHUB_WORKSPACE}/tools/evidence/drift.jq" > drift.json
+          mv drift.json "${OUT}/terraform-drift.json"
       - name: Record why the drift check is missing
         if: always()
         env:
@@ -460,15 +528,27 @@ jobs:
               echo "the ${1} job ended with: ${2}; see the run log"
             fi
           }
-          mark "$(why repo "$REPO_RESULT")" ci-runs.json sbom.spdx.json gitleaks.json trivy.json
+          mark "$(why repo "$REPO_RESULT")" ci-runs.json github-settings.json sbom.spdx.json gitleaks.json trivy.json
           mark "$(why drift "$DRIFT_RESULT")" terraform-drift.json
           mark "$(why cluster "$CLUSTER_RESULT")" gke-cluster.json nodes.json gatekeeper-constraints.json \
             argocd-applications.json slo-status.json
       - name: Assemble bundle.json and summary.md
         id: bundle
+        env:
+          HAS_WIF: ${{ vars.GCP_WIF_PROVIDER != '' }}
+          REF: ${{ github.ref }}
         run: |
+          # What this run should have collected. A section that was expected but is missing needs a
+          # look, so a step that fails every week can't hide behind "not collected".
+          expect=ci,github,trivy,gitleaks,sbom
+          if [[ $HAS_WIF == true ]]; then
+            expect+=,terraformDrift
+            if [[ $REF == refs/heads/main ]]; then
+              expect+=,cluster,gatekeeper,argocd,slos
+            fi
+          fi
           go build -C tools/evidence -trimpath -o "${RUNNER_TEMP}/evidence" .
-          "${RUNNER_TEMP}/evidence" -inputs bundle/inputs -out bundle
+          "${RUNNER_TEMP}/evidence" -inputs bundle/inputs -out bundle -expect "$expect"
           # One line per file of the bundle, paths relative to it: `sha256sum -c SHA256SUMS` checks them.
           (cd bundle && find . -type f -printf '%P\0' | sort -z | xargs -0 sha256sum) > "${RUNNER_TEMP}/SHA256SUMS"
           mv "${RUNNER_TEMP}/SHA256SUMS" bundle/SHA256SUMS

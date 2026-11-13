@@ -23,11 +23,16 @@ func renderSummary(b bundle) string {
 	w.line("| Area | Status | Needs a look | Summary |")
 	w.line("|---|---|---|---|")
 	for _, si := range b.Sections.list() {
-		w.row(si.title, si.status, yesNo(si.status == statusCollected && si.attention), si.headline)
+		status := si.status
+		if si.status != statusCollected && si.expected {
+			status += " (expected)"
+		}
+		w.row(si.title, status, yesNo(si.attention), si.headline)
 	}
 
 	s := b.Sections
 	ciDetails(&w, s.CI)
+	githubDetails(&w, s.GitHub)
 	trivyDetails(&w, s.Trivy)
 	gitleaksDetails(&w, s.Gitleaks)
 	sbomDetails(&w, s.SBOM)
@@ -73,6 +78,18 @@ func ciDetails(w *mdWriter, s section[ciData]) {
 	w.line("|---|---|---|---|---|---|")
 	for _, r := range s.Data.Workflows {
 		w.row(r.Name+" (`"+r.Path+"`)", r.Conclusion, r.Event, "`"+r.Commit+"`", r.FinishedAt, link("#"+strconv.Itoa(r.RunNumber), r.URL))
+	}
+}
+
+func githubDetails(w *mdWriter, s section[githubData]) {
+	if !sectionHeader(w, s) || len(s.Data.Checks) == 0 {
+		return
+	}
+	w.line()
+	w.line("| Control | Required | Status | Detail |")
+	w.line("|---|---|---|---|")
+	for _, c := range s.Data.Checks {
+		w.row(c.Control, yesNo(c.Required), c.Status, dash(c.Detail))
 	}
 }
 
@@ -163,12 +180,13 @@ func driftDetails(w *mdWriter, s section[driftData]) {
 	}
 	if len(d.ChangedOutsideTerraform) > 0 {
 		w.line()
-		w.line("Changed outside Terraform since the last apply:")
+		w.line("Changed outside Terraform since the last apply (attribute names only; values never leave the runner):")
 		w.line()
-		w.line("| Resource | Change |")
-		w.line("|---|---|")
+		w.line("| Resource | Change | Attributes | Used by this plan | Verdict |")
+		w.line("|---|---|---|---|---|")
 		for _, c := range d.ChangedOutsideTerraform {
-			w.row("`"+c.Address+"`", actionKind(c.Actions))
+			w.row("`"+c.Address+"`", actionKind(c.Actions), dash(strings.Join(c.Attributes, ", ")),
+				dash(strings.Join(c.RelevantAttributes, ", ")), c.Verdict)
 		}
 	}
 }
@@ -320,7 +338,10 @@ func attentionList(b bundle) string {
 	}
 	titles := []string{}
 	for _, si := range b.Sections.list() {
-		if si.attention {
+		switch {
+		case si.attention && si.status != statusCollected:
+			titles = append(titles, si.title+" (expected, not collected)")
+		case si.attention:
 			titles = append(titles, si.title)
 		}
 	}

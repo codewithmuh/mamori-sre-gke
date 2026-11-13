@@ -5,10 +5,11 @@
 // command reads them from one directory and writes bundle.json (fixed schema, see
 // docs/compliance/evidence-bundle.md) and summary.md. It makes no network calls.
 //
-//	evidence -inputs bundle/inputs -out bundle
+//	evidence -inputs bundle/inputs -out bundle -expect ci,github,trivy,gitleaks,sbom
 //
 // An input that is missing or invalid is recorded as "not collected" with its reason; it never
-// makes the command fail. The command fails only on bad flags or when it can't write its output.
+// makes the command fail. If the run was expected to collect that section (-expect), the section
+// needs a look. The command fails only on bad flags or when it can't write its output.
 package main
 
 import (
@@ -20,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"time"
 )
@@ -34,10 +36,11 @@ func main() {
 }
 
 type options struct {
-	inputs string
-	out    string
-	now    time.Time
-	source source
+	inputs   string
+	out      string
+	now      time.Time
+	source   source
+	expected map[string]bool
 }
 
 // run is main without the process: it returns the exit code (0 written, 1 failed, 2 bad usage).
@@ -59,7 +62,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer, clock func
 	}
 	defer func() { _ = dir.Close() }()
 
-	b := assemble(dir, opts.source, opts.now)
+	b := assemble(dir, opts.source, opts.now, opts.expected)
 	for _, si := range b.Sections.list() {
 		log.Info("section", "section", si.key, "status", si.status, "attention", si.attention, "headline", si.headline)
 	}
@@ -68,7 +71,8 @@ func run(args []string, getenv func(string) string, stderr io.Writer, clock func
 		return 1
 	}
 	log.Info("bundle written", "out", opts.out, "collected", b.Overview.Collected,
-		"not_collected", b.Overview.NotCollected, "attention", strings.Join(b.Overview.Attention, ","))
+		"not_collected", b.Overview.NotCollected, "attention", strings.Join(b.Overview.Attention, ","),
+		"missing_expected", strings.Join(b.Overview.MissingExpected, ","))
 	return 0
 }
 
@@ -76,12 +80,14 @@ func run(args []string, getenv func(string) string, stderr io.Writer, clock func
 // the workflow needs no flags beyond -inputs and -out.
 func parseFlags(args []string, getenv func(string) string, output io.Writer, clock func() time.Time) (options, error) {
 	var o options
-	var now string
+	var now, expect string
 	fs := flag.NewFlagSet("evidence", flag.ContinueOnError)
 	fs.SetOutput(output)
 	fs.StringVar(&o.inputs, "inputs", "", "directory holding the collected input files (required)")
 	fs.StringVar(&o.out, "out", "", "directory to write bundle.json and summary.md to (required)")
 	fs.StringVar(&now, "now", "", "generation time, RFC 3339 (default: the current time); for reproducible output")
+	fs.StringVar(&expect, "expect", "", "comma-separated section keys this run should collect, or \"all\"; a missing one needs a look ("+
+		strings.Join(sectionKeys(), ", ")+")")
 	fs.StringVar(&o.source.Repository, "repository", getenv("GITHUB_REPOSITORY"), "owner/name of the repository")
 	fs.StringVar(&o.source.Commit, "commit", getenv("GITHUB_SHA"), "commit the evidence was collected at")
 	fs.StringVar(&o.source.Ref, "ref", getenv("GITHUB_REF"), "Git ref of the run")
@@ -104,6 +110,11 @@ func parseFlags(args []string, getenv func(string) string, output io.Writer, clo
 	if o.out == "" {
 		errs = append(errs, errors.New("-out is required"))
 	}
+	expected, err := parseExpect(expect)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	o.expected = expected
 	o.now = clock()
 	if now != "" {
 		t, err := time.Parse(time.RFC3339, now)
@@ -113,6 +124,27 @@ func parseFlags(args []string, getenv func(string) string, output io.Writer, clo
 		o.now = t
 	}
 	return o, errors.Join(errs...)
+}
+
+// parseExpect turns "ci,sbom" or "all" into a set of section keys, refusing unknown keys so a typo
+// can't quietly stop a section from being checked.
+func parseExpect(list string) (map[string]bool, error) {
+	known := sectionKeys()
+	expected := map[string]bool{}
+	for _, k := range strings.Split(list, ",") {
+		switch k = strings.TrimSpace(k); {
+		case k == "":
+		case k == "all":
+			for _, key := range known {
+				expected[key] = true
+			}
+		case slices.Contains(known, k):
+			expected[k] = true
+		default:
+			return nil, fmt.Errorf("-expect: unknown section %q (known: %s)", k, strings.Join(known, ", "))
+		}
+	}
+	return expected, nil
 }
 
 func defaultRunURL(getenv func(string) string) string {

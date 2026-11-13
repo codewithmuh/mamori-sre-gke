@@ -1,0 +1,131 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.17.1",
+  "resource_drift": [
+    {
+      "address": "google_container_cluster.mamori",
+      "mode": "managed",
+      "type": "google_container_cluster",
+      "name": "mamori",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["update"],
+        "before": {"name": "mamori", "location": "asia-northeast1-a", "master_version": "1.37.2-gke.1100000", "node_version": "1.37.2-gke.1100000", "node_pool": [{"name": "spot-pool", "version": "1.37.2-gke.1100000"}], "endpoint": "203.0.113.10"},
+        "after": {"name": "mamori", "location": "asia-northeast1-a", "master_version": "1.37.3-gke.1200000", "node_version": "1.37.3-gke.1200000", "node_pool": [{"name": "spot-pool", "version": "1.37.3-gke.1200000"}], "endpoint": "203.0.113.10"},
+        "after_unknown": {},
+        "before_sensitive": {},
+        "after_sensitive": {}
+      }
+    },
+    {
+      "address": "google_container_node_pool.spot",
+      "mode": "managed",
+      "type": "google_container_node_pool",
+      "name": "spot",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["update"],
+        "before": {"name": "spot-pool", "node_count": 3, "version": "1.37.2-gke.1100000"},
+        "after": {"name": "spot-pool", "node_count": 0, "version": "1.37.3-gke.1200000"},
+        "after_unknown": {},
+        "before_sensitive": {},
+        "after_sensitive": {}
+      }
+    },
+    {
+      "address": "google_compute_security_policy.frontend",
+      "mode": "managed",
+      "type": "google_compute_security_policy",
+      "name": "frontend",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["update"],
+        "before": {"name": "mamori-frontend-armor", "rule": [{"priority": 1000, "action": "throttle"}]},
+        "after": {"name": "mamori-frontend-armor", "rule": [{"priority": 1000, "action": "allow"}]},
+        "after_unknown": {},
+        "before_sensitive": {},
+        "after_sensitive": {}
+      }
+    },
+    {
+      "address": "google_compute_firewall.webhooks",
+      "mode": "managed",
+      "type": "google_compute_firewall",
+      "name": "webhooks",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["update"],
+        "before": {"name": "mamori-webhooks", "description": "Istio webhooks"},
+        "after": {"name": "mamori-webhooks", "description": "edited in the console"},
+        "after_unknown": {},
+        "before_sensitive": {},
+        "after_sensitive": {}
+      }
+    },
+    {
+      "address": "google_monitoring_notification_channel.email",
+      "mode": "managed",
+      "type": "google_monitoring_notification_channel",
+      "name": "email",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["update"],
+        "before": {"display_name": "mamori email", "labels": {"email_address": "someone@example.invalid"}, "sensitive_labels": [{"auth_token": "pd-key-that-must-not-leak"}], "user_labels": {}},
+        "after": {"display_name": "mamori email", "labels": {"email_address": "someone-else@example.invalid"}, "sensitive_labels": [{"auth_token": "pd-key-that-must-not-leak"}], "user_labels": {"edited": "yes"}},
+        "after_unknown": {},
+        "before_sensitive": {"sensitive_labels": [{"auth_token": true}]},
+        "after_sensitive": {"sensitive_labels": [{"auth_token": true}]}
+      }
+    },
+    {
+      "address": "google_compute_global_address.frontend",
+      "mode": "managed",
+      "type": "google_compute_global_address",
+      "name": "frontend",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["delete"],
+        "before": {"name": "mamori-frontend-ip", "address": "203.0.113.20"},
+        "after": null,
+        "after_unknown": {},
+        "before_sensitive": {},
+        "after_sensitive": false
+      }
+    }
+  ],
+  "resource_changes": [
+    {
+      "address": "google_compute_security_policy.frontend",
+      "mode": "managed",
+      "type": "google_compute_security_policy",
+      "name": "frontend",
+      "change": {"actions": ["update"], "before": {"rule": [{"action": "allow"}]}, "after": {"rule": [{"action": "throttle"}]}}
+    },
+    {
+      "address": "google_compute_global_address.frontend",
+      "mode": "managed",
+      "type": "google_compute_global_address",
+      "name": "frontend",
+      "change": {"actions": ["create"], "before": null, "after": {"name": "mamori-frontend-ip"}}
+    },
+    {
+      "address": "google_container_cluster.mamori",
+      "mode": "managed",
+      "type": "google_container_cluster",
+      "name": "mamori",
+      "change": {"actions": ["no-op"], "before": {}, "after": {}}
+    },
+    {
+      "address": "data.google_project.this",
+      "mode": "data",
+      "type": "google_project",
+      "name": "this",
+      "change": {"actions": ["read"], "before": null, "after": {}}
+    }
+  ],
+  "relevant_attributes": [
+    {"resource": "google_compute_security_policy.frontend", "attribute": ["rule"]},
+    {"resource": "google_container_cluster.mamori", "attribute": ["master_version"]},
+    {"resource": "google_compute_global_address.frontend", "attribute": ["address"]}
+  ]
+}

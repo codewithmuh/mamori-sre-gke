@@ -1,7 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -162,8 +166,14 @@ func TestParseDrift(t *testing.T) {
 			{"address": "d", "actions": ["delete"]}, {"address": "r", "actions": ["create", "delete"]},
 			{"address": "r2", "actions": ["delete", "create"]}, {"address": "f", "actions": ["forget"]}, {"address": "n", "actions": null}]}`,
 			"changes", true, "5 changes to review: 0 create, 0 update, 2 replace, 1 delete, 2 other"},
-		{"changed outside Terraform only", `{"exitCode": 0, "drift": [{"address": "x", "actions": ["update"]}]}`,
-			"no changes", true, "no drift: the lab matches main; 1 object changed outside Terraform"},
+		{"changed outside Terraform, input without attribute names", `{"exitCode": 0, "drift": [{"address": "x", "actions": ["update"]}]}`,
+			"no changes", true, "no drift: the lab matches main; 1 object changed outside Terraform: 1 relevant, 0 expected (GKE upgrades, spend guard), 0 not used by this plan"},
+		{"GKE upgrade and spend guard only", `{"exitCode": 0, "drift": [
+			{"address": "google_container_cluster.mamori", "actions": ["update"], "attributes": ["master_version", "node_version"], "relevantAttributes": ["master_version"]},
+			{"address": "google_container_node_pool.spot", "actions": ["update"], "attributes": ["node_count"], "relevantAttributes": []},
+			{"address": "google_compute_firewall.x", "actions": ["update"], "attributes": ["description"], "relevantAttributes": []},
+			{"address": "y", "actions": ["no-op"]}]}`,
+			"no changes", false, "no drift: the lab matches main; 3 objects changed outside Terraform: 0 relevant, 2 expected (GKE upgrades, spend guard), 1 not used by this plan"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -327,7 +337,7 @@ func TestSummaryShowsDetailsForEveryCollectedSection(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = dir.Close() }()
-	b := assemble(dir, source{RunID: "1"}, fixedNow)
+	b := assemble(dir, source{RunID: "1"}, fixedNow, map[string]bool{"ci": true})
 
 	md := renderSummary(b)
 	for _, want := range []string{
@@ -341,6 +351,75 @@ func TestSummaryShowsDetailsForEveryCollectedSection(t *testing.T) {
 	} {
 		if !strings.Contains(md, want) {
 			t.Errorf("summary.md lacks %q", want)
+		}
+	}
+}
+
+// The workflow reduces the plan with drift.jq; this checks it against a sample plan, when jq is
+// installed (it is on GitHub's runners), and that no attribute value survives the reduction.
+func TestDriftFilterOnSamplePlan(t *testing.T) {
+	jq, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skip("jq not installed")
+	}
+	out, err := exec.Command(jq, "--argjson", "code", "2", "-f", "drift.jq", "testdata/plan/sample-plan.json").Output()
+	if err != nil {
+		t.Fatalf("jq: %v", err)
+	}
+	for _, value := range []string{"pd-key-that-must-not-leak", "example.invalid", "203.0.113.", "1.37.", "throttle", "console"} {
+		if strings.Contains(string(out), value) {
+			t.Errorf("an attribute value leaked into terraform-drift.json: %q", value)
+		}
+	}
+	want, err := os.ReadFile("testdata/inputs/terraform-drift.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got, exp any
+	if json.Unmarshal(out, &got) != nil || json.Unmarshal(want, &exp) != nil || !reflect.DeepEqual(got, exp) {
+		t.Errorf("drift.jq output differs from testdata/inputs/terraform-drift.json:\n%s", out)
+	}
+}
+
+func TestDriftVerdictsOnSamplePlan(t *testing.T) {
+	data, err := os.ReadFile("testdata/inputs/terraform-drift.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, attention, _, err := parseDrift(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdicts := map[string]string{}
+	for _, o := range d.ChangedOutsideTerraform {
+		verdicts[o.Address] = o.Verdict
+	}
+	want := map[string]string{
+		"google_container_cluster.mamori":              "expected",   // auto-upgrade, though master_version is used
+		"google_container_node_pool.spot":              "expected",   // upgrade and spend guard
+		"google_compute_security_policy.frontend":      "relevant",   // the plan reverts it
+		"google_compute_firewall.webhooks":             "irrelevant", // description only, nothing uses it
+		"google_monitoring_notification_channel.email": "irrelevant",
+		"google_compute_global_address.frontend":       "relevant", // deleted outside Terraform
+	}
+	if !mapsEqual(verdicts, want) {
+		t.Errorf("verdicts = %v\nwant %v", verdicts, want)
+	}
+	if !attention || d.OutsideCounts.Relevant != 2 || d.OutsideCounts.Expected != 2 || d.OutsideCounts.Irrelevant != 2 {
+		t.Errorf("attention=%v counts=%+v", attention, d.OutsideCounts)
+	}
+}
+
+func TestResourceType(t *testing.T) {
+	for address, want := range map[string]string{
+		"google_container_cluster.mamori":                       "google_container_cluster",
+		"module.lab.module.gke.google_container_node_pool.spot": "google_container_node_pool",
+		`google_compute_firewall.rules["a.b"]`:                  "google_compute_firewall",
+		"data.google_project.this":                              "google_project",
+		"module.x":                                              "",
+	} {
+		if got := resourceType(address); got != want {
+			t.Errorf("resourceType(%q) = %q, want %q", address, got, want)
 		}
 	}
 }

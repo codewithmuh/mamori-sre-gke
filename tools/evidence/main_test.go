@@ -35,7 +35,7 @@ func fixedClock() time.Time { return fixedNow }
 func TestGolden(t *testing.T) {
 	out := t.TempDir()
 	var stderr bytes.Buffer
-	if code := run([]string{"-inputs", "testdata/inputs", "-out", out}, githubEnv, &stderr, fixedClock); code != 0 {
+	if code := run([]string{"-inputs", "testdata/inputs", "-out", out, "-expect", "all"}, githubEnv, &stderr, fixedClock); code != 0 {
 		t.Fatalf("run = %d, stderr:\n%s", code, stderr.String())
 	}
 	for _, name := range []string{bundleFile, summaryFile} {
@@ -74,11 +74,11 @@ func TestEverySectionHasAPlaceWhenNothingWasCollected(t *testing.T) {
 
 	b := runAndRead(t, in)
 
-	if b.Overview.Collected != 0 || b.Overview.NotCollected != 9 || b.Overview.Sections != 9 {
-		t.Errorf("overview = %+v, want 0 collected and 9 not collected", b.Overview)
+	if b.Overview.Collected != 0 || b.Overview.NotCollected != 10 || b.Overview.Sections != 10 {
+		t.Errorf("overview = %+v, want 0 collected and 10 not collected", b.Overview)
 	}
-	if len(b.Overview.Attention) != 0 {
-		t.Errorf("attention = %v, want none: nothing collected can't need a look", b.Overview.Attention)
+	if len(b.Overview.Attention) != 0 || len(b.Overview.MissingExpected) != 0 {
+		t.Errorf("overview = %+v, want nothing to look at: nothing was expected", b.Overview)
 	}
 	want := map[string]string{
 		"ci":             "no input file and no reason recorded",
@@ -100,6 +100,65 @@ func TestEverySectionHasAPlaceWhenNothingWasCollected(t *testing.T) {
 	}
 	if n := len(b.Sections.Cluster.Inputs); n != 2 {
 		t.Errorf("cluster inputs = %d, want 2 (cluster and nodes)", n)
+	}
+}
+
+func TestExpectedSectionsThatAreMissingNeedALook(t *testing.T) {
+	in := t.TempDir()
+	sbom, err := os.ReadFile(filepath.Join("testdata", "inputs", inputSBOM))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, in, inputSBOM, string(sbom))
+	writeFile(t, in, inputDrift+reasonSuffix, "terraform plan failed (exit 1); see the run log")
+
+	out := t.TempDir()
+	args := []string{"-inputs", in, "-out", out, "-expect", " sbom , terraformDrift "}
+	if code := run(args, githubEnv, &bytes.Buffer{}, fixedClock); code != 0 {
+		t.Fatalf("run = %d", code)
+	}
+	b := readBundle(t, out)
+
+	if s := b.Sections.SBOM; !s.Expected || s.Attention {
+		t.Errorf("sbom: expected=%v attention=%v, want expected and fine", s.Expected, s.Attention)
+	}
+	if s := b.Sections.TerraformDrift; !s.Expected || !s.Attention || s.Status != statusNotCollected {
+		t.Errorf("terraformDrift: %+v, want expected, not collected, needs a look", s)
+	}
+	if s := b.Sections.Cluster; s.Expected || s.Attention {
+		t.Errorf("cluster wasn't expected: %+v", s)
+	}
+	if got := strings.Join(b.Overview.MissingExpected, ","); got != "terraformDrift" {
+		t.Errorf("missingExpected = %q", got)
+	}
+	if got := strings.Join(b.Overview.Attention, ","); got != "terraformDrift" {
+		t.Errorf("attention = %q", got)
+	}
+	md, err := os.ReadFile(filepath.Join(out, summaryFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Needs a look: Terraform drift (infra/envs/lab) (expected, not collected).",
+		"| Terraform drift (infra/envs/lab) | not collected (expected) | yes | not collected: terraform plan failed (exit 1); see the run log |",
+	} {
+		if !strings.Contains(string(md), want) {
+			t.Errorf("summary.md lacks %q", want)
+		}
+	}
+}
+
+func TestParseExpect(t *testing.T) {
+	all, err := parseExpect("all")
+	if err != nil || len(all) != len(sectionKeys()) || len(sectionKeys()) != 10 {
+		t.Errorf("all = %v, %v", all, err)
+	}
+	none, err := parseExpect("")
+	if err != nil || len(none) != 0 {
+		t.Errorf("empty = %v, %v", none, err)
+	}
+	if _, err := parseExpect("ci,clusters"); err == nil {
+		t.Error("a typo must be refused")
 	}
 }
 
@@ -170,6 +229,7 @@ func TestRunFlags(t *testing.T) {
 		{"missing both", nil, 2, "-inputs is required"},
 		{"bad now", []string{"-inputs", "x", "-out", "y", "-now", "yesterday"}, 2, "-now"},
 		{"extra argument", []string{"-inputs", "x", "-out", "y", "z"}, 2, "unexpected arguments: z"},
+		{"unknown section", []string{"-inputs", "x", "-out", "y", "-expect", "ci,nope"}, 2, `unknown section \"nope\"`},
 		{"unknown flag", []string{"-nope"}, 2, "flag provided but not defined"},
 		{"help", []string{"-h"}, 0, "-inputs"},
 		{"inputs missing on disk", []string{"-inputs", filepath.Join(t.TempDir(), "absent"), "-out", t.TempDir()}, 1, "cannot read inputs"},

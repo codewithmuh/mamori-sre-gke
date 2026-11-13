@@ -12,21 +12,24 @@
     "runUrl": "https://github.com/codewithmuh/mamori-sre-gke/actions/runs/9100000005"
   },
   "overview": {
-    "sections": 9,
-    "collected": 9,
+    "sections": 10,
+    "collected": 10,
     "notCollected": 0,
     "attention": [
       "ci",
+      "github",
       "trivy",
       "terraformDrift",
       "gatekeeper",
       "argocd"
-    ]
+    ],
+    "missingExpected": []
   },
   "sections": {
     "ci": {
       "title": "CI on main",
       "status": "collected",
+      "expected": true,
       "attention": true,
       "headline": "4 workflows on main, 1 not passing (terraform-apply: failure)",
       "inputs": [
@@ -84,9 +87,101 @@
         "failing": 1
       }
     },
+    "github": {
+      "title": "GitHub settings (environment, rules, Actions)",
+      "status": "collected",
+      "expected": true,
+      "attention": true,
+      "headline": "6 of 9 required controls in place; missing: release tags can't be moved or deleted; 3 checks not collected (no token with Administration read)",
+      "inputs": [
+        {
+          "file": "github-settings.json",
+          "status": "collected",
+          "sha256": "75ae25f059428b1d623f7d53be65d4943607ab40ff66fedd4c1f91c40128f751",
+          "bytes": 3134
+        }
+      ],
+      "data": {
+        "checks": [
+          {
+            "id": "lab-environment",
+            "control": "environment lab exists",
+            "required": true,
+            "status": "ok",
+            "detail": "present"
+          },
+          {
+            "id": "lab-reviewers",
+            "control": "deployments to lab wait for a reviewer",
+            "required": true,
+            "status": "ok",
+            "detail": "1 reviewer"
+          },
+          {
+            "id": "lab-branches",
+            "control": "only main can deploy to lab",
+            "required": true,
+            "status": "ok",
+            "detail": "branch main only"
+          },
+          {
+            "id": "main-pull-request",
+            "control": "changes reach main only through a pull request",
+            "required": true,
+            "status": "ok",
+            "detail": "ruleset rule pull_request"
+          },
+          {
+            "id": "main-ci-result",
+            "control": "the CI result check must pass before merging",
+            "required": true,
+            "status": "ok",
+            "detail": "ruleset rule required_status_checks"
+          },
+          {
+            "id": "main-history",
+            "control": "main can't be force-pushed or deleted",
+            "required": true,
+            "status": "ok",
+            "detail": "ruleset rules non_fast_forward and deletion"
+          },
+          {
+            "id": "release-tags",
+            "control": "release tags can't be moved or deleted",
+            "required": true,
+            "status": "missing",
+            "detail": "no active tag ruleset that blocks deleting and moving tags"
+          },
+          {
+            "id": "workflow-token-read",
+            "control": "workflows get a read-only GITHUB_TOKEN by default",
+            "required": true,
+            "status": "not collected",
+            "detail": "no token with Administration read (secret EVIDENCE_ADMIN_READ_TOKEN)"
+          },
+          {
+            "id": "workflow-no-approvals",
+            "control": "workflows can't approve pull requests",
+            "required": true,
+            "status": "not collected",
+            "detail": "no token with Administration read (secret EVIDENCE_ADMIN_READ_TOKEN)"
+          },
+          {
+            "id": "actions-sha-pinning",
+            "control": "GitHub enforces actions pinned to a full commit SHA",
+            "required": false,
+            "status": "not collected",
+            "detail": "no token with Administration read (secret EVIDENCE_ADMIN_READ_TOKEN)"
+          }
+        ],
+        "missing": 1,
+        "notCollected": 3
+      }
+    },
     "trivy": {
       "title": "Vulnerabilities and misconfigurations (Trivy)",
       "status": "collected",
+      "expected": true,
       "attention": true,
       "headline": "3 vulnerabilities, 3 misconfigurations, 0 secrets; 1 finding would fail CI's scan",
       "inputs": [
@@ -149,6 +244,7 @@
     "gitleaks": {
       "title": "Secrets in Git history (gitleaks)",
       "status": "collected",
+      "expected": true,
       "attention": false,
       "headline": "no secrets found in the Git history",
       "inputs": [
@@ -169,6 +265,7 @@
     "sbom": {
       "title": "Software bill of materials (syft)",
       "status": "collected",
+      "expected": true,
       "attention": false,
       "headline": "SPDX-2.3, 5 packages",
       "inputs": [
@@ -198,14 +295,15 @@
     "terraformDrift": {
       "title": "Terraform drift (infra/envs/lab)",
       "status": "collected",
+      "expected": true,
       "attention": true,
-      "headline": "1 change to review: 0 create, 1 update, 0 replace, 0 delete; 1 object changed outside Terraform",
+      "headline": "2 changes to review: 1 create, 1 update, 0 replace, 0 delete; 6 objects changed outside Terraform: 2 relevant, 2 expected (GKE upgrades, spend guard), 2 not used by this plan",
       "inputs": [
         {
           "file": "terraform-drift.json",
           "status": "collected",
-          "sha256": "fdd6bf350f1bee50507d82c06df276b1f1ec85c9b997fb5a7bcd8a3e146a1355",
-          "bytes": 362
+          "sha256": "2dd8b898f224e59dfcf7f517425bcbdb5c5a1599f066a2afcb7ba436af9f98f3",
+          "bytes": 1650
         }
       ],
       "data": {
@@ -213,13 +311,19 @@
         "exitCode": 2,
         "result": "changes",
         "counts": {
-          "create": 0,
+          "create": 1,
           "update": 1,
           "replace": 0,
           "delete": 0,
           "other": 0
         },
         "changes": [
+          {
+            "address": "google_compute_global_address.frontend",
+            "actions": [
+              "create"
+            ]
+          },
           {
             "address": "google_compute_security_policy.frontend",
             "actions": [
@@ -230,17 +334,94 @@
         "changesTruncated": false,
         "changedOutsideTerraform": [
           {
+            "address": "google_compute_firewall.webhooks",
+            "actions": [
+              "update"
+            ],
+            "attributes": [
+              "description"
+            ],
+            "relevantAttributes": [],
+            "verdict": "irrelevant"
+          },
+          {
+            "address": "google_compute_global_address.frontend",
+            "actions": [
+              "delete"
+            ],
+            "attributes": [
+              "address",
+              "name"
+            ],
+            "relevantAttributes": [
+              "address"
+            ],
+            "verdict": "relevant"
+          },
+          {
             "address": "google_compute_security_policy.frontend",
             "actions": [
               "update"
-            ]
+            ],
+            "attributes": [
+              "rule"
+            ],
+            "relevantAttributes": [
+              "rule"
+            ],
+            "verdict": "relevant"
+          },
+          {
+            "address": "google_container_cluster.mamori",
+            "actions": [
+              "update"
+            ],
+            "attributes": [
+              "master_version",
+              "node_pool",
+              "node_version"
+            ],
+            "relevantAttributes": [
+              "master_version"
+            ],
+            "verdict": "expected"
+          },
+          {
+            "address": "google_container_node_pool.spot",
+            "actions": [
+              "update"
+            ],
+            "attributes": [
+              "node_count",
+              "version"
+            ],
+            "relevantAttributes": [],
+            "verdict": "expected"
+          },
+          {
+            "address": "google_monitoring_notification_channel.email",
+            "actions": [
+              "update"
+            ],
+            "attributes": [
+              "labels",
+              "user_labels"
+            ],
+            "relevantAttributes": [],
+            "verdict": "irrelevant"
           }
-        ]
+        ],
+        "outsideCounts": {
+          "relevant": 2,
+          "expected": 2,
+          "irrelevant": 2
+        }
       }
     },
     "cluster": {
       "title": "Cluster versions and nodes",
       "status": "collected",
+      "expected": true,
       "attention": false,
       "headline": "RUNNING, control plane 1.37.2-gke.1100000, node pools 1.37.2-gke.1100000, 3/3 nodes Ready, channel REGULAR",
       "inputs": [
@@ -311,6 +492,7 @@
     "gatekeeper": {
       "title": "Gatekeeper audit",
       "status": "collected",
+      "expected": true,
       "attention": true,
       "headline": "2 constraints, 2 violations (dryrun 2), last audit 2026-11-16T00:15:00Z",
       "inputs": [
@@ -367,6 +549,7 @@
     "argocd": {
       "title": "Argo CD applications",
       "status": "collected",
+      "expected": true,
       "attention": true,
       "headline": "2/3 applications Synced and Healthy (not: istiod OutOfSync/Healthy)",
       "inputs": [
@@ -420,6 +603,7 @@
     "slos": {
       "title": "SLOs and error budgets",
       "status": "collected",
+      "expected": true,
       "attention": false,
       "headline": "3 SLOs: 0 exhausted, 1 low (under 25 % left), 1 without data; least budget left: browse availability (20.2 %)",
       "inputs": [

@@ -3,15 +3,16 @@
 Generated 2026-11-16T00:20:00Z from commit `0123456789ab` (refs/heads/main) of `codewithmuh/mamori-sre-gke` by [evidence run 9100000005](https://github.com/codewithmuh/mamori-sre-gke/actions/runs/9100000005).
 Schema `mamori.evidence/v1`. A lab with synthetic traffic: these numbers describe the lab, not a production service.
 
-**9 of 9 areas collected.** Needs a look: CI on main, Vulnerabilities and misconfigurations (Trivy), Terraform drift (infra/envs/lab), Gatekeeper audit, Argo CD applications.
+**10 of 10 areas collected.** Needs a look: CI on main, GitHub settings (environment, rules, Actions), Vulnerabilities and misconfigurations (Trivy), Terraform drift (infra/envs/lab), Gatekeeper audit, Argo CD applications.
 
 | Area | Status | Needs a look | Summary |
 |---|---|---|---|
 | CI on main | collected | yes | 4 workflows on main, 1 not passing (terraform-apply: failure) |
+| GitHub settings (environment, rules, Actions) | collected | yes | 6 of 9 required controls in place; missing: release tags can't be moved or deleted; 3 checks not collected (no token with Administration read) |
 | Vulnerabilities and misconfigurations (Trivy) | collected | yes | 3 vulnerabilities, 3 misconfigurations, 0 secrets; 1 finding would fail CI's scan |
 | Secrets in Git history (gitleaks) | collected | no | no secrets found in the Git history |
 | Software bill of materials (syft) | collected | no | SPDX-2.3, 5 packages |
-| Terraform drift (infra/envs/lab) | collected | yes | 1 change to review: 0 create, 1 update, 0 replace, 0 delete; 1 object changed outside Terraform |
+| Terraform drift (infra/envs/lab) | collected | yes | 2 changes to review: 1 create, 1 update, 0 replace, 0 delete; 6 objects changed outside Terraform: 2 relevant, 2 expected (GKE upgrades, spend guard), 2 not used by this plan |
 | Cluster versions and nodes | collected | no | RUNNING, control plane 1.37.2-gke.1100000, node pools 1.37.2-gke.1100000, 3/3 nodes Ready, channel REGULAR |
 | Gatekeeper audit | collected | yes | 2 constraints, 2 violations (dryrun 2), last audit 2026-11-16T00:15:00Z |
 | Argo CD applications | collected | yes | 2/3 applications Synced and Healthy (not: istiod OutOfSync/Healthy) |
@@ -27,6 +28,23 @@ Schema `mamori.evidence/v1`. A lab with synthetic traffic: these numbers describ
 | evidence (`.github/workflows/evidence.yml`) | success | schedule | `333333333333` | 2026-11-09T00:25:00Z | [#2](https://github.com/codewithmuh/mamori-sre-gke/actions/runs/9100000000) |
 | release (`.github/workflows/release.yml`) | skipped | push | `0123456789ab` | 2026-11-15T21:00:20Z | [#12](https://github.com/codewithmuh/mamori-sre-gke/actions/runs/9000000009) |
 | terraform-apply (`.github/workflows/terraform-apply.yml`) | failure | workflow_dispatch | `222222222222` | 2026-11-14T09:20:00Z | [#7](https://github.com/codewithmuh/mamori-sre-gke/actions/runs/9100000001) |
+
+## GitHub settings (environment, rules, Actions)
+
+6 of 9 required controls in place; missing: release tags can't be moved or deleted; 3 checks not collected (no token with Administration read).
+
+| Control | Required | Status | Detail |
+|---|---|---|---|
+| environment lab exists | yes | ok | present |
+| deployments to lab wait for a reviewer | yes | ok | 1 reviewer |
+| only main can deploy to lab | yes | ok | branch main only |
+| changes reach main only through a pull request | yes | ok | ruleset rule pull_request |
+| the CI result check must pass before merging | yes | ok | ruleset rule required_status_checks |
+| main can't be force-pushed or deleted | yes | ok | ruleset rules non_fast_forward and deletion |
+| release tags can't be moved or deleted | yes | missing | no active tag ruleset that blocks deleting and moving tags |
+| workflows get a read-only GITHUB_TOKEN by default | yes | not collected | no token with Administration read (secret EVIDENCE_ADMIN_READ_TOKEN) |
+| workflows can't approve pull requests | yes | not collected | no token with Administration read (secret EVIDENCE_ADMIN_READ_TOKEN) |
+| GitHub enforces actions pinned to a full commit SHA | no | not collected | no token with Administration read (secret EVIDENCE_ADMIN_READ_TOKEN) |
 
 ## Vulnerabilities and misconfigurations (Trivy)
 
@@ -60,19 +78,25 @@ The full SBOM is `inputs/sbom.spdx.json`.
 
 ## Terraform drift (infra/envs/lab)
 
-1 change to review: 0 create, 1 update, 0 replace, 0 delete; 1 object changed outside Terraform.
+2 changes to review: 1 create, 1 update, 0 replace, 0 delete; 6 objects changed outside Terraform: 2 relevant, 2 expected (GKE upgrades, spend guard), 2 not used by this plan.
 
 `terraform plan -detailed-exitcode` in `infra/envs/lab` exited 2 (result: changes).
 
 | Resource | Action |
 |---|---|
+| `google_compute_global_address.frontend` | create |
 | `google_compute_security_policy.frontend` | update |
 
-Changed outside Terraform since the last apply:
+Changed outside Terraform since the last apply (attribute names only; values never leave the runner):
 
-| Resource | Change |
-|---|---|
-| `google_compute_security_policy.frontend` | update |
+| Resource | Change | Attributes | Used by this plan | Verdict |
+|---|---|---|---|---|
+| `google_compute_firewall.webhooks` | update | description | - | irrelevant |
+| `google_compute_global_address.frontend` | delete | address, name | address | relevant |
+| `google_compute_security_policy.frontend` | update | rule | rule | relevant |
+| `google_container_cluster.mamori` | update | master_version, node_pool, node_version | master_version | expected |
+| `google_container_node_pool.spot` | update | node_count, version | - | expected |
+| `google_monitoring_notification_channel.email` | update | labels, user_labels | - | irrelevant |
 
 ## Cluster versions and nodes
 
@@ -133,10 +157,11 @@ Copies of these files are in `inputs/`; `SHA256SUMS` covers every file of the bu
 | File | Status | SHA-256 | Bytes |
 |---|---|---|---|
 | `ci-runs.json` | collected | f08c4459e976d4c71c47c5b3ebeb758ab87f5d82e94b92e79730786ed27424cb | 2977 |
+| `github-settings.json` | collected | 75ae25f059428b1d623f7d53be65d4943607ab40ff66fedd4c1f91c40128f751 | 3134 |
 | `trivy.json` | collected | 867673cde8f027e9c10b97a0075949d7a142af48f416b974b2c96e6a0cbc62d2 | 2033 |
 | `gitleaks.json` | collected | 37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570 | 3 |
 | `sbom.spdx.json` | collected | b17c52cc9db0ab56b059f6aa12ce9b68f2346f229fbcd614ed83c11c291bef52 | 5174 |
-| `terraform-drift.json` | collected | fdd6bf350f1bee50507d82c06df276b1f1ec85c9b997fb5a7bcd8a3e146a1355 | 362 |
+| `terraform-drift.json` | collected | 2dd8b898f224e59dfcf7f517425bcbdb5c5a1599f066a2afcb7ba436af9f98f3 | 1650 |
 | `gke-cluster.json` | collected | cdd65b8a7bd15371161f9273b1d9790d9a5773d4faf4d056cf3b22bc989d2572 | 398 |
 | `nodes.json` | collected | c0899e8b5ba91b96477d7c924d06522de902bf2aed6719ace6335d47dc1ba7cd | 1442 |
 | `gatekeeper-constraints.json` | collected | dd56fabb874a4df416a497647d2feb5c716d7d1436925afb8c1099a2a885b5c5 | 1159 |

@@ -1,0 +1,54 @@
+{
+  "adminToken": false,
+  "responses": {
+    "environment": {
+      "status": 200,
+      "body": {
+        "id": 1000000001,
+        "name": "lab",
+        "protection_rules": [
+          {"id": 1, "type": "required_reviewers", "prevent_self_review": false,
+           "reviewers": [{"type": "User", "reviewer": {"login": "codewithmuh", "type": "User"}}]},
+          {"id": 2, "type": "branch_policy"}
+        ],
+        "deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true},
+        "can_admins_bypass": false
+      }
+    },
+    "environmentBranchPolicies": {
+      "status": 200,
+      "body": {"total_count": 1, "branch_policies": [{"id": 10, "name": "main", "type": "branch"}]}
+    },
+    "branch": {
+      "status": 200,
+      "body": {
+        "name": "main",
+        "protected": true,
+        "protection": {"enabled": true, "required_status_checks": {"enforcement_level": "off", "contexts": [], "checks": []}}
+      }
+    },
+    "branchRules": {
+      "status": 200,
+      "body": [
+        {"type": "deletion", "ruleset_source_type": "Repository", "ruleset_source": "codewithmuh/mamori-sre-gke", "ruleset_id": 20},
+        {"type": "non_fast_forward", "ruleset_source_type": "Repository", "ruleset_source": "codewithmuh/mamori-sre-gke", "ruleset_id": 20},
+        {"type": "pull_request", "parameters": {"required_approving_review_count": 0, "dismiss_stale_reviews_on_push": true, "require_code_owner_review": false, "require_last_push_approval": false, "required_review_thread_resolution": true}, "ruleset_source_type": "Repository", "ruleset_source": "codewithmuh/mamori-sre-gke", "ruleset_id": 20},
+        {"type": "required_status_checks", "parameters": {"strict_required_status_checks_policy": false, "required_status_checks": [{"context": "CI result", "integration_id": 15368}]}, "ruleset_source_type": "Repository", "ruleset_source": "codewithmuh/mamori-sre-gke", "ruleset_id": 20}
+      ]
+    },
+    "rulesets": {
+      "status": 200,
+      "body": [
+        {"id": 20, "name": "main", "target": "branch", "source_type": "Repository", "source": "codewithmuh/mamori-sre-gke", "enforcement": "active",
+         "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+         "rules": [{"type": "deletion"}, {"type": "non_fast_forward"}, {"type": "pull_request", "parameters": {"required_approving_review_count": 0}}]},
+        {"id": 21, "name": "release tags (draft)", "target": "tag", "source_type": "Repository", "source": "codewithmuh/mamori-sre-gke", "enforcement": "evaluate",
+         "conditions": {"ref_name": {"include": ["refs/tags/v*"], "exclude": []}},
+         "rules": [{"type": "deletion"}, {"type": "update"}]}
+      ]
+    },
+    "branchProtection": {"status": 0, "reason": "no token with Administration read (secret EVIDENCE_ADMIN_READ_TOKEN)", "body": null},
+    "workflowPermissions": {"status": 0, "reason": "no token with Administration read (secret EVIDENCE_ADMIN_READ_TOKEN)", "body": null},
+    "actionsPermissions": {"status": 0, "reason": "no token with Administration read (secret EVIDENCE_ADMIN_READ_TOKEN)", "body": null}
+  }
+}

@@ -39,6 +39,7 @@ const (
 // could not collect it writes <name>.reason instead, holding one line that says why.
 const (
 	inputCIRuns      = "ci-runs.json"
+	inputGitHub      = "github-settings.json"
 	inputTrivy       = "trivy.json"
 	inputGitleaks    = "gitleaks.json"
 	inputSBOM        = "sbom.spdx.json"
@@ -76,13 +77,18 @@ type overview struct {
 	Sections     int `json:"sections"`
 	Collected    int `json:"collected"`
 	NotCollected int `json:"notCollected"`
-	// Keys of the collected sections whose content needs a look (a failing workflow, drift, a
-	// violation, an exhausted error budget, ...).
+	// Keys of the sections that need a look: collected ones whose content does (a failing
+	// workflow, drift, a violation, an exhausted error budget, ...), and expected ones that
+	// weren't collected.
 	Attention []string `json:"attention"`
+	// Keys of the sections this run was expected to collect but didn't: a silent failure shows
+	// up here instead of as an absence.
+	MissingExpected []string `json:"missingExpected"`
 }
 
 type sections struct {
 	CI             section[ciData]         `json:"ci"`
+	GitHub         section[githubData]     `json:"github"`
 	Trivy          section[trivyData]      `json:"trivy"`
 	Gitleaks       section[gitleaksData]   `json:"gitleaks"`
 	SBOM           section[sbomData]       `json:"sbom"`
@@ -96,9 +102,12 @@ type sections struct {
 // section is one area of evidence. A section that could not be collected keeps its place, with
 // status "not collected" and the reason, so a gap is visible instead of silently missing.
 type section[T any] struct {
-	Title     string     `json:"title"`
-	Status    string     `json:"status"`
-	Reason    string     `json:"reason,omitempty"`
+	Title  string `json:"title"`
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
+	// The run was set up to collect this section (-expect). An expected section that wasn't
+	// collected needs a look.
+	Expected  bool       `json:"expected"`
 	Attention bool       `json:"attention"`
 	Headline  string     `json:"headline"`
 	Inputs    []inputRef `json:"inputs"`
@@ -210,15 +219,26 @@ func (s section[T]) notCollected(reason string) section[T] {
 	return s
 }
 
+// setExpected records whether this run should have collected the section. Before Google Cloud is
+// set up, the cloud sections aren't expected; afterwards a missing one is a failure to look at,
+// not a quiet gap.
+func (s *section[T]) setExpected(want bool) {
+	s.Expected = want
+	if want && s.Status != statusCollected {
+		s.Attention = true
+	}
+}
+
 // assemble reads every input and builds the bundle. It never fails because of an input: missing or
-// invalid inputs become "not collected" sections.
-func assemble(dir *inputDir, src source, now time.Time) bundle {
+// invalid inputs become "not collected" sections, which need a look if they were expected.
+func assemble(dir *inputDir, src source, now time.Time, expected map[string]bool) bundle {
 	b := bundle{
 		SchemaVersion: schemaVersion,
 		GeneratedAt:   now.UTC().Format(time.RFC3339),
 		Source:        src,
 		Sections: sections{
 			CI:             newSection("CI on main", dir.read(inputCIRuns), parseCIRuns),
+			GitHub:         newSection("GitHub settings (environment, rules, Actions)", dir.read(inputGitHub), parseGitHubSettings),
 			Trivy:          newSection("Vulnerabilities and misconfigurations (Trivy)", dir.read(inputTrivy), parseTrivy),
 			Gitleaks:       newSection("Secrets in Git history (gitleaks)", dir.read(inputGitleaks), parseGitleaks),
 			SBOM:           newSection("Software bill of materials (syft)", dir.read(inputSBOM), parseSBOM),
@@ -229,8 +249,31 @@ func assemble(dir *inputDir, src source, now time.Time) bundle {
 			SLOs:           newSection("SLOs and error budgets", dir.read(inputSLOStatus), parseSLOStatus),
 		},
 	}
+	b.Sections.setExpected(expected)
 	b.Overview = summarise(b.Sections)
 	return b
+}
+
+func (s *sections) setExpected(expected map[string]bool) {
+	s.CI.setExpected(expected["ci"])
+	s.GitHub.setExpected(expected["github"])
+	s.Trivy.setExpected(expected["trivy"])
+	s.Gitleaks.setExpected(expected["gitleaks"])
+	s.SBOM.setExpected(expected["sbom"])
+	s.TerraformDrift.setExpected(expected["terraformDrift"])
+	s.Cluster.setExpected(expected["cluster"])
+	s.Gatekeeper.setExpected(expected["gatekeeper"])
+	s.ArgoCD.setExpected(expected["argocd"])
+	s.SLOs.setExpected(expected["slos"])
+}
+
+// sectionKeys are the JSON keys of the sections, in bundle order; -expect takes these.
+func sectionKeys() []string {
+	var keys []string
+	for _, si := range (sections{}).list() {
+		keys = append(keys, si.key)
+	}
+	return keys
 }
 
 // sectionInfo is what the overview and summary.md need from any section.
@@ -238,19 +281,22 @@ type sectionInfo struct {
 	key       string
 	title     string
 	status    string
+	expected  bool
 	attention bool
 	headline  string
 	inputs    []inputRef
 }
 
 func info[T any](key string, s section[T]) sectionInfo {
-	return sectionInfo{key: key, title: s.Title, status: s.Status, attention: s.Attention, headline: s.Headline, inputs: s.Inputs}
+	return sectionInfo{key: key, title: s.Title, status: s.Status, expected: s.Expected, attention: s.Attention,
+		headline: s.Headline, inputs: s.Inputs}
 }
 
 // list returns the sections in bundle order, with the JSON keys they have in bundle.json.
 func (s sections) list() []sectionInfo {
 	return []sectionInfo{
 		info("ci", s.CI),
+		info("github", s.GitHub),
 		info("trivy", s.Trivy),
 		info("gitleaks", s.Gitleaks),
 		info("sbom", s.SBOM),
@@ -263,13 +309,16 @@ func (s sections) list() []sectionInfo {
 }
 
 func summarise(s sections) overview {
-	o := overview{Attention: []string{}}
+	o := overview{Attention: []string{}, MissingExpected: []string{}}
 	for _, si := range s.list() {
 		o.Sections++
 		if si.status == statusCollected {
 			o.Collected++
 		} else {
 			o.NotCollected++
+			if si.expected {
+				o.MissingExpected = append(o.MissingExpected, si.key)
+			}
 		}
 		if si.attention {
 			o.Attention = append(o.Attention, si.key)

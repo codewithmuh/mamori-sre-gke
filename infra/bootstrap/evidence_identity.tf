@@ -22,16 +22,14 @@ locals {
   # subject format, which changes only the sub claim.
   evidence_workflow_ref = "${var.github_repository}/.github/workflows/evidence.yml@refs/heads/main"
 
-  evidence_kube_role_id = "evidenceKubeReader"
+  evidence_reader_role_id = "evidenceReader"
 
   evidence_reader_roles = {
     # clusters.get and clusters.list: versions and node pools from the GKE API, and the
     # container.clusters.get that GKE requires before it authorises any Kubernetes API request.
     "roles/container.clusterViewer" = "read cluster and node pool versions; required to talk to the cluster at all"
-    # Services, SLOs and the select_slo_* time series. Telemetry only: no secrets, no logs.
-    "roles/monitoring.viewer" = "read SLOs, compliance and error budget from Cloud Monitoring"
-    # Instead of roles/container.viewer, which can read every ConfigMap, Role and Pod spec.
-    "projects/${var.project_id}/roles/${local.evidence_kube_role_id}" = "list nodes, Gatekeeper constraints and Argo CD applications"
+    # Kubernetes objects and SLOs, and nothing else; see the custom role below.
+    "projects/${var.project_id}/roles/${local.evidence_reader_role_id}" = "list nodes, Gatekeeper constraints, Argo CD applications and SLO status"
   }
 }
 
@@ -88,17 +86,29 @@ resource "google_service_account_iam_member" "evidence_reader_wif" {
   member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.evidence.name}/*"
 }
 
-# GKE checks Kubernetes RBAC first and then IAM, so these IAM permissions are enough to list the
-# objects without a ClusterRole in the cluster. thirdPartyObjects covers custom resources: Gatekeeper
-# constraints (kubectl get constraints) and Argo CD Applications. Secrets aren't custom resources.
-resource "google_project_iam_custom_role" "evidence_kube_reader" {
+# Narrower than the predefined viewer roles:
+# - GKE checks Kubernetes RBAC first and then IAM, so these IAM permissions are enough to list the
+#   objects without a ClusterRole in the cluster. thirdPartyObjects covers custom resources:
+#   Gatekeeper constraints (kubectl get constraints) and Argo CD Applications. Secrets aren't custom
+#   resources. roles/container.viewer would also read every ConfigMap, Role and Pod spec.
+# - Cloud Monitoring: list services and SLOs and read the select_slo_* time series.
+#   roles/monitoring.viewer would also read notification channels, which hold the alert email
+#   (personal data) and the PagerDuty channel. The docs don't say whether the selectors check
+#   services.get and slos.get on the SLO they name, so both are here; they read only SLO
+#   definitions.
+resource "google_project_iam_custom_role" "evidence_reader" {
   project     = var.project_id
-  role_id     = local.evidence_kube_role_id
-  title       = "Evidence reader: nodes and custom resources"
-  description = "List nodes and custom resources (Gatekeeper constraints, Argo CD applications) for the evidence bundle."
+  role_id     = local.evidence_reader_role_id
+  title       = "Evidence reader"
+  description = "List nodes and custom resources (Gatekeeper constraints, Argo CD applications) and read SLO status, for the evidence bundle."
   permissions = [
     "container.nodes.list",
     "container.thirdPartyObjects.list",
+    "monitoring.services.get",
+    "monitoring.services.list",
+    "monitoring.slos.get",
+    "monitoring.slos.list",
+    "monitoring.timeSeries.list",
   ]
 
   depends_on = [google_project_service.enabled]
@@ -112,7 +122,7 @@ resource "google_project_iam_member" "evidence_reader" {
   role    = each.key
   member  = google_service_account.evidence_reader.member
 
-  depends_on = [google_project_iam_custom_role.evidence_kube_reader]
+  depends_on = [google_project_iam_custom_role.evidence_reader]
 }
 
 output "evidence_reader_sa" {
