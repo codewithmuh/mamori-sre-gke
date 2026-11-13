@@ -62,20 +62,25 @@ type ProberSpec struct {
 
 // MeshSpec describes the Istio composite signal.
 type MeshSpec struct {
-	Namespace     string     `yaml:"namespace"`
-	EntryServices []string   `yaml:"entryServices"`
-	TCPServices   []string   `yaml:"tcpServices"`
-	WindowPeriod  Duration   `yaml:"windowPeriod"`
-	SLORateWindow Duration   `yaml:"sloRateWindow"`
-	RecordWindows []Duration `yaml:"recordWindows"`
+	Namespace        string     `yaml:"namespace"`
+	ExcludedServices []string   `yaml:"excludedServices"`
+	TCPServices      []string   `yaml:"tcpServices"`
+	GoodGRPCStatuses []string   `yaml:"goodGrpcStatuses"`
+	WindowPeriod     Duration   `yaml:"windowPeriod"`
+	SLORateWindow    Duration   `yaml:"sloRateWindow"`
+	RecordWindows    []Duration `yaml:"recordWindows"`
 }
 
 // AlertingSpec holds the burn-rate tiers and alert settings.
 type AlertingSpec struct {
-	Tiers          []TierSpec `yaml:"tiers"`
-	NoDataAfter    Duration   `yaml:"noDataAfter"`
-	AutoClose      Duration   `yaml:"autoClose"`
-	RunbookBaseURL string     `yaml:"runbookBaseURL"`
+	// PageSignals are the signals whose page-severity tiers page; the tiers
+	// of every other signal open tickets.
+	PageSignals       []string   `yaml:"pageSignals"`
+	AvailabilityTiers []TierSpec `yaml:"availabilityTiers"`
+	LatencyTiers      []TierSpec `yaml:"latencyTiers"`
+	NoDataAfter       Duration   `yaml:"noDataAfter"`
+	AutoClose         Duration   `yaml:"autoClose"`
+	RunbookBaseURL    string     `yaml:"runbookBaseURL"`
 }
 
 // TierSpec is one multiwindow burn-rate alert tier.
@@ -85,13 +90,16 @@ type TierSpec struct {
 	BudgetConsumed float64  `yaml:"budgetConsumed"`
 	LongWindow     Duration `yaml:"longWindow"`
 	ShortWindow    Duration `yaml:"shortWindow"`
-	Signals        []string `yaml:"signals"`
 }
 
 // DatadogSpec holds the settings of the Datadog output.
 type DatadogSpec struct {
-	Timeframes []string         `yaml:"timeframes"`
-	BurnRate   DatadogBurnRates `yaml:"burnRate"`
+	Timeframes []string `yaml:"timeframes"`
+	// Tiers names the availability tiers the synthetics get.
+	Tiers []string `yaml:"tiers"`
+	// MinShortWindow is the shortest short window a synthetics monitor uses.
+	MinShortWindow Duration         `yaml:"minShortWindow"`
+	BurnRate       DatadogBurnRates `yaml:"burnRate"`
 }
 
 // DatadogBurnRates configures the metric-based SLOs that carry Datadog's
@@ -325,9 +333,17 @@ func (s *Spec) Validate() error {
 	if m.Namespace == "" {
 		add("mesh.namespace is required")
 	}
-	for _, svc := range append(append([]string{}, m.EntryServices...), m.TCPServices...) {
+	for _, svc := range append(append([]string{}, m.ExcludedServices...), m.TCPServices...) {
 		if !idPattern.MatchString(svc) {
 			add("mesh: invalid service name %q", svc)
+		}
+	}
+	if !slices.Contains(m.GoodGRPCStatuses, "0") {
+		add("mesh.goodGrpcStatuses must include 0 (OK)")
+	}
+	for _, c := range m.GoodGRPCStatuses {
+		if n, err := strconv.Atoi(c); err != nil || n < 0 || n > 16 || strconv.Itoa(n) != c {
+			add("mesh.goodGrpcStatuses: %q is not a gRPC status code (0 to 16)", c)
 		}
 	}
 	if p := m.WindowPeriod.D(); p < time.Minute || p > 24*time.Hour || p%time.Minute != 0 {
@@ -346,12 +362,32 @@ func (s *Spec) Validate() error {
 func (s *Spec) validateAlerting(errs *[]error) {
 	add := func(format string, a ...any) { *errs = append(*errs, fmt.Errorf(format, a...)) }
 	a := s.Alerting
-	if len(a.Tiers) == 0 {
-		add("alerting.tiers: at least one tier is needed")
+	for _, sig := range a.PageSignals {
+		if !slices.Contains(knownSignals, sig) {
+			add("alerting.pageSignals: unknown signal %q (want %s)", sig, strings.Join(knownSignals, ", "))
+		}
+	}
+	s.validateTiers(errs, "alerting.availabilityTiers", a.AvailabilityTiers, func(j JourneySpec) float64 { return j.Availability.Target })
+	s.validateTiers(errs, "alerting.latencyTiers", a.LatencyTiers, func(j JourneySpec) float64 { return j.Latency.Target })
+	if a.NoDataAfter.D() < 2*time.Minute {
+		add("alerting.noDataAfter must be at least 2m, got %s", a.NoDataAfter)
+	}
+	if a.AutoClose.D() < 30*time.Minute {
+		add("alerting.autoClose must be at least 30m, got %s", a.AutoClose)
+	}
+	if !strings.HasPrefix(a.RunbookBaseURL, "https://") || strings.HasSuffix(a.RunbookBaseURL, "/") {
+		add("alerting.runbookBaseURL must be an https URL without a trailing slash, got %q", a.RunbookBaseURL)
+	}
+}
+
+func (s *Spec) validateTiers(errs *[]error, field string, tiers []TierSpec, target func(JourneySpec) float64) {
+	add := func(format string, a ...any) { *errs = append(*errs, fmt.Errorf(format, a...)) }
+	if len(tiers) == 0 {
+		add("%s: at least one tier is needed", field)
 	}
 	names := map[string]bool{}
-	for i, t := range a.Tiers {
-		where := fmt.Sprintf("alerting.tiers[%d] (%s)", i, t.Name)
+	for i, t := range tiers {
+		where := fmt.Sprintf("%s[%d] (%s)", field, i, t.Name)
 		if !tierNamePattern.MatchString(t.Name) || names[t.Name] {
 			add("%s: name must be a unique lowercase word", where)
 		}
@@ -368,36 +404,39 @@ func (s *Spec) validateAlerting(errs *[]error) {
 		if t.ShortWindow.D() < time.Minute || t.ShortWindow.D() >= t.LongWindow.D() {
 			add("%s: shortWindow must be at least 1m and shorter than longWindow, got %s", where, t.ShortWindow)
 		}
-		if len(t.Signals) == 0 {
-			add("%s: signals must name at least one of %s", where, strings.Join(knownSignals, ", "))
-		}
-		for _, sig := range t.Signals {
-			if !slices.Contains(knownSignals, sig) {
-				add("%s: unknown signal %q (want %s)", where, sig, strings.Join(knownSignals, ", "))
-			}
-		}
 		if t.LongWindow.D() <= 0 {
 			continue
 		}
-		// A burn rate above 1/(1-target) needs more than 100 % errors: the alert could never fire.
+		// A burn rate above 1/(1-target) needs more than 100 % bad events: the alert could never fire.
 		burn := BurnRate(t, s.Window)
 		for _, j := range s.Journeys {
-			for _, target := range []float64{j.Availability.Target, j.Latency.Target} {
-				if isFraction(target) && burn > 1/(1-target) {
-					add("%s: burn rate %v can never be reached by journey %q with target %v", where, burn, j.ID, target)
+			if tg := target(j); isFraction(tg) && burn > 1/(1-tg) {
+				add("%s: burn rate %v can never be reached by journey %q with target %v", where, burn, j.ID, tg)
+			}
+		}
+	}
+}
+
+// Warnings lists settings that are valid but probably not meant: a tier whose
+// burn rate is more than half the largest possible one (1/(1-target)) only
+// fires when most events are bad, so partial failures never reach it.
+func (s *Spec) Warnings() []string {
+	var out []string
+	check := func(field string, tiers []TierSpec, target func(JourneySpec) float64) {
+		for _, t := range tiers {
+			burn := BurnRate(t, s.Window)
+			for _, j := range s.Journeys {
+				tg := target(j)
+				if ceiling := 1 / (1 - tg); isFraction(tg) && burn > ceiling/2 && burn <= ceiling {
+					out = append(out, fmt.Sprintf("%s.%s: burn rate %v is more than half the maximum %v for journey %q (target %v); "+
+						"it fires only when over %s %% of events are bad", field, t.Name, burn, round4(ceiling), j.ID, tg, percent(burn*(1-tg))))
 				}
 			}
 		}
 	}
-	if a.NoDataAfter.D() < 2*time.Minute {
-		add("alerting.noDataAfter must be at least 2m, got %s", a.NoDataAfter)
-	}
-	if a.AutoClose.D() < 30*time.Minute {
-		add("alerting.autoClose must be at least 30m, got %s", a.AutoClose)
-	}
-	if !strings.HasPrefix(a.RunbookBaseURL, "https://") || strings.HasSuffix(a.RunbookBaseURL, "/") {
-		add("alerting.runbookBaseURL must be an https URL without a trailing slash, got %q", a.RunbookBaseURL)
-	}
+	check("alerting.availabilityTiers", s.Alerting.AvailabilityTiers, func(j JourneySpec) float64 { return j.Availability.Target })
+	check("alerting.latencyTiers", s.Alerting.LatencyTiers, func(j JourneySpec) float64 { return j.Latency.Target })
+	return out
 }
 
 func (s *Spec) validateDatadog(errs *[]error) {
@@ -410,6 +449,17 @@ func (s *Spec) validateDatadog(errs *[]error) {
 		if !slices.Contains(datadogFrames, f) {
 			add("datadog.timeframes: %q is not one of %s", f, strings.Join(datadogFrames, ", "))
 		}
+	}
+	if len(d.Tiers) == 0 {
+		add("datadog.tiers: at least one tier is needed")
+	}
+	for _, name := range d.Tiers {
+		if !slices.ContainsFunc(s.Alerting.AvailabilityTiers, func(t TierSpec) bool { return t.Name == name }) {
+			add("datadog.tiers: %q is not one of alerting.availabilityTiers", name)
+		}
+	}
+	if d.MinShortWindow.D() < time.Minute {
+		add("datadog.minShortWindow must be at least 1m, got %s", d.MinShortWindow)
 	}
 	if d.BurnRate.Enabled && (d.BurnRate.Metric == "" || d.BurnRate.TestTag == "" || d.BurnRate.GoodFilter == "") {
 		add("datadog.burnRate: metric, testTag and goodFilter are required when enabled")

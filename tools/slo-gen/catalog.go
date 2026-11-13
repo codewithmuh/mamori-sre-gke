@@ -27,16 +27,27 @@ func (m *Model) renderCatalog() File {
 	fmt.Fprintf(&b, "Every SLO uses a rolling %s window. Budgets are the share of events (or minutes) that may be bad in that window.\n\n", sp.Window)
 
 	b.WriteString("## Alert tiers\n\n")
-	b.WriteString("Each tier pages or opens a ticket when the burn rate is above the threshold over both windows.\n\n")
-	b.WriteString("| Tier | Severity | Burn rate above | Long window | Short window | Budget spent in the long window | Signals |\n")
-	b.WriteString("|---|---|---|---|---|---|---|\n")
-	for _, t := range sp.Alerting.Tiers {
-		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s |\n", t.Name, t.Severity, formatFloat(BurnRate(t, sp.Window)),
-			t.LongWindow, t.ShortWindow, budgetShare(t), strings.Join(t.Signals, ", "))
+	fmt.Fprintf(&b, "Each tier fires when the burn rate is above the threshold over both windows. Only the signals in "+
+		"`alerting.pageSignals` (%s) page; every other alert opens a ticket.\n\n", listOrNone(sp.Alerting.PageSignals))
+	for _, sli := range []string{sliAvailability, sliLatency} {
+		fmt.Fprintf(&b, "%s SLOs:\n\n", map[string]string{sliAvailability: "Availability", sliLatency: "Latency"}[sli])
+		b.WriteString("| Tier | Burn rate above | Long window | Short window | Budget spent in the long window | prober | mesh |\n")
+		b.WriteString("|---|---|---|---|---|---|---|\n")
+		for _, t := range m.TiersFor(sli) {
+			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s |\n", t.Name, formatFloat(BurnRate(t, sp.Window)),
+				t.LongWindow, t.ShortWindow, budgetShare(t), m.Severity(signalProber, t), m.Severity(signalMesh, t))
+		}
+		b.WriteString("\n")
 	}
-	fmt.Fprintf(&b, "\nPlus one `CUJ <id>: prober no data` policy per journey (page) after %s without prober data.\n", sp.Alerting.NoDataAfter)
-	b.WriteString("Every Cloud Monitoring policy carries the user labels `cuj`, `signal`, `sli`, `alert` (`burn-rate` or `no-data`), " +
-		"`burn` (tier name, or `none`), `severity` (`page` or `ticket`) and `generator=slo-gen`.\n\n")
+	b.WriteString("Datadog synthetics (M3 window) get these availability tiers, with short windows of at least " +
+		sp.Datadog.MinShortWindow.String() + ":\n\n")
+	for _, t := range m.datadogTiers() {
+		fmt.Fprintf(&b, "- %s: burn rate > %s over %s and %s (%s)\n", t.Name, formatFloat(BurnRate(t, sp.Window)), t.LongWindow, t.ShortWindow, m.Severity(signalSynthetics, t))
+	}
+	fmt.Fprintf(&b, "\nNo-data policies: `CUJ prober: no data` (page) and `CUJ mesh: no data` (ticket), after %s without data.\n", sp.Alerting.NoDataAfter)
+	b.WriteString("Every Cloud Monitoring policy carries the user labels `cuj` (`all` on no-data policies), `signal`, `sli`, `alert` " +
+		"(`burn-rate` or `no-data`), `burn` (tier name, or `none`), `severity` (`page` or `ticket`) and `generator=slo-gen`. " +
+		"Every generated Cloud Monitoring resource exists only while the Terraform variable `slo_enabled` is true.\n\n")
 
 	for _, j := range m.Journeys {
 		m.catalogJourney(&b, j)
@@ -49,7 +60,10 @@ func (m *Model) catalogJourney(b *strings.Builder, j Journey) {
 	fmt.Fprintf(b, "## %s\n\n", j.ID)
 	fmt.Fprintf(b, "- Runbook: [docs/runbooks/cuj-%s.md](../../docs/runbooks/cuj-%s.md)\n", j.ID, j.ID)
 	fmt.Fprintf(b, "- Critical services (CUJ map): %s\n", listOrNone(j.Critical))
-	fmt.Fprintf(b, "- Mesh composite over: %s", strings.Join(j.MeshServices, ", "))
+	fmt.Fprintf(b, "- Mesh composite over: %s", listOrNone(j.MeshServices))
+	if len(j.Excluded) > 0 {
+		fmt.Fprintf(b, " (left out, entry covered by the prober: %s)", strings.Join(j.Excluded, ", "))
+	}
 	if len(j.TCPSkipped) > 0 {
 		fmt.Fprintf(b, " (left out, plain TCP: %s)", strings.Join(j.TCPSkipped, ", "))
 	}
@@ -72,11 +86,11 @@ func (m *Model) catalogJourney(b *strings.Builder, j Journey) {
 
 	b.WriteString("Alert policies (Cloud Monitoring display names):\n\n")
 	for _, s := range j.SLOs {
-		for _, t := range m.TiersFor(s.Signal) {
-			fmt.Fprintf(b, "- `CUJ %s: %s %s %s burn` (%s, burn rate > %s)\n", j.ID, s.Signal, s.SLI, t.Name, t.Severity, formatFloat(BurnRate(t, sp.Window)))
+		for _, t := range m.TiersFor(s.SLI) {
+			fmt.Fprintf(b, "- `CUJ %s: %s %s %s burn` (%s, burn rate > %s)\n", j.ID, s.Signal, s.SLI, t.Name, m.Severity(s.Signal, t), formatFloat(BurnRate(t, sp.Window)))
 		}
 	}
-	fmt.Fprintf(b, "- `CUJ %s: prober no data` (page)\n\n", j.ID)
+	b.WriteString("\n")
 }
 
 func (m *Model) recordWindow(s SLO) Duration {

@@ -53,19 +53,33 @@ For each journey, from the CUJ map:
 
 How it is computed (`deploy/slo/mesh-rules.yaml`):
 
-1. Per service, from `istio_requests_total` and `istio_request_duration_milliseconds`, **client-side**
-   (`reporter="source"`). Istio injects faults (the discovery run, game days) in the *client's* sidecar, so the
-   server's sidecar never sees an injected abort or delay. The client view also counts requests that never got an
-   answer (`response_code="0"`). Services are keyed on `destination_service_name` (namespace `boutique`), not
-   `destination_workload`: when the client's sidecar answers by itself (an injected abort, no healthy upstream), no
-   server takes part and the workload is reported as `unknown`, while the service name comes from the route.
-2. Good = HTTP status below 500 *and* gRPC status OK (or none, for plain HTTP). That is the PRD's starting
-   definition; M2 decides whether codes such as `NOT_FOUND` count as good.
+1. Per service, for **every** service in the shop's namespace, from `istio_requests_total` and
+   `istio_request_duration_milliseconds`, **client-side** (`reporter="source"`). Istio injects faults (the
+   discovery run, game days) in the *client's* sidecar, so the server's sidecar never sees an injected abort or
+   delay. The client view also counts requests that never got an answer (`response_code="0"`). Services are keyed on
+   `destination_service_name` (namespace `boutique`), not `destination_workload`: when the client's sidecar answers
+   by itself (an injected abort, no healthy upstream), no server takes part and the workload is reported as
+   `unknown`, while the service name comes from the route. Non-critical services (adservice,
+   recommendationservice, emailservice) are recorded too: they are the culprits of several game-day faults, and the
+   runbooks and the incident agent read these series.
+2. Good = HTTP status below 500 *and* gRPC status `OK`, `INVALID_ARGUMENT` (3) or `NOT_FOUND` (5), or none for plain
+   HTTP (`mesh.goodGrpcStatuses`). The two extra codes answer bad input, not a broken service: junk
+   `/product/<id>` requests from the public internet would otherwise burn the budget, and anyone could page the
+   on-call that way.
 3. Per journey, the product is `exp(sum(ln(ratio)))`, because PromQL has no product aggregation. One service at 0
    makes the journey 0. The latency composite is `min(...)`.
-4. `frontend` (`mesh.entryServices`) is on every journey's path, so it is always in the composite.
-   `redis-cart` (`mesh.tcpServices`) is plain TCP to Istio and has no request metrics; when it fails, cartservice
-   returns errors, and cartservice is critical to the same journeys.
+4. **Only the critical backend services**, not `frontend`, even though the CUJ map lists it as critical to every
+   journey (`mesh.excludedServices`). The frontend serves every journey's routes, and Istio's metrics don't carry
+   the route, so its ratio would let a checkout-only fault burn the browse, add-to-cart and view-cart SLOs. The
+   prober covers the entry. `redis-cart` (`mesh.tcpServices`) is plain TCP to Istio and has no
+   request metrics; when it fails, cartservice returns errors, and cartservice is critical to the same journeys.
+5. **Backend ratios mix methods and callers.** A service's ratio covers all its gRPC methods and every caller, not
+   only the calls this journey makes (for example productcatalogservice's `ListProducts`, `GetProduct` and
+   `SearchProducts` together). A fault on one method shows in every journey that has the service as critical, diluted
+   by the healthy methods. Istio's standard metrics have no method label; per-method SLIs would need the services'
+   own gRPC metrics.
+
+A journey whose critical services are all TCP-only gets prober SLOs only (the generator warns).
 
 ### How each SLI is expressed in Cloud Monitoring, and why
 
@@ -98,65 +112,122 @@ Managed Service for Prometheus stores its data in Monarch, the same store as Clo
 - A window is bad if the minute misses the target by any amount; 99.4 % and 0 % cost the same.
 - The product assumes services fail independently. Correlated failures (one node gone) are counted more than once,
   which makes the SLI stricter, not looser.
-- Per-service ratios include every caller of the service, not only the journey's own requests.
-- The SLO depends on the in-cluster rule evaluator. If it stops, the gauge stops, the windows are empty and the mesh
-  SLOs go blind without alerting. The prober no-data alert covers a dead cluster, not a dead rule evaluator alone.
-
-The recording rules also keep 5-minute and 1-hour versions (`..._ratio_rate5m`, `..._ratio_rate1h`) for runbooks,
-dashboards and the incident agent; the SLOs don't read them.
+- Per-service ratios mix methods and callers (above).
+- The SLO depends on the in-cluster rule evaluator. If it stops, the gauge stops and the windows are empty; the
+  `CUJ mesh: no data` ticket catches that.
 
 ### Recording rules on Managed Prometheus
 
 `deploy/slo/` holds two objects of `monitoring.googleapis.com/v1`, synced by the Argo CD Application
 `deploy/apps/slo.yaml` at wave 6 (after the prober at wave 5):
 
-| Object | Kind | Why that kind |
-|---|---|---|
-| `slo-prober` in namespace `prober` | `Rules` | Managed Prometheus adds `namespace="prober"` (plus project, location, cluster) to every selector, so only the prober's own data is used |
-| `slo-mesh` | `ClusterRules` | The Istio metrics come from two namespaces (`boutique` sidecars, `istio-ingress` gateway) |
+| Object | Kind | Groups | Why that kind |
+|---|---|---|---|
+| `slo-prober` in namespace `prober` | `Rules` | `slo-prober-5m` (every 1 min), `slo-prober-1h` (every 5 min) | Managed Prometheus adds `namespace="prober"` (plus project, location, cluster) to every selector, so only the prober's own data is used |
+| `slo-mesh` | `ClusterRules` | `slo-mesh-2m` (the SLO input, every 1 min), `slo-mesh-5m` (every 1 min), `slo-mesh-1h` (every 5 min) | The Istio metrics come from two namespaces (`boutique` sidecars, `istio-ingress` gateway) |
+
+One group per window, run every minute but no more often than a twelfth of the window (a 1-hour ratio barely moves
+in a minute). Within a group the per-service rules come before the journey composites that read them (rules in a
+group run in order; groups run concurrently). The 5-minute and 1-hour series are for runbooks, dashboards and the
+incident agent; the SLOs read only the 2-minute ones.
 
 Managed Prometheus also adds `project_id`, `location`, `cluster` (and for `Rules`, `namespace`) to every result,
-and rejects rules that set those labels themselves; the generator never sets them. Rules within one group run in
-order, so the per-service series are fresh when the journey composites read them. On GKE the managed rule evaluator
-is deployed automatically once a rules object exists and uses the node service account (`gke-nodes`, role
+and rejects rules that set those labels themselves; the generator never sets them. On GKE the managed rule
+evaluator is deployed automatically once a rules object exists and uses the node service account (`gke-nodes`, role
 `roles/container.defaultNodeServiceAccount`), so there is no OperatorConfig to change.
+
+## Turning the SLOs on: `slo_enabled`
+
+Cloud Monitoring rejects an SLO whose filter names a metric type that does not exist yet ("Cannot find metric(s)
+that match type"). The prober and recording-rule metrics only exist a few minutes after the cluster runs, and
+`make up` applies Terraform before Argo CD installs the prober. So every resource in
+`infra/envs/lab/slo_generated.tf.json` (custom services, SLOs, alert policies, dashboard) has
+`count = var.slo_enabled ? 1 : 0`, and the generated file declares that variable with default `false`:
+
+1. First `make up`: the SLO resources are not created.
+2. About 10 minutes later, once the prober has been scraped, set `slo_enabled = true` (`TF_VAR_slo_enabled=true` in
+   `.env`, or the CI variable) and apply again.
+
+The no-data policies use PromQL conditions with `disable_metric_validation = true`, so they would not need the
+metrics to exist; they are gated with the rest so the switch turns the whole SLO layer on and off together.
 
 ## Burn-rate alerts
 
 Multiwindow, multi-burn-rate alerts from the Google SRE workbook ("Alerting on SLOs"). An alert fires when the
 budget is being spent fast over a long window **and** is still being spent over a short window, so it fires on real
-burns and stops soon after the burn stops.
+burns and stops soon after the burn stops. Burn rate = share of budget x window / long window.
 
-The workbook's numbers are for a 30-day window. The budget shares are kept and the burn rates recomputed for
-28 days: burn rate = share of budget x window / long window.
+**Availability tiers.** The workbook's numbers are for a 30-day window; its budget shares are kept and the burn
+rates recomputed for 28 days:
 
-| Tier | Severity | Workbook (30 d) | Here (28 d) | Long window | Short window |
+| Tier | Workbook (30 d) | Here (28 d) | Long window | Short window |
+|---|---|---|---|---|
+| `fast` | 2 % of budget in 1 h: burn 14.4 | burn **13.44** | 1 h | 5 min |
+| `medium` | 5 % in 6 h: burn 6 | burn **5.6** | 6 h | 30 min |
+| `slow` | 10 % in 3 days: burn 1 | 10 % in 24 h: burn **2.8** | 24 h | 2 h |
+
+**Latency tiers.** A 95 % target allows a burn rate of at most 1 / (1 - 0.95) = 20, reached only when every
+request is slow. At 13.44 the fast tier would need 67 % of requests slow, so partial slowdowns would never page.
+Latency SLOs get their own tiers with half the budget shares:
+
+| Tier | Budget share | Burn rate | Fires when, over the long window | Long window | Short window |
 |---|---|---|---|---|---|
-| `fast` | page | 2 % of budget in 1 h: burn 14.4 | burn **13.44** | 1 h | 5 min |
-| `medium` | page | 5 % in 6 h: burn 6 | burn **5.6** | 6 h | 30 min |
-| `slow` | ticket | 10 % in 3 days: burn 1 | 10 % in 24 h: burn **2.8** | 24 h | 2 h |
+| `fast` | 1 % in 1 h | **6.72** | 34 % of requests slow | 1 h | 5 min |
+| `medium` | 2.5 % in 6 h | **2.8** | 14 % slow | 6 h | 30 min |
+| `slow` | 5 % in 24 h | **1.4** | 7 % slow | 24 h | 2 h |
 
-**The adaptation:** Cloud Monitoring burn-rate alerts (`select_slo_burn_rate`) look back at most 24 hours
+`slo-gen` warns when a tier's burn rate is more than half of 1 / (1 - target) for some journey, since such a tier
+only fires when most events are bad.
+
+**The 24-hour adaptation:** Cloud Monitoring burn-rate alerts (`select_slo_burn_rate`) look back at most 24 hours
 ([docs](https://docs.cloud.google.com/stackdriver/docs/solutions/slo-monitoring/alerting-on-budget-burn-rate)), so
-the workbook's 3-day ticket window can't be expressed. It becomes 24 hours, keeping the 10 % budget share, with the
-workbook's 1:12 short window (2 hours). The cost: a slow burn below 2.8x (for example a steady 1.5x, which would
-still spend the budget in about 19 days) never tickets; the error-budget chart on the dashboard and the error-budget
-policy's weekly review cover that. Google's own Cloud Monitoring guidance, "about 2x over 24 hours", sits close to
-the 2.8 used here.
+the workbook's 3-day ticket window can't be expressed. It becomes 24 hours, keeping the budget share, with the
+workbook's 1:12 short window (2 hours). The cost: a slow availability burn below 2.8x (for example a steady 1.5x,
+which would still spend the budget in about 19 days) never tickets; the error-budget chart on the dashboard and the
+error-budget policy's weekly review cover that. Google's own Cloud Monitoring guidance, "about 2x over 24 hours",
+sits close to the 2.8 used here.
+
+### Who gets paged: only the prober (proposal for the D4 ADR)
+
+**Proposal for the maintainer's ADR on D4** (`alerting.pageSignals` in `slo/slos.yaml`, so it can change later):
+
+| Alert | prober | mesh | Datadog synthetics |
+|---|---|---|---|
+| `fast` tier | page | ticket | not generated |
+| `medium` tier | page | ticket | ticket |
+| `slow` tier | ticket | ticket | ticket |
+| no data | page (`CUJ prober: no data`) | ticket (`CUJ mesh: no data`) | n/a |
+
+Why: the first design paged from both signals and all page tiers. One dependency failure (currencyservice is
+critical to every journey) could then open 11 to 16 PagerDuty incidents, and PagerDuty's free plan allows 100
+phone/SMS notifications a month. Paging from one signal per journey bounds a fault to at most two pages per affected
+journey (fast, then medium if it lasts), from the signal closest to what a shopper sees. The mesh alerts still
+arrive as tickets, with per-service queries that point at the cause.
+
+What one fault costs now (my math, example CUJ map):
+
+| Fault | Journeys affected | Pages (fast, then medium after about 11 min) | Tickets |
+|---|---|---|---|
+| currencyservice down | 4 | 4, then up to 8 | mesh tiers of 4 journeys, prober slow tier later |
+| paymentservice down (checkout only) | 1 | 1, then up to 2 | checkout's mesh tiers |
+| whole cluster down (Spot, spend guard) | all | 1 (`CUJ prober: no data`) | 1 (`CUJ mesh: no data`) |
+
+Policies in Cloud Monitoring: 16 SLOs x 3 tiers = 48 burn-rate policies (16 page, 32 ticket) plus 2 no-data
+policies (1 page, 1 ticket).
 
 How each policy is built (`infra/envs/lab/slo_generated.tf.json`):
 
 - One `google_monitoring_alert_policy` per SLO and tier: two `select_slo_burn_rate` conditions (long and short
-  lookback), `combiner = "AND"`. 16 SLOs x 3 tiers = **48 policies**, plus 4 no-data policies.
-- **Page** tiers: `severity = "CRITICAL"`, sent to `local.incident_notification_channels` (PagerDuty, email, the
-  `incident-alerts` Pub/Sub topic). **Ticket** tier: `severity = "WARNING"`, sent to
+  lookback), `combiner = "AND"`.
+- **Page**: `severity = "CRITICAL"`, sent to `local.incident_notification_channels` (PagerDuty, email, the
+  `incident-alerts` Pub/Sub topic). **Ticket**: `severity = "WARNING"`, sent to
   `local.incident_ticket_notification_channels` (email and Pub/Sub, no phone). Both lists are defined by the paging
   work in `infra/envs/lab/notifications.tf`.
-- `user_labels` on every policy, for routing and for the incident agent: `cuj`, `signal`, `sli`, `alert`
-  (`burn-rate` or `no-data`), `burn` (tier name), `severity` (`page` or `ticket`), `generator=slo-gen`, plus the
-  repository's `app`, `env`, `managed-by`.
+- `user_labels` on every policy, for routing and for the incident agent: `cuj` (`all` on the no-data policies),
+  `signal`, `sli`, `alert` (`burn-rate` or `no-data`), `burn` (tier name, or `none`), `severity` (`page` or
+  `ticket`), `generator=slo-gen`, plus the repository's `app`, `env`, `managed-by`.
 - `documentation`: the runbook link `docs/runbooks/cuj-<id>.md` first (also as a documentation link), the SLO, the
-  signal, the critical services and a PromQL query to check the SLI now.
+  signal, the critical services and PromQL queries to check the journey and each service now.
 - `alert_strategy.auto_close = 30m`, so an incident (and the PagerDuty incident behind it) closes on its own after
   the condition has cleared.
 
@@ -166,28 +237,30 @@ At one prober run a minute, and for the mesh SLOs one window a minute:
 
 | Tier | Availability 99.5 % | Checkout 99.0 % | Latency 95 % |
 |---|---|---|---|
-| fast | 5 bad minutes in 1 h, one of them in the last 5 min | 9 bad in 1 h, one in the last 5 min | 67 % of steps slow over 1 h |
-| medium | 11 bad in 6 h, one in the last 30 min | 21 bad in 6 h, 2 in the last 30 min | 28 % slow over 6 h |
-| slow | 21 bad in 24 h, 2 in the last 2 h | 41 bad in 24 h, 4 in the last 2 h | 14 % slow over 24 h |
-
-Latency alerts fire only on large slowdowns (a 95 % target leaves a big budget); an injected delay on a critical
-service is large.
-
-### Alert fatigue, before tuning
-
-This is the deliberate starting point, to be measured and tuned in M3 (R5: alert counts before and after tuning).
-One failing dependency on three journeys (for example currencyservice) can open, per tier, up to 3 journeys x 2
-signals = 6 incidents, and the fast and medium tiers can both be open: up to 12 pages for one cause. The knob is
-`alerting.tiers[].signals` in `slo/slos.yaml`: for example, page from the mesh only and keep the prober for tickets,
-or drop the medium tier for one signal. Changing it is a one-line spec change plus `make slo-generate`.
+| fast | 5 bad minutes in 1 h, one of them in the last 5 min | 9 bad in 1 h, one in the last 5 min | 34 % slow over 1 h |
+| medium | 11 bad in 6 h, one in the last 30 min | 21 bad in 6 h, 2 in the last 30 min | 14 % slow over 6 h |
+| slow | 21 bad in 24 h, 2 in the last 2 h | 41 bad in 24 h, 4 in the last 2 h | 7 % slow over 24 h |
 
 ### No-data alerts
 
-Burn-rate conditions see nothing when data stops, which is exactly what happens when the prober, the nodes (the spend
-guard scales them to zero) or the whole cluster is down. So each journey also gets `CUJ <id>: prober no data`: a
-`condition_absent` on its scheduled prober counter for 10 minutes, which pages. A prober that is up but stuck (its
-counters stop growing but are still exported) does not trigger it; the prober's own health checks are its runbook's
-job.
+Burn-rate conditions see nothing when data stops. Two policies cover that, as PromQL conditions
+(`absent_over_time(...[10m])`), because a PromQL condition with `disable_metric_validation = true` can be created
+before the metric exists:
+
+- **`CUJ prober: no data` pages.** The prober runs in the cluster it watches, so when the whole cluster is down
+  (every Spot node gone, the spend guard at zero nodes) the prober's burn-rate alerts cannot fire: there are no
+  failed runs, only no runs. The prober-fast page therefore does not cover "everything down"; this alert does, with
+  one page for all journeys. A prober that is up but stuck (counters exported but not growing) does not trigger it.
+- **`CUJ mesh: no data` opens a ticket** when the recorded composites stop for every journey: the managed rule
+  evaluator or the Istio scrape has stopped. Nothing pages from the mesh, so a ticket is enough.
+
+### Planned outages: `make slo-snooze`
+
+`make down` removes the prober before `terraform destroy`, so the alerts would page during a teardown.
+`make slo-snooze` (`tools/slo-gen/snooze.sh`) snoozes every policy with the user label `generator=slo-gen` for
+`SLO_SNOOZE_MINUTES` (default 60) with `gcloud monitoring snoozes create`, 16 policies per snooze (the API's limit).
+`make down` should call it first; use it for other planned work too. A snoozed policy still evaluates; it only stops
+notifying.
 
 ## Datadog (M3 window only)
 
@@ -201,9 +274,11 @@ locals `datadog_tags`, `runbook_base_url`, `notify` live there):
   only if they are made of metric-type monitors, and Synthetics monitors are not
   ([burn rate](https://docs.datadoghq.com/service_level_objectives/burn_rate/),
   [error budget](https://docs.datadoghq.com/service_level_objectives/error_budget/)). So each journey also gets a
-  metric-based SLO, passed runs over all runs of `synthetics.test_runs` for that test, and the three tiers as
-  `slo alert` monitors on it, with the same burn rates as Cloud Monitoring. Over the 7-day timeframe these mean 8 %,
-  20 % and 40 % of the 7-day budget, in line with Datadog's own 7-day table (16.8 / 5.6 / 2.8).
+  metric-based SLO, passed runs over all runs of `synthetics.test_runs` for that test, and `slo alert` monitors on
+  it.
+- **Only the medium and slow tiers** (`datadog.tiers`), with short windows of at least 15 minutes
+  (`datadog.minShortWindow`). Each test runs every 5 minutes from one location, so a 5-minute window holds 0 or 1
+  runs and the fast tier would flap. Synthetics are not a paging signal, so every monitor is a ticket (priority 3).
 - **Unverified:** the tag names on `synthetics.test_runs` (`test_public_id`, `status:passed`) are not documented.
   Check them in Metrics Explorer before the window starts and fix `datadog.burnRate` in `slo/slos.yaml` if needed.
   With a wrong `goodFilter`, the SLO reads 0 % and every burn-rate monitor fires at once; `datadog.burnRate.enabled:
@@ -212,8 +287,8 @@ locals `datadog_tags`, `runbook_base_url`, `notify` live there):
 ## Dashboard
 
 `google_monitoring_dashboard.slo_overview`, "Mamori CUJ SLOs": one row per journey with availability and latency of
-both signals against the target (PromQL on the recorded series) and the error budget left on each of the four SLOs
-(`select_slo_budget_fraction`). The mesh dashboard (observability) links to it.
+both signals against the target (PromQL on the recorded series) and the error budget left on each of the journey's
+SLOs (`select_slo_budget_fraction`). The mesh dashboard (observability) links to it.
 
 ## Not verified yet
 
@@ -221,17 +296,18 @@ Nothing here has run. To check in the first days of M2, in this order:
 
 1. The prober and Istio series exist in Cloud Monitoring with the expected names and labels
    (`prometheus.googleapis.com/mamori_cuj_probe_total/counter` on `prometheus_target`, cluster `mamori`, namespace
-   `prober`).
+   `prober`). Then set `slo_enabled = true` and apply.
 2. The rule evaluator runs (`kubectl -n gmp-system get pods`), the recorded series appear as
    `prometheus.googleapis.com/mamori:cuj_mesh_availability:ratio_rate2m/gauge`, and its node service account may read
    metrics (`monitoring.timeSeries.list`, part of `roles/container.defaultNodeServiceAccount`).
 3. `le` matching: the rules match bucket bounds however they are formatted (`0.5`, `1`, `1.0`, `500`); confirm one
    latency series has values.
 4. The SLOs show compliance in the console; `select_slo_burn_rate` on the windows-based mesh SLOs returns data.
-5. A game-day fault fires the expected fast-burn policies, and the incident reaches PagerDuty and Pub/Sub with the
-   user labels above.
-6. The dashboard renders (its JSON is generated, not exported from the console).
-7. Datadog: the `synthetics.test_runs` tags (above).
+5. The no-data PromQL conditions (`absent_over_time`) evaluate, and stay quiet while the prober runs.
+6. A game-day fault fires the expected prober page and mesh tickets, and the incidents reach PagerDuty and Pub/Sub
+   with the user labels above. `make slo-snooze` silences them.
+7. The dashboard renders (its JSON is generated, not exported from the console).
+8. Datadog: the `synthetics.test_runs` tags (above).
 
 ## Sources (checked 2026-11-13)
 
@@ -247,8 +323,10 @@ Nothing here has run. To check in the first days of M2, in this order:
   https://github.com/GoogleCloudPlatform/prometheus/tree/release-2.53.5-gmp/google/export
 - Managed Prometheus rule scoping source (`RuleGroupsConfig`, `scopeRules`):
   https://github.com/GoogleCloudPlatform/prometheus-engine/blob/main/pkg/operator/apis/monitoring/v1/rules_config.go
-- Terraform google provider 8.9.0 schema (`google_monitoring_slo`, `google_monitoring_alert_policy`): `terraform
-  providers schema -json`
+- Terraform google provider 8.9.0 schema (`google_monitoring_slo`, `google_monitoring_alert_policy`, including
+  `condition_prometheus_query_language.disable_metric_validation`): `terraform providers schema -json`
+- Cloud Monitoring snoozes (16 policies per snooze): https://docs.cloud.google.com/monitoring/api/ref_v3/rest/v3/projects.snoozes,
+  https://docs.cloud.google.com/sdk/gcloud/reference/monitoring/snoozes/create
 - Datadog burn-rate and error-budget alerts: https://docs.datadoghq.com/service_level_objectives/burn_rate/,
   https://docs.datadoghq.com/service_level_objectives/error_budget/
 - Datadog Synthetics metrics: https://docs.datadoghq.com/synthetics/metrics/

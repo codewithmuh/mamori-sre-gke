@@ -43,27 +43,43 @@ prober:
 # White-box signal: Istio request metrics of the journey's critical services (D4).
 mesh:
   namespace: boutique
-  # On every journey's path besides the critical services found by discovery.
-  entryServices: [frontend]
+  # Never in a journey's composite even when the CUJ map lists them: the entry serves every journey's
+  # routes and Istio's metrics carry no route, so its ratio would let a checkout-only fault burn the
+  # other journeys. The prober covers the entry.
+  excludedServices: [frontend]
   # Plain TCP to Istio, so no request metrics. A redis-cart failure shows up as cartservice errors.
   tcpServices: [redis-cart]
+  # gRPC statuses that count as good besides OK (0): INVALID_ARGUMENT (3) and NOT_FOUND (5) answer
+  # bad input, such as junk /product/<id> requests from the public internet, not a broken service.
+  goodGrpcStatuses: ["0", "3", "5"]
   # The composite SLIs feed windows-based SLOs: a window is good when the composite meets the target.
   windowPeriod: 1m
   # Rate window of the gauge those SLOs read. Needs the sidecars scraped at least every minute.
   sloRateWindow: 2m
   recordWindows: [5m, 1h]
 
-# Multiwindow, multi-burn-rate alerts from the Google SRE workbook ("Alerting on SLOs"). The budget
-# shares are the workbook's; the burn rate is budgetConsumed x window / longWindow, so it is recomputed
-# for 28 days. The workbook's ticket tier looks back 3 days; Cloud Monitoring burn-rate alerts look back
-# at most 24 hours, so that tier uses 24 hours and 2 hours. signals: which signals get this tier (prober,
-# mesh, synthetics); narrowing it is the main alert-fatigue knob.
+# Multiwindow, multi-burn-rate alerts from the Google SRE workbook ("Alerting on SLOs"). The burn rate
+# is budgetConsumed x window / longWindow, so it is recomputed for 28 days. The workbook's ticket tier
+# looks back 3 days; Cloud Monitoring burn-rate alerts look back at most 24 hours, so that tier uses
+# 24 hours and 2 hours.
 alerting:
-  tiers:
-    - {name: fast, severity: page, budgetConsumed: 0.02, longWindow: 1h, shortWindow: 5m, signals: [prober, mesh, synthetics]}
-    - {name: medium, severity: page, budgetConsumed: 0.05, longWindow: 6h, shortWindow: 30m, signals: [prober, mesh, synthetics]}
-    - {name: slow, severity: ticket, budgetConsumed: 0.10, longWindow: 24h, shortWindow: 2h, signals: [prober, mesh, synthetics]}
-  # Page when a journey's prober has sent no data for this long (prober, nodes or cluster down).
+  # Proposal for the maintainer's ADR on D4: only the prober pages (one signal per journey), so one
+  # fault opens few pages (PagerDuty's free plan has 100 phone/SMS a month). A page tier of any other
+  # signal opens a ticket instead.
+  pageSignals: [prober]
+  # The workbook's budget shares: 2 % in 1 h, 5 % in 6 h, 10 % (here in 24 h).
+  availabilityTiers:
+    - {name: fast, severity: page, budgetConsumed: 0.02, longWindow: 1h, shortWindow: 5m}
+    - {name: medium, severity: page, budgetConsumed: 0.05, longWindow: 6h, shortWindow: 30m}
+    - {name: slow, severity: ticket, budgetConsumed: 0.10, longWindow: 24h, shortWindow: 2h}
+  # A 95 % latency target allows a burn rate of at most 20 (every request slow), so the availability
+  # rates (13.44 needs 67 % slow) would miss partial slowdowns. Half the budget shares instead.
+  latencyTiers:
+    - {name: fast, severity: page, budgetConsumed: 0.01, longWindow: 1h, shortWindow: 5m}
+    - {name: medium, severity: page, budgetConsumed: 0.025, longWindow: 6h, shortWindow: 30m}
+    - {name: slow, severity: ticket, budgetConsumed: 0.05, longWindow: 24h, shortWindow: 2h}
+  # Alert when a whole signal has sent no data for this long: prober silent (page), recorded mesh
+  # composites missing (ticket).
   noDataAfter: 10m
   # Close an incident once its condition has had no new violating data for this long.
   autoClose: 30m
@@ -73,6 +89,10 @@ alerting:
 datadog:
   # Datadog SLOs offer 7, 30 or 90 days, not 28. The first one is the SLO's main timeframe.
   timeframes: [7d, 30d]
+  # One run every 5 minutes from one location: a 5-minute window holds 0 or 1 runs and flaps, so
+  # only the slower tiers, with short windows of at least 15 minutes.
+  tiers: [medium, slow]
+  minShortWindow: 15m
   # Datadog allows no burn-rate alerts on monitor-based SLOs built from Synthetics monitors, so each
   # journey also gets a metric-based SLO on synthetics.test_runs that carries them.
   # UNVERIFIED: the tag names on synthetics.test_runs. Check them in Metrics Explorer before the

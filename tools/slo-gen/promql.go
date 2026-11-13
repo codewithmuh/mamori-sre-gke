@@ -98,32 +98,35 @@ func stepMatcher(steps []string) string {
 // while the service name comes from the route and is always set.
 const serviceLabel = "destination_service_name"
 
-// meshBase selects client-side (reporter="source") Istio metrics of the given
-// services. The client's sidecar sees what the caller sees, including Istio
-// fault injection, which aborts or delays a request before it leaves the
-// client, so the server's sidecar never records it.
-func (m *Model) meshBase(services []string) []string {
+// meshBase selects client-side (reporter="source") Istio metrics of every
+// service in the shop's namespace. The client's sidecar sees what the caller
+// sees, including Istio fault injection, which aborts or delays a request
+// before it leaves the client, so the server's sidecar never records it.
+// Every service is recorded, not only critical ones: runbooks and the
+// incident agent look at non-critical culprits too.
+func (m *Model) meshBase() []string {
 	return []string{
 		matcher("reporter", "=", "source"),
 		matcher("destination_service_namespace", "=", m.Spec.Mesh.Namespace),
-		matcher(serviceLabel, "=~", anyOf(services)),
 	}
 }
 
 // serviceAvailabilityExpr: per service, the share of requests that got a
-// response below 500 and gRPC status OK (or no gRPC status, for plain HTTP).
-// response_code 0 (no response at all) is bad.
+// response below 500 and a good gRPC status (or none, for plain HTTP).
+// response_code 0 (no response at all) is bad. Besides OK, the spec's good
+// statuses include NOT_FOUND and INVALID_ARGUMENT: answers to bad input (junk
+// product ids from the public internet), not a broken service.
 func (m *Model) serviceAvailabilityExpr(w Duration) string {
-	base := m.meshBase(m.Services)
+	base := m.meshBase()
 	good := selector(metricIstioReqs, append(base,
 		matcher("response_code", "=~", "[1-4][0-9][0-9]"),
-		matcher("grpc_response_status", "=~", "0|"))...)
+		matcher("grpc_response_status", "=~", anyOf(m.Spec.Mesh.GoodGRPCStatuses)+"|"))...)
 	return ratio(serviceLabel, good, selector(metricIstioReqs, base...), w)
 }
 
 // serviceLatencyExpr: per service, the share of requests faster than the threshold.
-func (m *Model) serviceLatencyExpr(thresholdMs int, services []string, w Duration) string {
-	base := m.meshBase(services)
+func (m *Model) serviceLatencyExpr(thresholdMs int, w Duration) string {
+	base := m.meshBase()
 	good := selector(metricIstioLatency+"_bucket", append(base, matcher("le", "=~", leMatch(float64(thresholdMs))))...)
 	return ratio(serviceLabel, good, selector(metricIstioLatency+"_count", base...), w)
 }

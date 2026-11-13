@@ -124,22 +124,24 @@ func TestSpecValidation(t *testing.T) {
 		"rule interval":   {func(s *Spec) { s.GCP.RuleInterval = Duration(time.Second) }, "ruleInterval"},
 		"prober ns":       {func(s *Spec) { s.Prober.Namespace = "" }, "prober.namespace"},
 		"prober windows":  {func(s *Spec) { s.Prober.RecordWindows = nil }, "prober.recordWindows"},
-		"short window":    {func(s *Spec) { s.Mesh.RecordWindows = []Duration{Duration(time.Second)} }, "at least 1m"},
+		"record window":   {func(s *Spec) { s.Mesh.RecordWindows = []Duration{Duration(time.Second)} }, "at least 1m"},
 		"mesh ns":         {func(s *Spec) { s.Mesh.Namespace = "" }, "mesh.namespace"},
-		"service name":    {func(s *Spec) { s.Mesh.EntryServices = []string{"Front End"} }, "invalid service name"},
+		"service name":    {func(s *Spec) { s.Mesh.TCPServices = []string{"Redis Cart"} }, "invalid service name"},
+		"excluded name":   {func(s *Spec) { s.Mesh.ExcludedServices = []string{"Front End"} }, "invalid service name"},
+		"grpc no ok":      {func(s *Spec) { s.Mesh.GoodGRPCStatuses = []string{"5"} }, "must include 0"},
+		"grpc code":       {func(s *Spec) { s.Mesh.GoodGRPCStatuses = []string{"0", "17", "05"} }, `"17" is not a gRPC status`},
 		"window period":   {func(s *Spec) { s.Mesh.WindowPeriod = Duration(90 * time.Second) }, "mesh.windowPeriod"},
 		"slo rate window": {func(s *Spec) { s.Mesh.SLORateWindow = 0 }, "mesh.sloRateWindow"},
-		"no tiers":        {func(s *Spec) { s.Alerting.Tiers = nil }, "at least one tier"},
-		"tier name":       {func(s *Spec) { s.Alerting.Tiers[1].Name = "fast" }, "unique lowercase word"},
-		"severity":        {func(s *Spec) { s.Alerting.Tiers[0].Severity = "urgent" }, "page or ticket"},
-		"budget":          {func(s *Spec) { s.Alerting.Tiers[0].BudgetConsumed = 0 }, "budgetConsumed"},
-		"lookback":        {func(s *Spec) { s.Alerting.Tiers[2].LongWindow = Duration(72 * time.Hour) }, "longWindow must be from 1h"},
-		"short >= long":   {func(s *Spec) { s.Alerting.Tiers[0].ShortWindow = Duration(time.Hour) }, "shorter than longWindow"},
-		"no signals":      {func(s *Spec) { s.Alerting.Tiers[0].Signals = nil }, "signals must name"},
-		"unknown signal":  {func(s *Spec) { s.Alerting.Tiers[0].Signals = []string{"logs"} }, `unknown signal "logs"`},
+		"no tiers":        {func(s *Spec) { s.Alerting.AvailabilityTiers = nil }, "availabilityTiers: at least one tier"},
+		"no latency":      {func(s *Spec) { s.Alerting.LatencyTiers = nil }, "latencyTiers: at least one tier"},
+		"tier name":       {func(s *Spec) { s.Alerting.AvailabilityTiers[1].Name = "fast" }, "unique lowercase word"},
+		"severity":        {func(s *Spec) { s.Alerting.LatencyTiers[0].Severity = "urgent" }, "page or ticket"},
+		"budget":          {func(s *Spec) { s.Alerting.AvailabilityTiers[0].BudgetConsumed = 0 }, "budgetConsumed"},
+		"lookback":        {func(s *Spec) { s.Alerting.AvailabilityTiers[2].LongWindow = Duration(72 * time.Hour) }, "longWindow must be from 1h"},
+		"short >= long":   {func(s *Spec) { s.Alerting.AvailabilityTiers[0].ShortWindow = Duration(time.Hour) }, "shorter than longWindow"},
+		"unknown signal":  {func(s *Spec) { s.Alerting.PageSignals = []string{"logs"} }, `unknown signal "logs"`},
 		"unreachable": {func(s *Spec) {
-			s.Alerting.Tiers[0].BudgetConsumed = 1
-			s.Alerting.Tiers[0].LongWindow = Duration(time.Hour)
+			s.Alerting.LatencyTiers[0].BudgetConsumed = 0.05 // 33.6 > 1/(1-0.95)
 		}, "can never be reached"},
 		"no data":        {func(s *Spec) { s.Alerting.NoDataAfter = Duration(time.Minute) }, "noDataAfter"},
 		"auto close":     {func(s *Spec) { s.Alerting.AutoClose = Duration(time.Minute) }, "autoClose"},
@@ -147,6 +149,9 @@ func TestSpecValidation(t *testing.T) {
 		"timeframes":     {func(s *Spec) { s.Datadog.Timeframes = nil }, "datadog.timeframes"},
 		"bad timeframe":  {func(s *Spec) { s.Datadog.Timeframes = []string{"28d"} }, `"28d" is not one of`},
 		"burn rate tags": {func(s *Spec) { s.Datadog.BurnRate.TestTag = "" }, "datadog.burnRate"},
+		"datadog tiers":  {func(s *Spec) { s.Datadog.Tiers = nil }, "datadog.tiers: at least one"},
+		"datadog tier":   {func(s *Spec) { s.Datadog.Tiers = []string{"rapid"} }, `"rapid" is not one of`},
+		"short window":   {func(s *Spec) { s.Datadog.MinShortWindow = 0 }, "datadog.minShortWindow"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -157,6 +162,22 @@ func TestSpecValidation(t *testing.T) {
 				t.Errorf("got %v, want an error containing %q", err, c.want)
 			}
 		})
+	}
+}
+
+func TestSpecWarnings(t *testing.T) {
+	s := loadFixtureSpec(t)
+	if w := s.Warnings(); len(w) != 0 {
+		t.Errorf("the fixture spec should have no warnings, got %v", w)
+	}
+	// 2 % of a 95 % budget in 1 h is a burn rate of 13.44: over half the maximum of 20.
+	s.Alerting.LatencyTiers[0].BudgetConsumed = 0.02
+	w := s.Warnings()
+	if len(w) != 4 || !strings.Contains(w[0], "more than half the maximum 20") || !strings.Contains(w[0], "over 67.2 % of events are bad") {
+		t.Errorf("warnings = %v", w)
+	}
+	if err := s.Validate(); err != nil {
+		t.Errorf("a warning is not an error: %v", err)
 	}
 }
 

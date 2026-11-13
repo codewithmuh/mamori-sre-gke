@@ -34,13 +34,14 @@ func tile(x, y, w, h int, widget obj) obj {
 func (m *Model) sliChart(j Journey, sli string, target float64) obj {
 	pw := m.Spec.Prober.RecordWindows[len(m.Spec.Prober.RecordWindows)-1]
 	mw := m.Spec.Mesh.RecordWindows[0]
+	sets := []obj{promDataSet(selector(recCUJ(signalProber, sli, pw), matcher("cuj", "=", j.ID)), fmt.Sprintf("prober (%s)", pw))}
+	if j.HasMesh() {
+		sets = append(sets, promDataSet(selector(recCUJ(signalMesh, sli, mw), matcher("cuj", "=", j.ID)), fmt.Sprintf("mesh (%s)", mw)))
+	}
 	return obj{
 		"title": fmt.Sprintf("CUJ %s: %s", j.ID, sli),
 		"xyChart": obj{
-			"dataSets": []obj{
-				promDataSet(selector(recCUJ(signalProber, sli, pw), matcher("cuj", "=", j.ID)), fmt.Sprintf("prober (%s)", pw)),
-				promDataSet(selector(recCUJ(signalMesh, sli, mw), matcher("cuj", "=", j.ID)), fmt.Sprintf("mesh (%s)", mw)),
-			},
+			"dataSets":   sets,
 			"thresholds": []obj{{"value": target, "label": "target " + percent(target) + " %"}},
 			"yAxis":      obj{"label": "ratio", "scale": "LINEAR"},
 		},
@@ -61,7 +62,7 @@ func (m *Model) budgetChart(j Journey) obj {
 	for _, s := range j.SLOs {
 		sets = append(sets, obj{
 			"timeSeriesQuery": obj{"timeSeriesFilter": obj{
-				"filter": fmt.Sprintf("select_slo_budget_fraction(\"${google_monitoring_slo.%s.name}\")", tfName(j.ID, s.Signal, s.SLI)),
+				"filter": fmt.Sprintf("select_slo_budget_fraction(\"%s\")", ref("google_monitoring_slo", tfName(j.ID, s.Signal, s.SLI), "name")),
 			}},
 			"plotType":       "LINE",
 			"legendTemplate": s.ID(),

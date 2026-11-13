@@ -21,12 +21,8 @@ type Model struct {
 	Map      *CUJMap
 	Inputs   Inputs
 	Journeys []Journey
-	// Services is every service that appears in some journey's mesh composite.
-	Services []string
 	// Thresholds are the distinct latency thresholds in milliseconds, ascending.
 	Thresholds []int
-	// ThresholdServices lists, per threshold, the services of the journeys that use it.
-	ThresholdServices map[int][]string
 }
 
 // Journey is one CUJ with its targets, its critical services and its SLOs.
@@ -34,9 +30,13 @@ type Journey struct {
 	JourneySpec
 	// Critical is the CUJ map's list, sorted.
 	Critical []string
-	// MeshServices is entry services plus critical services, minus TCP-only ones.
+	// MeshServices is the critical services minus excluded and TCP-only ones.
 	MeshServices []string
-	// TCPSkipped are critical services left out of the mesh composite.
+	// Excluded are critical services left out on purpose (mesh.excludedServices):
+	// the entry (frontend), whose ratio mixes every journey's routes. The prober
+	// covers it.
+	Excluded []string
+	// TCPSkipped are critical services without request metrics (plain TCP).
 	TCPSkipped  []string
 	ProberSteps []string
 	SLOs        []SLO
@@ -66,9 +66,9 @@ func BuildModel(spec *Spec, m *CUJMap, in Inputs) (*Model, []string, error) {
 		byID[j.ID] = j
 	}
 	model := &Model{Spec: spec, Map: m, Inputs: in}
-	var missing, warnings []string
-	services := map[string]bool{}
-	byThreshold := map[int]map[string]bool{}
+	var missing []string
+	warnings := spec.Warnings()
+	thresholds := map[int]bool{}
 	for _, js := range spec.Journeys {
 		mj, ok := byID[js.ID]
 		if !ok {
@@ -80,23 +80,27 @@ func BuildModel(spec *Spec, m *CUJMap, in Inputs) (*Model, []string, error) {
 			Critical:    sortedUnique(mj.Critical),
 			ProberSteps: spec.Prober.LatencySteps[js.ID],
 		}
-		for _, svc := range sortedUnique(append(append([]string{}, spec.Mesh.EntryServices...), mj.Critical...)) {
-			if slices.Contains(spec.Mesh.TCPServices, svc) {
+		for _, svc := range j.Critical {
+			switch {
+			case slices.Contains(spec.Mesh.ExcludedServices, svc):
+				j.Excluded = append(j.Excluded, svc)
+			case slices.Contains(spec.Mesh.TCPServices, svc):
 				j.TCPSkipped = append(j.TCPSkipped, svc)
-				continue
+			default:
+				j.MeshServices = append(j.MeshServices, svc)
 			}
-			j.MeshServices = append(j.MeshServices, svc)
-			services[svc] = true
-			if byThreshold[js.Latency.ThresholdMs] == nil {
-				byThreshold[js.Latency.ThresholdMs] = map[string]bool{}
-			}
-			byThreshold[js.Latency.ThresholdMs][svc] = true
 		}
-		for _, sig := range []string{signalProber, signalMesh} {
+		signals := []string{signalProber, signalMesh}
+		if len(j.MeshServices) == 0 {
+			signals = signals[:1]
+			warnings = append(warnings, fmt.Sprintf("journey %q has no critical service with request metrics; it gets prober SLOs only", js.ID))
+		}
+		for _, sig := range signals {
 			j.SLOs = append(j.SLOs,
 				SLO{Signal: sig, SLI: sliAvailability, Target: js.Availability.Target},
 				SLO{Signal: sig, SLI: sliLatency, Target: js.Latency.Target})
 		}
+		thresholds[js.Latency.ThresholdMs] = true
 		model.Journeys = append(model.Journeys, j)
 	}
 	if len(missing) > 0 {
@@ -107,11 +111,8 @@ func BuildModel(spec *Spec, m *CUJMap, in Inputs) (*Model, []string, error) {
 			warnings = append(warnings, fmt.Sprintf("journey %q is in the CUJ map but has no SLO in the spec; skipped", mj.ID))
 		}
 	}
-	model.Services = sortedKeys(services)
-	model.ThresholdServices = map[int][]string{}
-	for t, svcs := range byThreshold {
+	for t := range thresholds {
 		model.Thresholds = append(model.Thresholds, t)
-		model.ThresholdServices[t] = sortedKeys(svcs)
 	}
 	sort.Ints(model.Thresholds)
 	return model, warnings, nil
@@ -127,16 +128,25 @@ func BurnRate(t TierSpec, window Duration) float64 {
 	return round4(t.BudgetConsumed * float64(window.D()) / float64(t.LongWindow.D()))
 }
 
-// TiersFor returns the alert tiers that apply to a signal.
-func (m *Model) TiersFor(signal string) []TierSpec {
-	var out []TierSpec
-	for _, t := range m.Spec.Alerting.Tiers {
-		if slices.Contains(t.Signals, signal) {
-			out = append(out, t)
-		}
+// TiersFor returns the alert tiers of an SLI.
+func (m *Model) TiersFor(sli string) []TierSpec {
+	if sli == sliLatency {
+		return m.Spec.Alerting.LatencyTiers
 	}
-	return out
+	return m.Spec.Alerting.AvailabilityTiers
 }
+
+// Severity is page only for a page tier of a signal in alerting.pageSignals;
+// everything else opens a ticket.
+func (m *Model) Severity(signal string, t TierSpec) string {
+	if t.Severity == severityPage && slices.Contains(m.Spec.Alerting.PageSignals, signal) {
+		return severityPage
+	}
+	return severityTicket
+}
+
+// HasMesh reports whether a journey has mesh SLOs.
+func (j Journey) HasMesh() bool { return len(j.MeshServices) > 0 }
 
 // RunbookURL is the journey's runbook (docs/runbooks/cuj-<id>.md).
 func (m *Model) RunbookURL(journey string) string {

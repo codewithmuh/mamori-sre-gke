@@ -11,7 +11,7 @@ metadata:
   someFutureField: ignored
 journeys:
   - id: browse
-    critical: [productcatalogservice, currencyservice]
+    critical: [productcatalogservice, currencyservice, frontend]
     nonCritical: [adservice, recommendationservice]
     results:
       productcatalogservice: {failureRate: 1.0, runs: 20}

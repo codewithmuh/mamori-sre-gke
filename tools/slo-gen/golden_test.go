@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -141,12 +142,18 @@ func TestRulesManifests(t *testing.T) {
 	}
 	cases := map[string]struct {
 		kind, namespace string
-		rules           int
+		// group name -> interval and number of rules
+		groups map[string]string
+		rules  map[string]int
 	}{
-		// 4 journeys x (availability + latency) x 2 windows.
-		pathProberRules: {"Rules", "prober", 16},
-		// 3 windows x (1 availability + 2 thresholds) per service, plus 4 journeys x 2 SLIs x 3 windows.
-		pathMeshRules: {"ClusterRules", "", 9 + 24},
+		// Per window: 4 journeys x (availability + latency).
+		pathProberRules: {"Rules", "prober",
+			map[string]string{"slo-prober-5m": "1m", "slo-prober-1h": "5m"},
+			map[string]int{"slo-prober-5m": 8, "slo-prober-1h": 8}},
+		// Per window: every service (1 availability + 2 thresholds), plus 4 journeys x 2 SLIs.
+		pathMeshRules: {"ClusterRules", "",
+			map[string]string{"slo-mesh-2m": "1m", "slo-mesh-5m": "1m", "slo-mesh-1h": "5m"},
+			map[string]int{"slo-mesh-2m": 11, "slo-mesh-5m": 11, "slo-mesh-1h": 11}},
 	}
 	for path, want := range cases {
 		var doc rulesDoc
@@ -156,25 +163,15 @@ func TestRulesManifests(t *testing.T) {
 		if doc.APIVersion != "monitoring.googleapis.com/v1" || doc.Kind != want.kind || doc.Metadata.Namespace != want.namespace {
 			t.Errorf("%s: got %s %s in %q", path, doc.APIVersion, doc.Kind, doc.Metadata.Namespace)
 		}
-		if len(doc.Spec.Groups) != 1 || doc.Spec.Groups[0].Interval != "1m" {
-			t.Fatalf("%s: want one group evaluated every 1m, got %+v", path, doc.Spec.Groups)
+		if len(doc.Spec.Groups) != len(want.groups) {
+			t.Fatalf("%s: %d groups, want %d", path, len(doc.Spec.Groups), len(want.groups))
 		}
-		rules := doc.Spec.Groups[0].Rules
-		if len(rules) != want.rules {
-			t.Errorf("%s: %d rules, want %d", path, len(rules), want.rules)
-		}
-		for _, r := range rules {
-			if !strings.HasPrefix(r.Record, "mamori:") || r.Expr == "" {
-				t.Errorf("%s: bad rule %+v", path, r)
+		for _, g := range doc.Spec.Groups {
+			if g.Interval != want.groups[g.Name] || len(g.Rules) != want.rules[g.Name] {
+				t.Errorf("%s: group %s every %s with %d rules, want every %s with %d", path, g.Name, g.Interval, len(g.Rules), want.groups[g.Name], want.rules[g.Name])
 			}
-			if strings.Count(r.Expr, "(") != strings.Count(r.Expr, ")") || strings.Count(r.Expr, "{") != strings.Count(r.Expr, "}") {
-				t.Errorf("%s: unbalanced brackets in %s", path, r.Expr)
-			}
-			// Managed Prometheus adds these itself and rejects rules that set them.
-			for _, l := range []string{"project_id", "location", "cluster", "namespace"} {
-				if _, ok := r.Labels[l]; ok {
-					t.Errorf("%s: rule %s sets reserved label %s", path, r.Record, l)
-				}
+			for _, r := range g.Rules {
+				checkRule(t, path, r.Record, r.Expr, r.Labels)
 			}
 		}
 	}
@@ -184,18 +181,35 @@ func TestRulesManifests(t *testing.T) {
 	}
 }
 
+func checkRule(t *testing.T, path, record, expr string, labels map[string]string) {
+	t.Helper()
+	if !strings.HasPrefix(record, "mamori:") || expr == "" {
+		t.Errorf("%s: bad rule %s: %q", path, record, expr)
+	}
+	if strings.Count(expr, "(") != strings.Count(expr, ")") || strings.Count(expr, "{") != strings.Count(expr, "}") {
+		t.Errorf("%s: unbalanced brackets in %s", path, expr)
+	}
+	// Managed Prometheus adds these itself and rejects rules that set them.
+	for _, l := range []string{"project_id", "location", "cluster", "namespace"} {
+		if _, ok := labels[l]; ok {
+			t.Errorf("%s: rule %s sets reserved label %s", path, record, l)
+		}
+	}
+}
+
 func TestMeshComposite(t *testing.T) {
 	m := fixtureModel(t)
 	browse := m.Journeys[0]
-	if got := strings.Join(browse.MeshServices, ","); got != "currencyservice,frontend,productcatalogservice" {
-		t.Errorf("browse mesh services = %s", got)
+	// The fixture map lists frontend as critical for browse; the spec excludes it.
+	if got := strings.Join(browse.MeshServices, ","); got != "currencyservice,productcatalogservice" || strings.Join(browse.Excluded, ",") != "frontend" {
+		t.Errorf("browse mesh services = %s, excluded = %v", got, browse.Excluded)
 	}
 	addToCart := m.Journeys[1]
 	if got := strings.Join(addToCart.TCPSkipped, ","); got != "redis-cart" {
 		t.Errorf("add-to-cart TCP skipped = %s", got)
 	}
 	expr := cujMeshAvailabilityExpr(browse, m.Spec.Mesh.SLORateWindow)
-	for _, want := range []string{"exp(sum(ln(", `mamori:service_mesh_availability:ratio_rate2m{destination_service_name=~"currencyservice|frontend|productcatalogservice"}`} {
+	for _, want := range []string{"exp(sum(ln(", `mamori:service_mesh_availability:ratio_rate2m{destination_service_name=~"currencyservice|productcatalogservice"}`} {
 		if !strings.Contains(expr, want) {
 			t.Errorf("composite availability %q lacks %q", expr, want)
 		}
@@ -204,14 +218,20 @@ func TestMeshComposite(t *testing.T) {
 	if !strings.Contains(lat, `min(`) || !strings.Contains(lat, `threshold_ms="1000"`) {
 		t.Errorf("checkout latency composite = %q", lat)
 	}
-	if got := m.ThresholdServices[1000]; strings.Join(got, ",") != "cartservice,checkoutservice,currencyservice,frontend,paymentservice,productcatalogservice,shippingservice" {
-		t.Errorf("services at 1000 ms = %v", got)
+	// Every service of the namespace is recorded, with the wider set of good gRPC statuses.
+	svc := m.serviceAvailabilityExpr(m.Spec.Mesh.SLORateWindow)
+	if strings.Contains(svc, "destination_service_name=~") || !strings.Contains(svc, `grpc_response_status=~"0|3|5|"`) {
+		t.Errorf("per-service availability = %q", svc)
+	}
+	if strings.Join(intsToStrings(m.Thresholds), ",") != "500,1000" {
+		t.Errorf("thresholds = %v", m.Thresholds)
 	}
 }
 
 func TestLabTerraform(t *testing.T) {
 	var root struct {
 		Comment  string                               `json:"//"`
+		Variable map[string]map[string]any            `json:"variable"`
 		Resource map[string]map[string]map[string]any `json:"resource"`
 	}
 	if err := json.Unmarshal(fileByPath(t, fixtureFiles(t), pathLabTF), &root); err != nil {
@@ -220,25 +240,35 @@ func TestLabTerraform(t *testing.T) {
 	if !strings.Contains(root.Comment, "DO NOT EDIT") {
 		t.Errorf("missing generated notice: %q", root.Comment)
 	}
+	if v := root.Variable[varSLOEnabled]; v["type"] != "bool" || v["default"] != false || v["description"] == "" {
+		t.Errorf("variable slo_enabled = %v", v)
+	}
 	r := root.Resource
 	counts := map[string]int{
 		"google_monitoring_custom_service": 4,
 		"google_monitoring_slo":            16,
-		// 16 SLOs x 3 tiers + 4 no-data policies.
-		"google_monitoring_alert_policy": 52,
+		// 16 SLOs x 3 tiers + 2 no-data policies.
+		"google_monitoring_alert_policy": 50,
 		"google_monitoring_dashboard":    1,
 	}
 	for typ, n := range counts {
 		if len(r[typ]) != n {
 			t.Errorf("%d %s, want %d", len(r[typ]), typ, n)
 		}
+		// Nothing may exist before the metrics do.
+		for name, res := range r[typ] {
+			if res["count"] != countGate {
+				t.Errorf("%s.%s is not gated on var.slo_enabled", typ, name)
+			}
+		}
 	}
+	pages := 0
 	for name, p := range r["google_monitoring_alert_policy"] {
 		if !strings.HasPrefix(name, "slo_") {
 			t.Errorf("%s: name lacks the slo_ prefix", name)
 		}
 		doc := p["documentation"].([]any)[0].(map[string]any)
-		if !strings.Contains(doc["content"].(string), "/docs/runbooks/cuj-") {
+		if !strings.Contains(doc["content"].(string), "/docs/runbooks/") {
 			t.Errorf("%s: no runbook link", name)
 		}
 		labels := p["user_labels"].(map[string]any)
@@ -251,6 +281,16 @@ func TestLabTerraform(t *testing.T) {
 		if page != (p["severity"] == "CRITICAL") || page != (p["notification_channels"] == "${local.incident_notification_channels}") {
 			t.Errorf("%s: severity %v, channels %v do not match label %v", name, p["severity"], p["notification_channels"], labels["severity"])
 		}
+		if page {
+			pages++
+			if labels["signal"] != signalProber || labels["burn"] == "slow" {
+				t.Errorf("%s pages, but only the prober's fast and medium tiers (and prober no data) should", name)
+			}
+		}
+	}
+	// 4 journeys x 2 SLIs x (fast + medium), plus prober no data.
+	if pages != 17 {
+		t.Errorf("%d page policies, want 17", pages)
 	}
 	fast := r["google_monitoring_alert_policy"]["slo_checkout_prober_availability_fast"]
 	conds := fast["conditions"].([]any)
@@ -258,8 +298,22 @@ func TestLabTerraform(t *testing.T) {
 		t.Fatalf("fast policy: want 2 conditions joined by AND, got %v", fast)
 	}
 	ct := conds[1].(map[string]any)["condition_threshold"].([]any)[0].(map[string]any)
-	if ct["filter"] != `select_slo_burn_rate("${google_monitoring_slo.slo_checkout_prober_availability.name}", "300s")` || ct["threshold_value"] != 13.44 {
+	if ct["filter"] != `select_slo_burn_rate("${google_monitoring_slo.slo_checkout_prober_availability[0].name}", "300s")` || ct["threshold_value"] != 13.44 {
 		t.Errorf("short-window condition = %v", ct)
+	}
+	latFast := r["google_monitoring_alert_policy"]["slo_browse_prober_latency_fast"]["conditions"].([]any)[0].(map[string]any)
+	if v := latFast["condition_threshold"].([]any)[0].(map[string]any)["threshold_value"]; v != 6.72 {
+		t.Errorf("latency fast burn = %v, want 6.72", v)
+	}
+	for name, want := range map[string]string{
+		"slo_prober_no_data": `absent_over_time(mamori_cuj_probe_total{cluster="mamori",namespace="prober",source="scheduled"}[10m])`,
+		"slo_mesh_no_data":   `absent_over_time(mamori:cuj_mesh_availability:ratio_rate2m{cluster="mamori"}[10m])`,
+	} {
+		c := r["google_monitoring_alert_policy"][name]["conditions"].([]any)[0].(map[string]any)
+		q := c["condition_prometheus_query_language"].([]any)[0].(map[string]any)
+		if q["query"] != want || q["disable_metric_validation"] != true {
+			t.Errorf("%s condition = %v", name, q)
+		}
 	}
 	dash := r["google_monitoring_dashboard"]["slo_overview"]["dashboard_json"].(string)
 	var d map[string]any
@@ -277,17 +331,36 @@ func TestDatadogTerraform(t *testing.T) {
 	}
 	slos := root.Resource["datadog_service_level_objective"]
 	monitors := root.Resource["datadog_monitor"]
-	if len(slos) != 8 || len(monitors) != 12 {
-		t.Fatalf("got %d SLOs and %d monitors, want 8 and 12", len(slos), len(monitors))
+	// 4 journeys x (monitor SLO + runs SLO); 4 journeys x (medium + slow).
+	if len(slos) != 8 || len(monitors) != 8 {
+		t.Fatalf("got %d SLOs and %d monitors, want 8 and 8", len(slos), len(monitors))
 	}
 	mon := slos["slo_add_to_cart_synthetics_availability"]
 	if ids := mon["monitor_ids"].([]any); len(ids) != 1 || ids[0] != "${datadog_synthetics_test.cuj_add_to_cart.monitor_id}" {
 		t.Errorf("monitor ids = %v", mon["monitor_ids"])
 	}
-	burn := monitors["slo_checkout_synthetics_slow"]
-	want := `burn_rate("${datadog_service_level_objective.slo_checkout_synthetics_runs.id}").over("7d").long_window("24h").short_window("2h") > 2.8`
-	if burn["query"] != want || burn["priority"] != "3" {
-		t.Errorf("slow burn monitor = %v", burn)
+	want := map[string]string{
+		"slo_checkout_synthetics_medium": `burn_rate("${datadog_service_level_objective.slo_checkout_synthetics_runs.id}").over("7d").long_window("6h").short_window("30m") > 5.6`,
+		"slo_checkout_synthetics_slow":   `burn_rate("${datadog_service_level_objective.slo_checkout_synthetics_runs.id}").over("7d").long_window("24h").short_window("2h") > 2.8`,
+	}
+	for name, q := range want {
+		// Synthetics are not a paging signal: every monitor is a ticket (priority 3).
+		if monitors[name]["query"] != q || monitors[name]["priority"] != "3" {
+			t.Errorf("%s = %v", name, monitors[name])
+		}
+	}
+}
+
+func TestDatadogMinShortWindow(t *testing.T) {
+	m := fixtureModel(t)
+	m.Spec.Datadog.MinShortWindow = Duration(45 * time.Minute)
+	tiers := m.datadogTiers()
+	if len(tiers) != 2 || tiers[0].ShortWindow.String() != "45m" || tiers[1].ShortWindow.String() != "2h" {
+		t.Errorf("datadog tiers = %+v", tiers)
+	}
+	// The Cloud Monitoring tiers are untouched.
+	if m.Spec.Alerting.AvailabilityTiers[1].ShortWindow.String() != "30m" {
+		t.Error("datadogTiers changed the spec")
 	}
 }
 
@@ -303,26 +376,74 @@ func TestDatadogBurnRateDisabled(t *testing.T) {
 	}
 }
 
-func TestTiersNarrowedToOneSignal(t *testing.T) {
+func TestSeverity(t *testing.T) {
 	m := fixtureModel(t)
-	m.Spec.Alerting.Tiers[0].Signals = []string{signalMesh}
-	if got := len(m.TiersFor(signalProber)); got != 2 {
-		t.Errorf("prober tiers = %d, want 2", got)
+	fast, slow := m.Spec.Alerting.AvailabilityTiers[0], m.Spec.Alerting.AvailabilityTiers[2]
+	cases := []struct {
+		signal string
+		tier   TierSpec
+		want   string
+	}{
+		{signalProber, fast, severityPage},
+		{signalProber, slow, severityTicket},
+		{signalMesh, fast, severityTicket},
+		{signalSynthetics, fast, severityTicket},
 	}
-	if got := len(m.TiersFor(signalMesh)); got != 3 {
-		t.Errorf("mesh tiers = %d, want 3", got)
+	for _, c := range cases {
+		if got := m.Severity(c.signal, c.tier); got != c.want {
+			t.Errorf("Severity(%s, %s) = %s, want %s", c.signal, c.tier.Name, got, c.want)
+		}
+	}
+	m.Spec.Alerting.PageSignals = []string{signalProber, signalMesh}
+	if m.Severity(signalMesh, fast) != severityPage {
+		t.Error("mesh in pageSignals should page")
+	}
+	if got := len(m.TiersFor(sliLatency)); got != 3 || m.TiersFor(sliLatency)[0].BudgetConsumed != 0.01 {
+		t.Errorf("latency tiers = %v", m.TiersFor(sliLatency))
+	}
+}
+
+func TestJourneyWithoutMeshServices(t *testing.T) {
+	spec := loadFixtureSpec(t)
+	m, err := LoadCUJMap(filepath.Join(fixtureRoot, "slo/cuj-map.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Journeys[0].Critical = []string{"redis-cart"} // browse: TCP only
+	model, warnings, err := BuildModel(spec, m, fixtureInputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(warnings, "\n"), `"browse" has no critical service with request metrics`) {
+		t.Errorf("warnings = %v", warnings)
+	}
+	if b := model.Journeys[0]; b.HasMesh() || len(b.SLOs) != 2 {
+		t.Errorf("browse: mesh %v, %d SLOs", b.HasMesh(), len(b.SLOs))
+	}
+	files, err := Render(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mesh := string(fileByPath(t, files, pathMeshRules))
+	if strings.Contains(mesh, "cuj: browse") {
+		t.Error("browse still has mesh composite rules")
 	}
 }
 
 func TestCatalog(t *testing.T) {
 	c := string(fileByPath(t, fixtureFiles(t), pathCatalog))
 	for _, want := range []string{
-		"| fast | page | 13.44 | 1h | 5m | 2 % |",
-		"| slow | ticket | 2.8 | 24h | 2h | 10 % |",
+		"| fast | 13.44 | 1h | 5m | 2 % | page | ticket |",
+		"| slow | 2.8 | 24h | 2h | 10 % | ticket | ticket |",
+		"| fast | 6.72 | 1h | 5m | 1 % | page | ticket |",
+		"| slow | 1.4 | 24h | 2h | 5 % | ticket | ticket |",
+		"- medium: burn rate > 5.6 over 6h and 30m (ticket)",
 		"201 failed runs (at one run a minute)",
 		"403 bad 1m windows",
 		"(left out, plain TCP: redis-cart)",
-		"`CUJ checkout: mesh latency medium burn` (page, burn rate > 5.6)",
+		"(left out, entry covered by the prober: frontend)",
+		"`CUJ checkout: mesh latency medium burn` (ticket, burn rate > 2.8)",
+		"`CUJ checkout: prober latency medium burn` (page, burn rate > 2.8)",
 	} {
 		if !strings.Contains(c, want) {
 			t.Errorf("catalog lacks %q", want)

@@ -11,7 +11,7 @@ metadata:
     app.kubernetes.io/part-of: mamori
 spec:
   groups:
-    - name: slo-prober
+    - name: slo-prober-5m
       interval: 1m
       rules:
         # browse: share of scheduled prober runs that succeeded, over 5m.
@@ -26,18 +26,6 @@ spec:
             (sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="browse"}[5m])) > 0)
           labels:
             cuj: browse
-        # browse: share of scheduled prober runs that succeeded, over 1h.
-        - record: mamori:cuj_prober_availability:ratio_rate1h
-          expr: |
-            (
-              sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="browse",result="success"}[1h]))
-              or
-              0 * sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="browse"}[1h]))
-            )
-            /
-            (sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="browse"}[1h])) > 0)
-          labels:
-            cuj: browse
         # browse: share of successful home/product steps under 500 ms, over 5m.
         - record: mamori:cuj_prober_latency:ratio_rate5m
           expr: |
@@ -48,18 +36,6 @@ spec:
             )
             /
             (sum by (cuj) (rate(mamori_cuj_step_duration_seconds_count{source="scheduled",cuj="browse",step=~"home|product"}[5m])) > 0)
-          labels:
-            cuj: browse
-        # browse: share of successful home/product steps under 500 ms, over 1h.
-        - record: mamori:cuj_prober_latency:ratio_rate1h
-          expr: |
-            (
-              sum by (cuj) (rate(mamori_cuj_step_duration_seconds_bucket{source="scheduled",cuj="browse",step=~"home|product",le=~"0\\.50*"}[1h]))
-              or
-              0 * sum by (cuj) (rate(mamori_cuj_step_duration_seconds_count{source="scheduled",cuj="browse",step=~"home|product"}[1h]))
-            )
-            /
-            (sum by (cuj) (rate(mamori_cuj_step_duration_seconds_count{source="scheduled",cuj="browse",step=~"home|product"}[1h])) > 0)
           labels:
             cuj: browse
         # add-to-cart: share of scheduled prober runs that succeeded, over 5m.
@@ -74,18 +50,6 @@ spec:
             (sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="add-to-cart"}[5m])) > 0)
           labels:
             cuj: add-to-cart
-        # add-to-cart: share of scheduled prober runs that succeeded, over 1h.
-        - record: mamori:cuj_prober_availability:ratio_rate1h
-          expr: |
-            (
-              sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="add-to-cart",result="success"}[1h]))
-              or
-              0 * sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="add-to-cart"}[1h]))
-            )
-            /
-            (sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="add-to-cart"}[1h])) > 0)
-          labels:
-            cuj: add-to-cart
         # add-to-cart: share of successful add-to-cart steps under 500 ms, over 5m.
         - record: mamori:cuj_prober_latency:ratio_rate5m
           expr: |
@@ -96,18 +60,6 @@ spec:
             )
             /
             (sum by (cuj) (rate(mamori_cuj_step_duration_seconds_count{source="scheduled",cuj="add-to-cart",step="add-to-cart"}[5m])) > 0)
-          labels:
-            cuj: add-to-cart
-        # add-to-cart: share of successful add-to-cart steps under 500 ms, over 1h.
-        - record: mamori:cuj_prober_latency:ratio_rate1h
-          expr: |
-            (
-              sum by (cuj) (rate(mamori_cuj_step_duration_seconds_bucket{source="scheduled",cuj="add-to-cart",step="add-to-cart",le=~"0\\.50*"}[1h]))
-              or
-              0 * sum by (cuj) (rate(mamori_cuj_step_duration_seconds_count{source="scheduled",cuj="add-to-cart",step="add-to-cart"}[1h]))
-            )
-            /
-            (sum by (cuj) (rate(mamori_cuj_step_duration_seconds_count{source="scheduled",cuj="add-to-cart",step="add-to-cart"}[1h])) > 0)
           labels:
             cuj: add-to-cart
         # view-cart: share of scheduled prober runs that succeeded, over 5m.
@@ -122,18 +74,6 @@ spec:
             (sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="view-cart"}[5m])) > 0)
           labels:
             cuj: view-cart
-        # view-cart: share of scheduled prober runs that succeeded, over 1h.
-        - record: mamori:cuj_prober_availability:ratio_rate1h
-          expr: |
-            (
-              sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="view-cart",result="success"}[1h]))
-              or
-              0 * sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="view-cart"}[1h]))
-            )
-            /
-            (sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="view-cart"}[1h])) > 0)
-          labels:
-            cuj: view-cart
         # view-cart: share of successful view-cart steps under 500 ms, over 5m.
         - record: mamori:cuj_prober_latency:ratio_rate5m
           expr: |
@@ -144,18 +84,6 @@ spec:
             )
             /
             (sum by (cuj) (rate(mamori_cuj_step_duration_seconds_count{source="scheduled",cuj="view-cart",step="view-cart"}[5m])) > 0)
-          labels:
-            cuj: view-cart
-        # view-cart: share of successful view-cart steps under 500 ms, over 1h.
-        - record: mamori:cuj_prober_latency:ratio_rate1h
-          expr: |
-            (
-              sum by (cuj) (rate(mamori_cuj_step_duration_seconds_bucket{source="scheduled",cuj="view-cart",step="view-cart",le=~"0\\.50*"}[1h]))
-              or
-              0 * sum by (cuj) (rate(mamori_cuj_step_duration_seconds_count{source="scheduled",cuj="view-cart",step="view-cart"}[1h]))
-            )
-            /
-            (sum by (cuj) (rate(mamori_cuj_step_duration_seconds_count{source="scheduled",cuj="view-cart",step="view-cart"}[1h])) > 0)
           labels:
             cuj: view-cart
         # checkout: share of scheduled prober runs that succeeded, over 5m.
@@ -170,18 +98,6 @@ spec:
             (sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="checkout"}[5m])) > 0)
           labels:
             cuj: checkout
-        # checkout: share of scheduled prober runs that succeeded, over 1h.
-        - record: mamori:cuj_prober_availability:ratio_rate1h
-          expr: |
-            (
-              sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="checkout",result="success"}[1h]))
-              or
-              0 * sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="checkout"}[1h]))
-            )
-            /
-            (sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="checkout"}[1h])) > 0)
-          labels:
-            cuj: checkout
         # checkout: share of successful place-order steps under 1000 ms, over 5m.
         - record: mamori:cuj_prober_latency:ratio_rate5m
           expr: |
@@ -192,6 +108,93 @@ spec:
             )
             /
             (sum by (cuj) (rate(mamori_cuj_step_duration_seconds_count{source="scheduled",cuj="checkout",step="place-order"}[5m])) > 0)
+          labels:
+            cuj: checkout
+    - name: slo-prober-1h
+      interval: 5m
+      rules:
+        # browse: share of scheduled prober runs that succeeded, over 1h.
+        - record: mamori:cuj_prober_availability:ratio_rate1h
+          expr: |
+            (
+              sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="browse",result="success"}[1h]))
+              or
+              0 * sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="browse"}[1h]))
+            )
+            /
+            (sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="browse"}[1h])) > 0)
+          labels:
+            cuj: browse
+        # browse: share of successful home/product steps under 500 ms, over 1h.
+        - record: mamori:cuj_prober_latency:ratio_rate1h
+          expr: |
+            (
+              sum by (cuj) (rate(mamori_cuj_step_duration_seconds_bucket{source="scheduled",cuj="browse",step=~"home|product",le=~"0\\.50*"}[1h]))
+              or
+              0 * sum by (cuj) (rate(mamori_cuj_step_duration_seconds_count{source="scheduled",cuj="browse",step=~"home|product"}[1h]))
+            )
+            /
+            (sum by (cuj) (rate(mamori_cuj_step_duration_seconds_count{source="scheduled",cuj="browse",step=~"home|product"}[1h])) > 0)
+          labels:
+            cuj: browse
+        # add-to-cart: share of scheduled prober runs that succeeded, over 1h.
+        - record: mamori:cuj_prober_availability:ratio_rate1h
+          expr: |
+            (
+              sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="add-to-cart",result="success"}[1h]))
+              or
+              0 * sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="add-to-cart"}[1h]))
+            )
+            /
+            (sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="add-to-cart"}[1h])) > 0)
+          labels:
+            cuj: add-to-cart
+        # add-to-cart: share of successful add-to-cart steps under 500 ms, over 1h.
+        - record: mamori:cuj_prober_latency:ratio_rate1h
+          expr: |
+            (
+              sum by (cuj) (rate(mamori_cuj_step_duration_seconds_bucket{source="scheduled",cuj="add-to-cart",step="add-to-cart",le=~"0\\.50*"}[1h]))
+              or
+              0 * sum by (cuj) (rate(mamori_cuj_step_duration_seconds_count{source="scheduled",cuj="add-to-cart",step="add-to-cart"}[1h]))
+            )
+            /
+            (sum by (cuj) (rate(mamori_cuj_step_duration_seconds_count{source="scheduled",cuj="add-to-cart",step="add-to-cart"}[1h])) > 0)
+          labels:
+            cuj: add-to-cart
+        # view-cart: share of scheduled prober runs that succeeded, over 1h.
+        - record: mamori:cuj_prober_availability:ratio_rate1h
+          expr: |
+            (
+              sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="view-cart",result="success"}[1h]))
+              or
+              0 * sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="view-cart"}[1h]))
+            )
+            /
+            (sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="view-cart"}[1h])) > 0)
+          labels:
+            cuj: view-cart
+        # view-cart: share of successful view-cart steps under 500 ms, over 1h.
+        - record: mamori:cuj_prober_latency:ratio_rate1h
+          expr: |
+            (
+              sum by (cuj) (rate(mamori_cuj_step_duration_seconds_bucket{source="scheduled",cuj="view-cart",step="view-cart",le=~"0\\.50*"}[1h]))
+              or
+              0 * sum by (cuj) (rate(mamori_cuj_step_duration_seconds_count{source="scheduled",cuj="view-cart",step="view-cart"}[1h]))
+            )
+            /
+            (sum by (cuj) (rate(mamori_cuj_step_duration_seconds_count{source="scheduled",cuj="view-cart",step="view-cart"}[1h])) > 0)
+          labels:
+            cuj: view-cart
+        # checkout: share of scheduled prober runs that succeeded, over 1h.
+        - record: mamori:cuj_prober_availability:ratio_rate1h
+          expr: |
+            (
+              sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="checkout",result="success"}[1h]))
+              or
+              0 * sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="checkout"}[1h]))
+            )
+            /
+            (sum by (cuj) (rate(mamori_cuj_probe_total{source="scheduled",cuj="checkout"}[1h])) > 0)
           labels:
             cuj: checkout
         # checkout: share of successful place-order steps under 1000 ms, over 1h.

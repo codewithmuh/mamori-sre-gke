@@ -9,22 +9,37 @@ Every SLO uses a rolling 28d window. Budgets are the share of events (or minutes
 
 ## Alert tiers
 
-Each tier pages or opens a ticket when the burn rate is above the threshold over both windows.
+Each tier fires when the burn rate is above the threshold over both windows. Only the signals in `alerting.pageSignals` (prober) page; every other alert opens a ticket.
 
-| Tier | Severity | Burn rate above | Long window | Short window | Budget spent in the long window | Signals |
+Availability SLOs:
+
+| Tier | Burn rate above | Long window | Short window | Budget spent in the long window | prober | mesh |
 |---|---|---|---|---|---|---|
-| fast | page | 13.44 | 1h | 5m | 2 % | prober, mesh, synthetics |
-| medium | page | 5.6 | 6h | 30m | 5 % | prober, mesh, synthetics |
-| slow | ticket | 2.8 | 24h | 2h | 10 % | prober, mesh, synthetics |
+| fast | 13.44 | 1h | 5m | 2 % | page | ticket |
+| medium | 5.6 | 6h | 30m | 5 % | page | ticket |
+| slow | 2.8 | 24h | 2h | 10 % | ticket | ticket |
 
-Plus one `CUJ <id>: prober no data` policy per journey (page) after 10m without prober data.
-Every Cloud Monitoring policy carries the user labels `cuj`, `signal`, `sli`, `alert` (`burn-rate` or `no-data`), `burn` (tier name, or `none`), `severity` (`page` or `ticket`) and `generator=slo-gen`.
+Latency SLOs:
+
+| Tier | Burn rate above | Long window | Short window | Budget spent in the long window | prober | mesh |
+|---|---|---|---|---|---|---|
+| fast | 6.72 | 1h | 5m | 1 % | page | ticket |
+| medium | 2.8 | 6h | 30m | 2.5 % | page | ticket |
+| slow | 1.4 | 24h | 2h | 5 % | ticket | ticket |
+
+Datadog synthetics (M3 window) get these availability tiers, with short windows of at least 15m:
+
+- medium: burn rate > 5.6 over 6h and 30m (ticket)
+- slow: burn rate > 2.8 over 24h and 2h (ticket)
+
+No-data policies: `CUJ prober: no data` (page) and `CUJ mesh: no data` (ticket), after 10m without data.
+Every Cloud Monitoring policy carries the user labels `cuj` (`all` on no-data policies), `signal`, `sli`, `alert` (`burn-rate` or `no-data`), `burn` (tier name, or `none`), `severity` (`page` or `ticket`) and `generator=slo-gen`. Every generated Cloud Monitoring resource exists only while the Terraform variable `slo_enabled` is true.
 
 ## browse
 
 - Runbook: [docs/runbooks/cuj-browse.md](../../docs/runbooks/cuj-browse.md)
-- Critical services (CUJ map): cartservice, currencyservice, productcatalogservice, redis-cart
-- Mesh composite over: cartservice, currencyservice, frontend, productcatalogservice (left out, plain TCP: redis-cart)
+- Critical services (CUJ map): cartservice, currencyservice, frontend, productcatalogservice, redis-cart
+- Mesh composite over: cartservice, currencyservice, productcatalogservice (left out, entry covered by the prober: frontend) (left out, plain TCP: redis-cart)
 - Prober latency steps: home, product
 - Cloud Monitoring service: `mamori-cuj-browse`
 
@@ -42,22 +57,21 @@ Alert policies (Cloud Monitoring display names):
 - `CUJ browse: prober availability fast burn` (page, burn rate > 13.44)
 - `CUJ browse: prober availability medium burn` (page, burn rate > 5.6)
 - `CUJ browse: prober availability slow burn` (ticket, burn rate > 2.8)
-- `CUJ browse: prober latency fast burn` (page, burn rate > 13.44)
-- `CUJ browse: prober latency medium burn` (page, burn rate > 5.6)
-- `CUJ browse: prober latency slow burn` (ticket, burn rate > 2.8)
-- `CUJ browse: mesh availability fast burn` (page, burn rate > 13.44)
-- `CUJ browse: mesh availability medium burn` (page, burn rate > 5.6)
+- `CUJ browse: prober latency fast burn` (page, burn rate > 6.72)
+- `CUJ browse: prober latency medium burn` (page, burn rate > 2.8)
+- `CUJ browse: prober latency slow burn` (ticket, burn rate > 1.4)
+- `CUJ browse: mesh availability fast burn` (ticket, burn rate > 13.44)
+- `CUJ browse: mesh availability medium burn` (ticket, burn rate > 5.6)
 - `CUJ browse: mesh availability slow burn` (ticket, burn rate > 2.8)
-- `CUJ browse: mesh latency fast burn` (page, burn rate > 13.44)
-- `CUJ browse: mesh latency medium burn` (page, burn rate > 5.6)
-- `CUJ browse: mesh latency slow burn` (ticket, burn rate > 2.8)
-- `CUJ browse: prober no data` (page)
+- `CUJ browse: mesh latency fast burn` (ticket, burn rate > 6.72)
+- `CUJ browse: mesh latency medium burn` (ticket, burn rate > 2.8)
+- `CUJ browse: mesh latency slow burn` (ticket, burn rate > 1.4)
 
 ## add-to-cart
 
 - Runbook: [docs/runbooks/cuj-add-to-cart.md](../../docs/runbooks/cuj-add-to-cart.md)
-- Critical services (CUJ map): cartservice, currencyservice, productcatalogservice, redis-cart
-- Mesh composite over: cartservice, currencyservice, frontend, productcatalogservice (left out, plain TCP: redis-cart)
+- Critical services (CUJ map): cartservice, currencyservice, frontend, productcatalogservice, redis-cart
+- Mesh composite over: cartservice, currencyservice, productcatalogservice (left out, entry covered by the prober: frontend) (left out, plain TCP: redis-cart)
 - Prober latency steps: add-to-cart
 - Cloud Monitoring service: `mamori-cuj-add-to-cart`
 
@@ -75,22 +89,21 @@ Alert policies (Cloud Monitoring display names):
 - `CUJ add-to-cart: prober availability fast burn` (page, burn rate > 13.44)
 - `CUJ add-to-cart: prober availability medium burn` (page, burn rate > 5.6)
 - `CUJ add-to-cart: prober availability slow burn` (ticket, burn rate > 2.8)
-- `CUJ add-to-cart: prober latency fast burn` (page, burn rate > 13.44)
-- `CUJ add-to-cart: prober latency medium burn` (page, burn rate > 5.6)
-- `CUJ add-to-cart: prober latency slow burn` (ticket, burn rate > 2.8)
-- `CUJ add-to-cart: mesh availability fast burn` (page, burn rate > 13.44)
-- `CUJ add-to-cart: mesh availability medium burn` (page, burn rate > 5.6)
+- `CUJ add-to-cart: prober latency fast burn` (page, burn rate > 6.72)
+- `CUJ add-to-cart: prober latency medium burn` (page, burn rate > 2.8)
+- `CUJ add-to-cart: prober latency slow burn` (ticket, burn rate > 1.4)
+- `CUJ add-to-cart: mesh availability fast burn` (ticket, burn rate > 13.44)
+- `CUJ add-to-cart: mesh availability medium burn` (ticket, burn rate > 5.6)
 - `CUJ add-to-cart: mesh availability slow burn` (ticket, burn rate > 2.8)
-- `CUJ add-to-cart: mesh latency fast burn` (page, burn rate > 13.44)
-- `CUJ add-to-cart: mesh latency medium burn` (page, burn rate > 5.6)
-- `CUJ add-to-cart: mesh latency slow burn` (ticket, burn rate > 2.8)
-- `CUJ add-to-cart: prober no data` (page)
+- `CUJ add-to-cart: mesh latency fast burn` (ticket, burn rate > 6.72)
+- `CUJ add-to-cart: mesh latency medium burn` (ticket, burn rate > 2.8)
+- `CUJ add-to-cart: mesh latency slow burn` (ticket, burn rate > 1.4)
 
 ## view-cart
 
 - Runbook: [docs/runbooks/cuj-view-cart.md](../../docs/runbooks/cuj-view-cart.md)
-- Critical services (CUJ map): cartservice, currencyservice, productcatalogservice, redis-cart, shippingservice
-- Mesh composite over: cartservice, currencyservice, frontend, productcatalogservice, shippingservice (left out, plain TCP: redis-cart)
+- Critical services (CUJ map): cartservice, currencyservice, frontend, productcatalogservice, redis-cart, shippingservice
+- Mesh composite over: cartservice, currencyservice, productcatalogservice, shippingservice (left out, entry covered by the prober: frontend) (left out, plain TCP: redis-cart)
 - Prober latency steps: view-cart
 - Cloud Monitoring service: `mamori-cuj-view-cart`
 
@@ -108,22 +121,21 @@ Alert policies (Cloud Monitoring display names):
 - `CUJ view-cart: prober availability fast burn` (page, burn rate > 13.44)
 - `CUJ view-cart: prober availability medium burn` (page, burn rate > 5.6)
 - `CUJ view-cart: prober availability slow burn` (ticket, burn rate > 2.8)
-- `CUJ view-cart: prober latency fast burn` (page, burn rate > 13.44)
-- `CUJ view-cart: prober latency medium burn` (page, burn rate > 5.6)
-- `CUJ view-cart: prober latency slow burn` (ticket, burn rate > 2.8)
-- `CUJ view-cart: mesh availability fast burn` (page, burn rate > 13.44)
-- `CUJ view-cart: mesh availability medium burn` (page, burn rate > 5.6)
+- `CUJ view-cart: prober latency fast burn` (page, burn rate > 6.72)
+- `CUJ view-cart: prober latency medium burn` (page, burn rate > 2.8)
+- `CUJ view-cart: prober latency slow burn` (ticket, burn rate > 1.4)
+- `CUJ view-cart: mesh availability fast burn` (ticket, burn rate > 13.44)
+- `CUJ view-cart: mesh availability medium burn` (ticket, burn rate > 5.6)
 - `CUJ view-cart: mesh availability slow burn` (ticket, burn rate > 2.8)
-- `CUJ view-cart: mesh latency fast burn` (page, burn rate > 13.44)
-- `CUJ view-cart: mesh latency medium burn` (page, burn rate > 5.6)
-- `CUJ view-cart: mesh latency slow burn` (ticket, burn rate > 2.8)
-- `CUJ view-cart: prober no data` (page)
+- `CUJ view-cart: mesh latency fast burn` (ticket, burn rate > 6.72)
+- `CUJ view-cart: mesh latency medium burn` (ticket, burn rate > 2.8)
+- `CUJ view-cart: mesh latency slow burn` (ticket, burn rate > 1.4)
 
 ## checkout
 
 - Runbook: [docs/runbooks/cuj-checkout.md](../../docs/runbooks/cuj-checkout.md)
-- Critical services (CUJ map): cartservice, checkoutservice, currencyservice, paymentservice, productcatalogservice, redis-cart, shippingservice
-- Mesh composite over: cartservice, checkoutservice, currencyservice, frontend, paymentservice, productcatalogservice, shippingservice (left out, plain TCP: redis-cart)
+- Critical services (CUJ map): cartservice, checkoutservice, currencyservice, frontend, paymentservice, productcatalogservice, redis-cart, shippingservice
+- Mesh composite over: cartservice, checkoutservice, currencyservice, paymentservice, productcatalogservice, shippingservice (left out, entry covered by the prober: frontend) (left out, plain TCP: redis-cart)
 - Prober latency steps: place-order
 - Cloud Monitoring service: `mamori-cuj-checkout`
 
@@ -141,14 +153,13 @@ Alert policies (Cloud Monitoring display names):
 - `CUJ checkout: prober availability fast burn` (page, burn rate > 13.44)
 - `CUJ checkout: prober availability medium burn` (page, burn rate > 5.6)
 - `CUJ checkout: prober availability slow burn` (ticket, burn rate > 2.8)
-- `CUJ checkout: prober latency fast burn` (page, burn rate > 13.44)
-- `CUJ checkout: prober latency medium burn` (page, burn rate > 5.6)
-- `CUJ checkout: prober latency slow burn` (ticket, burn rate > 2.8)
-- `CUJ checkout: mesh availability fast burn` (page, burn rate > 13.44)
-- `CUJ checkout: mesh availability medium burn` (page, burn rate > 5.6)
+- `CUJ checkout: prober latency fast burn` (page, burn rate > 6.72)
+- `CUJ checkout: prober latency medium burn` (page, burn rate > 2.8)
+- `CUJ checkout: prober latency slow burn` (ticket, burn rate > 1.4)
+- `CUJ checkout: mesh availability fast burn` (ticket, burn rate > 13.44)
+- `CUJ checkout: mesh availability medium burn` (ticket, burn rate > 5.6)
 - `CUJ checkout: mesh availability slow burn` (ticket, burn rate > 2.8)
-- `CUJ checkout: mesh latency fast burn` (page, burn rate > 13.44)
-- `CUJ checkout: mesh latency medium burn` (page, burn rate > 5.6)
-- `CUJ checkout: mesh latency slow burn` (ticket, burn rate > 2.8)
-- `CUJ checkout: prober no data` (page)
+- `CUJ checkout: mesh latency fast burn` (ticket, burn rate > 6.72)
+- `CUJ checkout: mesh latency medium burn` (ticket, burn rate > 2.8)
+- `CUJ checkout: mesh latency slow burn` (ticket, burn rate > 1.4)
 
