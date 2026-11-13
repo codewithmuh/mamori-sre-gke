@@ -1,0 +1,20 @@
+# Copy to terraform.tfvars (gitignored) or export TF_VAR_* instead; `make datadog-plan` does the
+# latter. The Datadog keys are never set here: export DD_API_KEY and DD_APP_KEY in your shell.
+project_id = "mamori-lab-123456"
+
+# Datadog's delegate service account for your organisation; `make datadog-delegate` prints it.
+# (placeholder below; the real one belongs to a Datadog-owned project)
+datadog_delegate_email = "datadog-delegate@example-project.iam.gserviceaccount.com"
+
+# Defaults, shown for reference:
+# datadog_site                    = "ap1.datadoghq.com"
+# frontend_hostname               = "mamori.codewithmuh.com"
+# notification_handles            = []          # e.g. ["@slack-mamori-alerts"]
+# synthetics_locations            = ["aws:ap-northeast-1"]
+# synthetics_status               = "live"
+# synthetics_tick_every           = 300
+# synthetics_retry_count          = 1
+# synthetics_min_failure_duration = 0
+# synthetics_max_step_ms          = 2000
+# expected_ready_nodes            = 3
+# gcp_disabled_metric_namespaces  = ["gke"]

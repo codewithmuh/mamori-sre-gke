@@ -1,0 +1,34 @@
+# The Datadog Agent for the 14-day window (docs/datadog-window.md). Deliberately outside
+# deploy/apps/: the root app never sees it, so it exists in the cluster only between
+# `make datadog-on` (creates the Secrets, applies this file) and `make datadog-off` (deletes it).
+# Once applied it syncs itself like the other apps, from main.
+#
+# Requests (3 nodes): Agent DaemonSet 3 x 40m / 192Mi, Cluster Agent 20m / 96Mi, in all 140m CPU
+# and 672Mi, borrowed from the ~550m headroom for two weeks.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: datadog
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    - repoURL: https://helm.datadoghq.com
+      chart: datadog
+      targetRevision: 3.264.0
+      helm:
+        releaseName: datadog
+        valueFiles:
+          - $values/deploy/optional/datadog/values.yaml
+    - repoURL: https://github.com/codewithmuh/mamori-sre-gke.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: datadog
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
