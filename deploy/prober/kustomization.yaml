@@ -1,0 +1,14 @@
+# CUJ prober (tools/prober): runs the four journeys through the Istio ingress gateway every minute
+# and exports mamori_cuj_* metrics for the journey SLOs. Synced by deploy/apps/prober.yaml.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: prober
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - deployment.yaml
+  - service.yaml
+  - podmonitoring.yaml
+  - networkpolicy.yaml

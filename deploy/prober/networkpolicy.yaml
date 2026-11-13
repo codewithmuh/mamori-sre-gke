@@ -1,0 +1,53 @@
+# The prober talks to DNS and the Istio ingress gateway, and only Managed Prometheus calls it.
+# Enforced by GKE Dataplane V2. Kubelet probes and `kubectl port-forward` are not affected
+# (Dataplane V2 always allows node-local health checks; port-forward enters the pod directly).
+#
+# Changing PROBER_TARGET_URL to the public https://mamori.codewithmuh.com needs an egress rule for
+# TCP 443 to the load balancer's IP. An in-cluster caller of POST /v1/run needs an ingress rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: prober
+  labels:
+    app.kubernetes.io/name: prober
+    app.kubernetes.io/part-of: mamori
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: prober
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Managed collection runs its collectors as ordinary pods in gmp-system.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gmp-system
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # The gateway pods serve plain HTTP on 80 (deploy/istio/gateway-values.yaml).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-ingress
+          podSelector:
+            matchLabels:
+              istio: ingressgateway
+      ports:
+        - protocol: TCP
+          port: 80

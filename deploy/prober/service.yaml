@@ -1,0 +1,18 @@
+# prober.prober.svc:8080: the on-demand API (POST /v1/run), health and metrics. Reach it with
+# `make prober-run` (a port-forward); nothing else in the cluster calls it yet.
+apiVersion: v1
+kind: Service
+metadata:
+  name: prober
+  labels:
+    app.kubernetes.io/name: prober
+    app.kubernetes.io/part-of: mamori
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: prober
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP

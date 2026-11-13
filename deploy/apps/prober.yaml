@@ -1,0 +1,24 @@
+# Wave 5: the CUJ prober (deploy/prober), after the shop and the edge. It creates namespace
+# prober itself (the Namespace object is part of deploy/prober).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: prober
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/codewithmuh/mamori-sre-gke.git
+    targetRevision: main
+    path: deploy/prober
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: prober
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

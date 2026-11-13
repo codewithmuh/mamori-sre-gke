@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: prober
+  labels:
+    app.kubernetes.io/part-of: mamori
+    # No Envoy sidecar. The prober reaches the ingress gateway the way traffic from outside the
+    # mesh does (plain HTTP, no mesh retries), and keeps probing when istiod is down.
+    istio-injection: disabled
+    # The pod meets the "restricted" Pod Security Standard; refuse anything that doesn't.
+    pod-security.kubernetes.io/enforce: restricted
