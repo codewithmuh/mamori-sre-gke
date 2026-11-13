@@ -1,0 +1,90 @@
+{
+  "exitCode": 2,
+  "changes": [
+    {
+      "address": "google_compute_security_policy.frontend",
+      "actions": [
+        "update"
+      ]
+    },
+    {
+      "address": "google_compute_global_address.frontend",
+      "actions": [
+        "create"
+      ]
+    }
+  ],
+  "drift": [
+    {
+      "address": "google_container_cluster.mamori",
+      "actions": [
+        "update"
+      ],
+      "attributes": [
+        "master_version",
+        "node_pool",
+        "node_version"
+      ],
+      "relevantAttributes": [
+        "master_version"
+      ]
+    },
+    {
+      "address": "google_container_node_pool.spot",
+      "actions": [
+        "update"
+      ],
+      "attributes": [
+        "node_count",
+        "version"
+      ],
+      "relevantAttributes": []
+    },
+    {
+      "address": "google_compute_security_policy.frontend",
+      "actions": [
+        "update"
+      ],
+      "attributes": [
+        "rule"
+      ],
+      "relevantAttributes": [
+        "rule"
+      ]
+    },
+    {
+      "address": "google_compute_firewall.webhooks",
+      "actions": [
+        "update"
+      ],
+      "attributes": [
+        "description"
+      ],
+      "relevantAttributes": []
+    },
+    {
+      "address": "google_monitoring_notification_channel.email",
+      "actions": [
+        "update"
+      ],
+      "attributes": [
+        "labels",
+        "user_labels"
+      ],
+      "relevantAttributes": []
+    },
+    {
+      "address": "google_compute_global_address.frontend",
+      "actions": [
+        "delete"
+      ],
+      "attributes": [
+        "address",
+        "name"
+      ],
+      "relevantAttributes": [
+        "address"
+      ]
+    }
+  ]
+}

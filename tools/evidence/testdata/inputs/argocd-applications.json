@@ -1,0 +1,12 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {"metadata": {"name": "root", "namespace": "argocd"}, "spec": {"project": "default", "source": {"targetRevision": "main"}},
+     "status": {"sync": {"status": "Synced", "revision": "0123456789abcdef0123456789abcdef01234567"}, "health": {"status": "Healthy"}, "operationState": {"phase": "Succeeded"}, "reconciledAt": "2026-11-16T00:16:40Z"}},
+    {"metadata": {"name": "online-boutique", "namespace": "argocd"}, "spec": {"project": "default", "source": {"targetRevision": "main"}},
+     "status": {"sync": {"status": "Synced", "revision": "0123456789abcdef0123456789abcdef01234567"}, "health": {"status": "Healthy"}, "operationState": {"phase": "Succeeded"}, "reconciledAt": "2026-11-16T00:16:40Z"}},
+    {"metadata": {"name": "istiod", "namespace": "argocd"}, "spec": {"project": "default", "sources": [{"targetRevision": "1.31.1"}, {"targetRevision": "main"}]},
+     "status": {"sync": {"status": "OutOfSync", "revision": "1.31.1"}, "health": {"status": "Healthy"}, "operationState": {"phase": "Failed"}, "reconciledAt": "2026-11-16T00:16:41Z"}}
+  ]
+}

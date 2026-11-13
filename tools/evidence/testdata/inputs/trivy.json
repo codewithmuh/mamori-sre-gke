@@ -1,0 +1,40 @@
+{
+  "SchemaVersion": 2,
+  "Trivy": {"Version": "0.76.1"},
+  "ReportID": "00000000-0000-0000-0000-000000000000",
+  "CreatedAt": "2026-11-16T00:19:12.217454586Z",
+  "ArtifactName": ".",
+  "ArtifactType": "filesystem",
+  "Results": [
+    {
+      "Target": "tools/spend-guard/go.mod",
+      "Class": "lang-pkgs",
+      "Type": "gomod",
+      "Vulnerabilities": [
+        {"VulnerabilityID": "TEST-0001", "PkgName": "golang.org/x/example", "InstalledVersion": "v0.1.0", "FixedVersion": "0.1.1", "Status": "fixed", "Severity": "HIGH", "Title": "Test entry: fixable high vulnerability"},
+        {"VulnerabilityID": "TEST-0002", "PkgName": "golang.org/x/example", "InstalledVersion": "v0.1.0", "Status": "affected", "Severity": "CRITICAL", "Title": "Test entry: critical without a fix"},
+        {"VulnerabilityID": "TEST-0003", "PkgName": "golang.org/x/other", "InstalledVersion": "v0.2.0", "FixedVersion": "0.2.1", "Status": "fixed", "Severity": "UNKNOWN", "Title": "Test entry: unknown severity"}
+      ]
+    },
+    {
+      "Target": ".devcontainer/Dockerfile",
+      "Class": "config",
+      "Type": "dockerfile",
+      "MisconfSummary": {"Successes": 26, "Failures": 1},
+      "Misconfigurations": [
+        {"Type": "Dockerfile Security Check", "ID": "DS-0026", "Title": "No HEALTHCHECK defined", "Severity": "LOW", "Status": "FAIL"}
+      ]
+    },
+    {
+      "Target": "infra/envs/lab/network.tf",
+      "Class": "config",
+      "Type": "terraform",
+      "MisconfSummary": {"Successes": 0, "Failures": 2},
+      "Misconfigurations": [
+        {"Type": "Terraform Security Check", "ID": "GCP-0029", "Title": "VPC flow logs should be enabled for all subnetworks", "Severity": "LOW", "Status": "FAIL"},
+        {"Type": "Terraform Security Check", "ID": "GCP-0076", "Title": "Google Compute Subnetwork Logging Disabled", "Severity": "MEDIUM", "Status": "FAIL"},
+        {"Type": "Terraform Security Check", "ID": "GCP-0074", "Title": "Passed check, kept only in the summary", "Severity": "HIGH", "Status": "PASS"}
+      ]
+    }
+  ]
+}

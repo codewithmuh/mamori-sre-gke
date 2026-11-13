@@ -1,0 +1,16 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {"apiVersion": "constraints.gatekeeper.sh/v1beta1", "kind": "K8sRequiredProbes", "metadata": {"name": "pr-02-probes", "labels": {"app.kubernetes.io/part-of": "mamori"}, "annotations": {"mamori.dev/control-id": "PR-02", "mamori.dev/checklist-item": "test entry"}},
+     "spec": {"enforcementAction": "dryrun"},
+     "status": {"auditTimestamp": "2026-11-16T00:15:00Z", "totalViolations": 2,
+                "violations": [
+                  {"enforcementAction": "dryrun", "group": "apps", "version": "v1", "kind": "Deployment", "namespace": "boutique", "name": "loadgenerator", "message": "container <main> has no readinessProbe | add one"},
+                  {"enforcementAction": "dryrun", "group": "apps", "version": "v1", "kind": "Deployment", "namespace": "boutique", "name": "redis-cart", "message": "container <redis>\nhas no livenessProbe"}
+                ]}},
+    {"apiVersion": "constraints.gatekeeper.sh/v1beta1", "kind": "K8sNoLoadBalancer", "metadata": {"name": "no-loadbalancer"},
+     "spec": {},
+     "status": {"auditTimestamp": "2026-11-16T00:15:00Z", "totalViolations": 0}}
+  ]
+}

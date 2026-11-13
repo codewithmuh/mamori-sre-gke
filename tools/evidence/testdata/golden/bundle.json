@@ -1,0 +1,656 @@
+{
+  "schemaVersion": "mamori.evidence/v1",
+  "generatedAt": "2026-11-16T00:20:00Z",
+  "source": {
+    "repository": "codewithmuh/mamori-sre-gke",
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "ref": "refs/heads/main",
+    "workflow": "evidence",
+    "event": "schedule",
+    "runId": "9100000005",
+    "runAttempt": "1",
+    "runUrl": "https://github.com/codewithmuh/mamori-sre-gke/actions/runs/9100000005"
+  },
+  "overview": {
+    "sections": 10,
+    "collected": 10,
+    "notCollected": 0,
+    "attention": [
+      "ci",
+      "github",
+      "trivy",
+      "terraformDrift",
+      "gatekeeper",
+      "argocd"
+    ],
+    "missingExpected": []
+  },
+  "sections": {
+    "ci": {
+      "title": "CI on main",
+      "status": "collected",
+      "expected": true,
+      "attention": true,
+      "headline": "4 workflows on main, 1 not passing (terraform-apply: failure)",
+      "inputs": [
+        {
+          "file": "ci-runs.json",
+          "status": "collected",
+          "sha256": "f08c4459e976d4c71c47c5b3ebeb758ab87f5d82e94b92e79730786ed27424cb",
+          "bytes": 2977
+        }
+      ],
+      "data": {
+        "branch": "main",
+        "workflows": [
+          {
+            "name": "ci",
+            "path": ".github/workflows/ci.yml",
+            "event": "push",
+            "conclusion": "success",
+            "commit": "0123456789ab",
+            "runNumber": 42,
+            "finishedAt": "2026-11-15T21:09:31Z",
+            "url": "https://github.com/codewithmuh/mamori-sre-gke/actions/runs/9100000004"
+          },
+          {
+            "name": "evidence",
+            "path": ".github/workflows/evidence.yml",
+            "event": "schedule",
+            "conclusion": "success",
+            "commit": "333333333333",
+            "runNumber": 2,
+            "finishedAt": "2026-11-09T00:25:00Z",
+            "url": "https://github.com/codewithmuh/mamori-sre-gke/actions/runs/9100000000"
+          },
+          {
+            "name": "release",
+            "path": ".github/workflows/release.yml",
+            "event": "push",
+            "conclusion": "skipped",
+            "commit": "0123456789ab",
+            "runNumber": 12,
+            "finishedAt": "2026-11-15T21:00:20Z",
+            "url": "https://github.com/codewithmuh/mamori-sre-gke/actions/runs/9000000009"
+          },
+          {
+            "name": "terraform-apply",
+            "path": ".github/workflows/terraform-apply.yml",
+            "event": "workflow_dispatch",
+            "conclusion": "failure",
+            "commit": "222222222222",
+            "runNumber": 7,
+            "finishedAt": "2026-11-14T09:20:00Z",
+            "url": "https://github.com/codewithmuh/mamori-sre-gke/actions/runs/9100000001"
+          }
+        ],
+        "failing": 1
+      }
+    },
+    "github": {
+      "title": "GitHub settings (environment, rules, Actions)",
+      "status": "collected",
+      "expected": true,
+      "attention": true,
+      "headline": "6 of 9 required controls in place; missing: release tags can't be moved or deleted; 3 checks not collected (no token with Administration read)",
+      "inputs": [
+        {
+          "file": "github-settings.json",
+          "status": "collected",
+          "sha256": "75ae25f059428b1d623f7d53be65d4943607ab40ff66fedd4c1f91c40128f751",
+          "bytes": 3134
+        }
+      ],
+      "data": {
+        "checks": [
+          {
+            "id": "lab-environment",
+            "control": "environment lab exists",
+            "required": true,
+            "status": "ok",
+            "detail": "present"
+          },
+          {
+            "id": "lab-reviewers",
+            "control": "deployments to lab wait for a reviewer",
+            "required": true,
+            "status": "ok",
+            "detail": "1 reviewer"
+          },
+          {
+            "id": "lab-branches",
+            "control": "only main can deploy to lab",
+            "required": true,
+            "status": "ok",
+            "detail": "branch main only"
+          },
+          {
+            "id": "main-pull-request",
+            "control": "changes reach main only through a pull request",
+            "required": true,
+            "status": "ok",
+            "detail": "ruleset rule pull_request"
+          },
+          {
+            "id": "main-ci-result",
+            "control": "the CI result check must pass before merging",
+            "required": true,
+            "status": "ok",
+            "detail": "ruleset rule required_status_checks"
+          },
+          {
+            "id": "main-history",
+            "control": "main can't be force-pushed or deleted",
+            "required": true,
+            "status": "ok",
+            "detail": "ruleset rules non_fast_forward and deletion"
+          },
+          {
+            "id": "release-tags",
+            "control": "release tags can't be moved or deleted",
+            "required": true,
+            "status": "missing",
+            "detail": "no active tag ruleset that blocks deleting and moving tags"
+          },
+          {
+            "id": "workflow-token-read",
+            "control": "workflows get a read-only GITHUB_TOKEN by default",
+            "required": true,
+            "status": "not collected",
+            "detail": "no token with Administration read (secret EVIDENCE_ADMIN_READ_TOKEN)"
+          },
+          {
+            "id": "workflow-no-approvals",
+            "control": "workflows can't approve pull requests",
+            "required": true,
+            "status": "not collected",
+            "detail": "no token with Administration read (secret EVIDENCE_ADMIN_READ_TOKEN)"
+          },
+          {
+            "id": "actions-sha-pinning",
+            "control": "GitHub enforces actions pinned to a full commit SHA",
+            "required": false,
+            "status": "not collected",
+            "detail": "no token with Administration read (secret EVIDENCE_ADMIN_READ_TOKEN)"
+          }
+        ],
+        "missing": 1,
+        "notCollected": 3
+      }
+    },
+    "trivy": {
+      "title": "Vulnerabilities and misconfigurations (Trivy)",
+      "status": "collected",
+      "expected": true,
+      "attention": true,
+      "headline": "3 vulnerabilities, 3 misconfigurations, 0 secrets; 1 finding would fail CI's scan",
+      "inputs": [
+        {
+          "file": "trivy.json",
+          "status": "collected",
+          "sha256": "867673cde8f027e9c10b97a0075949d7a142af48f416b974b2c96e6a0cbc62d2",
+          "bytes": 2033
+        }
+      ],
+      "data": {
+        "trivyVersion": "0.76.1",
+        "scannedAt": "2026-11-16T00:19:12.217454586Z",
+        "vulnerabilities": {
+          "critical": 1,
+          "high": 1,
+          "medium": 0,
+          "low": 0,
+          "unknown": 1
+        },
+        "misconfigurations": {
+          "critical": 0,
+          "high": 0,
+          "medium": 1,
+          "low": 2,
+          "unknown": 0
+        },
+        "secrets": {
+          "critical": 0,
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 0
+        },
+        "ciGateFindings": 1,
+        "findings": [
+          {
+            "class": "vulnerability",
+            "id": "TEST-0002",
+            "severity": "CRITICAL",
+            "target": "tools/spend-guard/go.mod",
+            "package": "golang.org/x/example",
+            "installedVersion": "v0.1.0",
+            "title": "Test entry: critical without a fix"
+          },
+          {
+            "class": "vulnerability",
+            "id": "TEST-0001",
+            "severity": "HIGH",
+            "target": "tools/spend-guard/go.mod",
+            "package": "golang.org/x/example",
+            "installedVersion": "v0.1.0",
+            "fixedVersion": "0.1.1",
+            "title": "Test entry: fixable high vulnerability"
+          }
+        ],
+        "findingsTruncated": false
+      }
+    },
+    "gitleaks": {
+      "title": "Secrets in Git history (gitleaks)",
+      "status": "collected",
+      "expected": true,
+      "attention": false,
+      "headline": "no secrets found in the Git history",
+      "inputs": [
+        {
+          "file": "gitleaks.json",
+          "status": "collected",
+          "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+          "bytes": 3
+        }
+      ],
+      "data": {
+        "findings": 0,
+        "byRule": {},
+        "items": [],
+        "itemsTruncated": false
+      }
+    },
+    "sbom": {
+      "title": "Software bill of materials (syft)",
+      "status": "collected",
+      "expected": true,
+      "attention": false,
+      "headline": "SPDX-2.3, 5 packages",
+      "inputs": [
+        {
+          "file": "sbom.spdx.json",
+          "status": "collected",
+          "sha256": "b17c52cc9db0ab56b059f6aa12ce9b68f2346f229fbcd614ed83c11c291bef52",
+          "bytes": 5174
+        }
+      ],
+      "data": {
+        "format": "SPDX-2.3",
+        "documentName": "codewithmuh/mamori-sre-gke",
+        "created": "2026-11-16T00:19:40Z",
+        "creators": [
+          "Organization: Anchore, Inc",
+          "Tool: syft-1.55.0"
+        ],
+        "packages": 5,
+        "byType": {
+          "github": 2,
+          "golang": 2,
+          "other": 1
+        }
+      }
+    },
+    "terraformDrift": {
+      "title": "Terraform drift (infra/envs/lab)",
+      "status": "collected",
+      "expected": true,
+      "attention": true,
+      "headline": "2 changes to review: 1 create, 1 update, 0 replace, 0 delete; 6 objects changed outside Terraform: 2 relevant, 2 expected (GKE upgrades, spend guard), 2 not used by this plan",
+      "inputs": [
+        {
+          "file": "terraform-drift.json",
+          "status": "collected",
+          "sha256": "2dd8b898f224e59dfcf7f517425bcbdb5c5a1599f066a2afcb7ba436af9f98f3",
+          "bytes": 1650
+        }
+      ],
+      "data": {
+        "root": "infra/envs/lab",
+        "exitCode": 2,
+        "result": "changes",
+        "counts": {
+          "create": 1,
+          "update": 1,
+          "replace": 0,
+          "delete": 0,
+          "other": 0
+        },
+        "changes": [
+          {
+            "address": "google_compute_global_address.frontend",
+            "actions": [
+              "create"
+            ]
+          },
+          {
+            "address": "google_compute_security_policy.frontend",
+            "actions": [
+              "update"
+            ]
+          }
+        ],
+        "changesTruncated": false,
+        "changedOutsideTerraform": [
+          {
+            "address": "google_compute_firewall.webhooks",
+            "actions": [
+              "update"
+            ],
+            "attributes": [
+              "description"
+            ],
+            "relevantAttributes": [],
+            "verdict": "irrelevant"
+          },
+          {
+            "address": "google_compute_global_address.frontend",
+            "actions": [
+              "delete"
+            ],
+            "attributes": [
+              "address",
+              "name"
+            ],
+            "relevantAttributes": [
+              "address"
+            ],
+            "verdict": "relevant"
+          },
+          {
+            "address": "google_compute_security_policy.frontend",
+            "actions": [
+              "update"
+            ],
+            "attributes": [
+              "rule"
+            ],
+            "relevantAttributes": [
+              "rule"
+            ],
+            "verdict": "relevant"
+          },
+          {
+            "address": "google_container_cluster.mamori",
+            "actions": [
+              "update"
+            ],
+            "attributes": [
+              "master_version",
+              "node_pool",
+              "node_version"
+            ],
+            "relevantAttributes": [
+              "master_version"
+            ],
+            "verdict": "expected"
+          },
+          {
+            "address": "google_container_node_pool.spot",
+            "actions": [
+              "update"
+            ],
+            "attributes": [
+              "node_count",
+              "version"
+            ],
+            "relevantAttributes": [],
+            "verdict": "expected"
+          },
+          {
+            "address": "google_monitoring_notification_channel.email",
+            "actions": [
+              "update"
+            ],
+            "attributes": [
+              "labels",
+              "user_labels"
+            ],
+            "relevantAttributes": [],
+            "verdict": "irrelevant"
+          }
+        ],
+        "outsideCounts": {
+          "relevant": 2,
+          "expected": 2,
+          "irrelevant": 2
+        }
+      }
+    },
+    "cluster": {
+      "title": "Cluster versions and nodes",
+      "status": "collected",
+      "expected": true,
+      "attention": false,
+      "headline": "RUNNING, control plane 1.37.2-gke.1100000, node pools 1.37.2-gke.1100000, 3/3 nodes Ready, channel REGULAR",
+      "inputs": [
+        {
+          "file": "gke-cluster.json",
+          "status": "collected",
+          "sha256": "cdd65b8a7bd15371161f9273b1d9790d9a5773d4faf4d056cf3b22bc989d2572",
+          "bytes": 398
+        },
+        {
+          "file": "nodes.json",
+          "status": "collected",
+          "sha256": "c0899e8b5ba91b96477d7c924d06522de902bf2aed6719ace6335d47dc1ba7cd",
+          "bytes": 1442
+        }
+      ],
+      "data": {
+        "name": "mamori",
+        "location": "asia-northeast1-a",
+        "status": "RUNNING",
+        "releaseChannel": "REGULAR",
+        "controlPlaneVersion": "1.37.2-gke.1100000",
+        "nodePools": [
+          {
+            "name": "spot-pool",
+            "version": "1.37.2-gke.1100000",
+            "status": "RUNNING",
+            "machineType": "e2-standard-2",
+            "spot": true,
+            "autoscaling": false
+          }
+        ],
+        "nodesStatus": "collected",
+        "nodes": [
+          {
+            "name": "gke-mamori-spot-pool-1a2b3c4d-abcd",
+            "pool": "spot-pool",
+            "kubeletVersion": "v1.37.2-gke.1100000",
+            "ready": true,
+            "spot": true,
+            "createdAt": "2026-11-15T03:12:44Z",
+            "osImage": "Container-Optimized OS from Google",
+            "containerRuntime": "containerd://2.1.4"
+          },
+          {
+            "name": "gke-mamori-spot-pool-1a2b3c4d-efgh",
+            "pool": "spot-pool",
+            "kubeletVersion": "v1.37.2-gke.1100000",
+            "ready": true,
+            "spot": true,
+            "createdAt": "2026-11-13T22:01:09Z",
+            "osImage": "Container-Optimized OS from Google",
+            "containerRuntime": "containerd://2.1.4"
+          },
+          {
+            "name": "gke-mamori-spot-pool-1a2b3c4d-ijkl",
+            "pool": "spot-pool",
+            "kubeletVersion": "v1.37.2-gke.1100000",
+            "ready": true,
+            "spot": true,
+            "createdAt": "2026-11-16T00:02:51Z",
+            "osImage": "Container-Optimized OS from Google",
+            "containerRuntime": "containerd://2.1.4"
+          }
+        ]
+      }
+    },
+    "gatekeeper": {
+      "title": "Gatekeeper audit",
+      "status": "collected",
+      "expected": true,
+      "attention": true,
+      "headline": "2 constraints, 2 violations (dryrun 2), last audit 2026-11-16T00:15:00Z",
+      "inputs": [
+        {
+          "file": "gatekeeper-constraints.json",
+          "status": "collected",
+          "sha256": "dd56fabb874a4df416a497647d2feb5c716d7d1436925afb8c1099a2a885b5c5",
+          "bytes": 1159
+        }
+      ],
+      "data": {
+        "constraints": 2,
+        "totalViolations": 2,
+        "violationsByAction": {
+          "dryrun": 2
+        },
+        "notAudited": 0,
+        "lastAudit": "2026-11-16T00:15:00Z",
+        "items": [
+          {
+            "kind": "K8sNoLoadBalancer",
+            "name": "no-loadbalancer",
+            "controlId": "",
+            "enforcementAction": "deny",
+            "auditTimestamp": "2026-11-16T00:15:00Z",
+            "totalViolations": 0,
+            "violations": []
+          },
+          {
+            "kind": "K8sRequiredProbes",
+            "name": "pr-02-probes",
+            "controlId": "PR-02",
+            "enforcementAction": "dryrun",
+            "auditTimestamp": "2026-11-16T00:15:00Z",
+            "totalViolations": 2,
+            "violations": [
+              {
+                "kind": "Deployment",
+                "namespace": "boutique",
+                "name": "loadgenerator",
+                "message": "container <main> has no readinessProbe | add one"
+              },
+              {
+                "kind": "Deployment",
+                "namespace": "boutique",
+                "name": "redis-cart",
+                "message": "container <redis>\nhas no livenessProbe"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "argocd": {
+      "title": "Argo CD applications",
+      "status": "collected",
+      "expected": true,
+      "attention": true,
+      "headline": "2/3 applications Synced and Healthy (not: istiod OutOfSync/Healthy)",
+      "inputs": [
+        {
+          "file": "argocd-applications.json",
+          "status": "collected",
+          "sha256": "7b1f2745e0a44522f13a1ff594da79a797faaeaed0e045f6b11fdcab2f22dac6",
+          "bytes": 1113
+        }
+      ],
+      "data": {
+        "applications": 3,
+        "syncedHealthy": 2,
+        "items": [
+          {
+            "name": "istiod",
+            "namespace": "argocd",
+            "project": "default",
+            "syncStatus": "OutOfSync",
+            "healthStatus": "Healthy",
+            "targetRevision": "1.31.1",
+            "syncedRevision": "1.31.1",
+            "lastOperation": "Failed",
+            "reconciledAt": "2026-11-16T00:16:41Z"
+          },
+          {
+            "name": "online-boutique",
+            "namespace": "argocd",
+            "project": "default",
+            "syncStatus": "Synced",
+            "healthStatus": "Healthy",
+            "targetRevision": "main",
+            "syncedRevision": "0123456789ab",
+            "lastOperation": "Succeeded",
+            "reconciledAt": "2026-11-16T00:16:40Z"
+          },
+          {
+            "name": "root",
+            "namespace": "argocd",
+            "project": "default",
+            "syncStatus": "Synced",
+            "healthStatus": "Healthy",
+            "targetRevision": "main",
+            "syncedRevision": "0123456789ab",
+            "lastOperation": "Succeeded",
+            "reconciledAt": "2026-11-16T00:16:40Z"
+          }
+        ]
+      }
+    },
+    "slos": {
+      "title": "SLOs and error budgets",
+      "status": "collected",
+      "expected": true,
+      "attention": false,
+      "headline": "3 SLOs: 0 exhausted, 1 low (under 25 % left), 1 without data; least budget left: browse availability (20.2 %)",
+      "inputs": [
+        {
+          "file": "slo-status.json",
+          "status": "collected",
+          "sha256": "fa9f88d8b26a7d560600804901a96a7c83ad631c8dfb6ff7a877ffbe2a90fdef",
+          "bytes": 1001
+        }
+      ],
+      "data": {
+        "slos": [
+          {
+            "name": "projects/123456789012/services/cuj-browse/serviceLevelObjectives/availability",
+            "displayName": "browse availability",
+            "service": "CUJ browse",
+            "goal": 0.995,
+            "window": "rolling 28d",
+            "compliance": 0.99601,
+            "budgetRemaining": 0.202,
+            "state": "low"
+          },
+          {
+            "name": "projects/123456789012/services/cuj-browse/serviceLevelObjectives/latency",
+            "displayName": "browse latency",
+            "service": "CUJ browse",
+            "goal": 0.95,
+            "window": "rolling 28d",
+            "compliance": null,
+            "budgetRemaining": null,
+            "state": "no data"
+          },
+          {
+            "name": "projects/123456789012/services/cuj-checkout/serviceLevelObjectives/availability",
+            "displayName": "checkout availability",
+            "service": "CUJ checkout",
+            "goal": 0.99,
+            "window": "rolling 28d",
+            "compliance": 0.9987,
+            "budgetRemaining": 0.87,
+            "state": "ok"
+          }
+        ],
+        "exhausted": 0,
+        "low": 1,
+        "noData": 1
+      }
+    }
+  }
+}

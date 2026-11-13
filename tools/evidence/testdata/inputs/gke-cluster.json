@@ -1,0 +1,11 @@
+{
+  "name": "mamori",
+  "location": "asia-northeast1-a",
+  "status": "RUNNING",
+  "currentMasterVersion": "1.37.2-gke.1100000",
+  "currentNodeVersion": "1.37.2-gke.1100000",
+  "releaseChannel": {"channel": "REGULAR"},
+  "nodePools": [
+    {"name": "spot-pool", "version": "1.37.2-gke.1100000", "status": "RUNNING", "config": {"machineType": "e2-standard-2", "spot": true}, "autoscaling": {}}
+  ]
+}
