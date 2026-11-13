@@ -141,13 +141,15 @@ jobs:
           terraform plan -no-color -lock=false -detailed-exitcode > plan.txt 2>&1
           code=$?
           set -e
-          cat plan.txt
+          cat plan.txt # the job log masks the billing account secret
+          # The comment goes through the API, where GitHub masks nothing: redact it first.
+          "${GITHUB_WORKSPACE}/scripts/redact.sh" < plan.txt > plan-public.txt
           echo "exitcode=${code}" >> "$GITHUB_OUTPUT"
       - name: Post the plan as one comment on the pull request
         if: always() && steps.plan.outputs.exitcode != ''
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          PLAN_FILE: infra/envs/lab/plan.txt
+          PLAN_FILE: infra/envs/lab/plan-public.txt
           EXIT_CODE: ${{ steps.plan.outputs.exitcode }}
         with:
           script: |
@@ -235,33 +237,36 @@ jobs:
     name: Find Go modules
     runs-on: ubuntu-24.04 # pinned: upgrade deliberately, not when GitHub moves "latest"
     outputs:
-      modules: ${{ steps.find.outputs.modules }}
+      tools: ${{ steps.find.outputs.tools }}
+      services: ${{ steps.find.outputs.services }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: List tools/*/go.mod
+      - name: List tools/*/go.mod and services/*/go.mod
         id: find
         run: |
           shopt -s nullglob
-          dirs=()
-          for mod in tools/*/go.mod; do dirs+=("$(dirname "$mod")"); done
-          if [ "${#dirs[@]}" -eq 0 ]; then
-            echo "::notice::No Go modules under tools/ yet; skipping."
-            echo "modules=[]" >> "$GITHUB_OUTPUT"
-          else
-            echo "modules=$(printf '%s\n' "${dirs[@]}" | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
-          fi
+          for kind in tools services; do
+            dirs=()
+            for mod in "$kind"/*/go.mod; do dirs+=("$(dirname "$mod")"); done
+            if [ "${#dirs[@]}" -eq 0 ]; then
+              echo "::notice::No Go modules under ${kind}/ yet; skipping."
+              echo "${kind}=[]" >> "$GITHUB_OUTPUT"
+            else
+              echo "${kind}=$(printf '%s\n' "${dirs[@]}" | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+            fi
+          done
 
   go:
     name: Go ${{ matrix.module }} (lint, tests)
     needs: go-modules
-    if: needs.go-modules.outputs.modules != '[]'
+    if: needs.go-modules.outputs.tools != '[]'
     runs-on: ubuntu-24.04 # pinned: upgrade deliberately, not when GitHub moves "latest"
     strategy:
       fail-fast: false
       matrix:
-        module: ${{ fromJSON(needs.go-modules.outputs.modules) }}
+        module: ${{ fromJSON(needs.go-modules.outputs.tools) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -279,12 +284,35 @@ jobs:
           MODULE: ${{ matrix.module }}
         run: scripts/go-test.sh "$MODULE"
 
-  # One stable check to require in branch protection: the Go job's name changes with its matrix,
+  # The forked upstream services: our changes must keep their own tests green. No lint and no
+  # coverage gate, since most of the code is upstream's.
+  services:
+    name: Go service ${{ matrix.module }} (tests)
+    needs: go-modules
+    if: needs.go-modules.outputs.services != '[]'
+    runs-on: ubuntu-24.04 # pinned: upgrade deliberately, not when GitHub moves "latest"
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.go-modules.outputs.services) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - name: Test (race detector)
+        working-directory: ${{ matrix.module }}
+        run: go test -race ./...
+
+  # One stable check to require in branch protection: the Go jobs' names change with their matrix,
   # and skipped jobs (no modules yet, no plan on forks) must not block a merge.
   ci-result:
     name: CI result
     if: always()
-    needs: [repo-checks, terraform, terraform-plan, manifests, go-modules, go]
+    needs: [repo-checks, terraform, terraform-plan, manifests, go-modules, go, services]
     runs-on: ubuntu-24.04 # pinned: upgrade deliberately, not when GitHub moves "latest"
     steps:
       - name: Fail if any job failed or was cancelled

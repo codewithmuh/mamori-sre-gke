@@ -36,6 +36,8 @@ NODE_COUNT := 3
 # Argo CD Helm chart (app v3.5.6). Argo CD does not manage itself, so this is its only pin.
 ARGOCD_CHART_VERSION := 10.11.6
 GO_MODULES := $(patsubst %/go.mod,%,$(wildcard tools/*/go.mod))
+# Forked upstream services: tests only, no lint and no coverage gate (as in CI).
+SERVICE_MODULES := $(patsubst %/go.mod,%,$(wildcard services/*/go.mod))
 
 # Tools each lint part needs, only once the code it checks exists.
 TF_LINT_TOOLS := $(if $(wildcard infra),terraform tflint)
@@ -71,18 +73,21 @@ lab-init = terraform -chdir=$(LAB_DIR) init -input=false -reconfigure \
 # Point kubectl at the cluster with the command Terraform outputs, instead of rebuilding it here.
 lab-credentials = eval "$$(terraform -chdir=$(LAB_DIR) output -raw get_credentials_command)"
 
-.PHONY: help bootstrap up down resume plan fmt lint lint-tools lint-shell lint-terraform \
-	lint-manifests lint-go test check scan clean
+.PHONY: help bootstrap up down resume edge-off edge-on plan fmt lint lint-tools lint-shell \
+	lint-terraform lint-manifests lint-go test check scan clean
 
 # --- Targets ---------------------------------------------------------------------------------
 
 help: ## Show the available commands
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(firstword $(MAKEFILE_LIST)) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
 
-bootstrap: ## Once per project: state bucket, keyless CI identities, APIs; prints the GitHub settings
-	$(call require-vars,PROJECT_ID)
-	@$(call require-tools,gcloud terraform)
+# The GitHub environment comes first: GitHub would create it unprotected the first time a
+# workflow names it, and it is what guards tf-apply.
+bootstrap: ## Once per project: GitHub env lab, state bucket, CI identities, APIs; prints GitHub settings
+	$(call require-vars,PROJECT_ID BILLING_ACCOUNT_ID)
+	@$(call require-tools,gcloud terraform gh)
 	@$(require-gcloud-login)
+	scripts/github-lab-env.sh
 	terraform -chdir=$(BOOTSTRAP_DIR) init -input=false
 	terraform -chdir=$(BOOTSTRAP_DIR) apply -input=false
 	@scripts/print-repo-vars.sh
@@ -106,12 +111,13 @@ up: ## Build the lab from nothing: infra, Argo CD, the shop; prints the URL and 
 
 # Order matters. The cluster's own controllers built the load balancer, so it must go while the
 # cluster still runs: destroying the cluster first would leave it behind, still billed.
-#   1. delete-shop.sh: the Argo CD root app (cascades to every app), Gateway mamori-frontend, and
-#      the namespaces whose Services back the load balancer
-#   2. wait until the GKE Gateway controller has released the load balancer
+#   1. delete-shop.sh: the Argo CD root app (cascades to every app; skipped when no node runs),
+#      Gateway mamori-frontend and the istio-ingress Services behind it, without waiting
+#   2. wait-for-lb-gone.sh: wait until the GKE controllers have released the load balancer, and
+#      clear GKE-made firewall rules that would block deleting the VPC
 #   3. terraform destroy, then the leftover check
 down: ## Delete the shop and its load balancer, destroy the lab, then fail if anything billable is left
-	$(call require-vars,PROJECT_ID TF_STATE_BUCKET)
+	$(call require-vars,PROJECT_ID TF_STATE_BUCKET BILLING_ACCOUNT_ID)
 	@$(call require-tools,gcloud gke-gcloud-auth-plugin terraform kubectl)
 	@$(require-gcloud-login)
 	@$(confirm-down)
@@ -132,6 +138,34 @@ resume: ## Scale node pool spot-pool back to 3 nodes after the spend guard set i
 	@$(call require-tools,gcloud)
 	gcloud container clusters resize $(CLUSTER) --node-pool=$(NODE_POOL) --num-nodes=$(NODE_COUNT) \
 		--zone=$(ZONE) --project=$(PROJECT_ID) --quiet
+
+# Edge cost switch. Cloud Armor and load balancer logging are billed per request, denied ones
+# included, and the spend guard can't stop that (it only scales nodes). edge-off turns off Argo CD
+# auto-sync for root and edge (so self-heal can't bring the Gateway back), deletes Gateway
+# mamori-frontend and waits until the load balancer is gone. The static IP, certificate and
+# Cloud Armor policy stay (Terraform owns them), so DNS needs no change. edge-on re-applies the
+# root app, which turns auto-sync back on; Argo CD restores the edge app and the Gateway.
+edge-off: ## Stop public traffic costs: delete the Gateway and wait until its load balancer is gone
+	$(call require-vars,PROJECT_ID TF_STATE_BUCKET)
+	@$(call require-tools,gcloud gke-gcloud-auth-plugin terraform kubectl)
+	@$(require-gcloud-login)
+	$(lab-init)
+	$(lab-credentials)
+	kubectl -n argocd patch applications.argoproj.io root --type merge -p '{"spec":{"syncPolicy":{"automated":null}}}'
+	kubectl -n argocd patch applications.argoproj.io edge --type merge -p '{"spec":{"syncPolicy":{"automated":null}}}'
+	kubectl delete gateways.gateway.networking.k8s.io --all-namespaces --field-selector metadata.name=mamori-frontend --wait=false
+	scripts/wait-for-lb-gone.sh "$$(terraform -chdir=$(LAB_DIR) output -raw frontend_ip)"
+	@echo "Edge is off: no load balancer, no public traffic. 'make edge-on' brings it back."
+
+edge-on: ## Bring the public edge back after edge-off (Argo CD re-syncs the Gateway)
+	$(call require-vars,PROJECT_ID TF_STATE_BUCKET)
+	@$(call require-tools,gcloud gke-gcloud-auth-plugin terraform kubectl)
+	@$(require-gcloud-login)
+	$(lab-init)
+	$(lab-credentials)
+	kubectl apply -f deploy/bootstrap/root-app.yaml
+	scripts/wait-for-shop.sh
+	@echo "Edge is on: https://$(FRONTEND_HOSTNAME)"
 
 plan: ## Show what `make up` would change in the lab (terraform plan)
 	$(call require-vars,PROJECT_ID TF_STATE_BUCKET BILLING_ACCOUNT_ID)
@@ -174,9 +208,10 @@ lint-go:
 	@$(call require-tools,$(GO_LINT_TOOLS))
 	@for mod in $(GO_MODULES); do echo "golangci-lint $$mod"; (cd "$$mod" && golangci-lint run ./...); done
 
-test: ## Run the Go tests with the race detector and the 80% coverage gate (same as CI)
-	@$(if $(GO_MODULES),$(call require-tools,go),echo "No Go modules under tools/ yet.")
+test: ## Run the Go tests with the race detector, tools/ with the 80% coverage gate (same as CI)
+	@$(if $(GO_MODULES)$(SERVICE_MODULES),$(call require-tools,go),echo "No Go modules under tools/ or services/ yet.")
 	@for mod in $(GO_MODULES); do scripts/go-test.sh "$$mod"; done
+	@for mod in $(SERVICE_MODULES); do echo "go test -race $$mod"; (cd "$$mod" && go test -race ./...); done
 
 check: lint test ## Everything CI checks before merge
 

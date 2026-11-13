@@ -56,11 +56,12 @@ jobs:
       - name: Plan, and show it in the job summary
         run: |
           terraform plan -no-color -lock=false | tee plan.txt
+          # The summary is public and not a log: redact the billing account before writing it.
           {
             echo "### Plan for infra/envs/lab at ${GITHUB_SHA::7}"
             echo "Approve the \`lab\` deployment only if this is what you expect."
             echo '````text'
-            cat plan.txt
+            "${GITHUB_WORKSPACE}/scripts/redact.sh" < plan.txt
             echo '````'
           } >> "$GITHUB_STEP_SUMMARY"
 

@@ -3,6 +3,13 @@ name: release
 # release-please keeps a "Release PR" open with the next version and changelog, built from
 # Conventional Commits. Merging that PR creates the tag and the GitHub release.
 #
+# Token: pull requests opened with the default GITHUB_TOKEN don't trigger other workflows, so the
+# Release PR would never get the required "CI result" check and could not merge. Set the secret
+# RELEASE_PLEASE_TOKEN (a GitHub App installation token or a fine-grained token for this repo
+# with Contents and Pull requests read/write) and CI runs on it. Without the secret this falls back
+# to GITHUB_TOKEN, which also needs Settings > Actions > General > "Allow GitHub Actions to create
+# and approve pull requests". `make bootstrap` prints both options.
+#
 # The template's image publish job (GHCR push, cosign signing, SBOM) is removed because this repo
 # builds no images yet. It comes back when the repo ships its own images (the Go tools or the
 # forked services), pushing to Artifact Registry instead of GHCR.
@@ -22,5 +29,6 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
