@@ -26,7 +26,9 @@ Slack channel), or show in Datadog only when that list is empty. Paging from Dat
 100 phone/SMS a month on duplicates. The one candidate for paging is an outside-only failure (DNS, certificate, load
 balancer) that nothing else catches; the day-8 review decides that from the log (see [Tuning](#tuning-on-day-8)). If
 it does page, it goes through Datadog's PagerDuty integration to the existing service `mamori-shop` with
-`@pagerduty-mamori-shop` in the message; no PagerDuty objects are added to the Datadog root.
+`@pagerduty-mamori-shop` in the message. The integration key is made by hand in PagerDuty (an Events API v2 or
+Datadog integration on `mamori-shop`) and pasted into Datadog's PagerDuty tile; it never goes into Terraform or its
+state, and no PagerDuty objects are added to the Datadog root.
 
 ### The journey tests
 
