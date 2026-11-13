@@ -4,9 +4,13 @@
 EVALS := uv run --project evals --locked mamori-evals
 # Comma-separated fault ids, game-day, or all.
 FAULTS ?=
-EVALS_BUDGET ?= 4h
-# Conditions recorded with the session, space-separated KEY=VALUE (see EVALS.md).
+EVALS_BUDGET ?= 6h
+# Conditions typed for the session, space-separated KEY=VALUE, e.g. APPROVALS=none. AGENT_*
+# switches are read from the agent Deployment and checked against these (see EVALS.md).
 EVALS_LABELS ?=
+# Local ports for the agent and executor port-forwards (18080 is the prober's).
+EVALS_AGENT_PORT ?= 18181
+EVALS_EXECUTOR_PORT ?= 18182
 # Extra flags for `mamori-evals run`, e.g. --dry-run or --investigation-timeout 30m.
 EVALS_ARGS ?=
 # Built by `make gameday-build` (#23).
@@ -31,6 +35,7 @@ evals-run: ## Live eval: FAULTS=<id,...>|game-day|all, one at a time (injects fa
 	@test -x "$(EVALS_GAMEDAY)" || { echo "error: $(EVALS_GAMEDAY) not found. Run: make gameday-build" >&2; exit 1; }
 	$(EVALS) run --faults "$(FAULTS)" --project-id "$(PROJECT_ID)" --budget "$(EVALS_BUDGET)" \
 		--gameday "$(EVALS_GAMEDAY)" --port-forward $(EVALS_HUMAN_BASELINE) \
+		--agent-local-port $(EVALS_AGENT_PORT) --executor-local-port $(EVALS_EXECUTOR_PORT) \
 		$(foreach label,$(EVALS_LABELS),--label "$(label)") $(EVALS_ARGS)
 
 ifeq ($(strip $(RECORDING)),)

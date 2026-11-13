@@ -8,15 +8,18 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime
-from pathlib import Path
 
 from .aggregate import summarize
-from .baseline import Baseline, had_prior_postmortem, postmortem_dates, summarize_baseline
+from .baseline import Baseline, PostmortemIndex, prior_postmortem, summarize_baseline
 from .faults import Fault
 from .jsonutil import DocumentError, JSONDict
 from .records import Recording
 from .report import build_results
 from .scoring import RunScore, score_run
+
+# A run counts as injected into a clean window when every journey's 1-hour burn rate was
+# below this: the hour before was within the error budget's pace.
+DEFAULT_CLEAN_BURN = 1.0
 
 
 def merge_recordings(recordings: Sequence[Recording]) -> Recording:
@@ -52,37 +55,46 @@ def merge_recordings(recordings: Sequence[Recording]) -> Recording:
 
 
 def score_recording(
-    recording: Recording, faults: Mapping[str, Fault], postmortems: Path | None
+    recording: Recording,
+    faults: Mapping[str, Fault],
+    postmortems: PostmortemIndex | None,
+    clean_burn: float = DEFAULT_CLEAN_BURN,
 ) -> list[RunScore]:
     unknown = sorted({run.fault_id for run in recording.runs} - set(faults))
     if unknown:
         raise DocumentError(f"the recording has runs of faults not in the library: {unknown}")
-    index = (
-        postmortem_dates(postmortems) if postmortems is not None and postmortems.is_dir() else None
-    )
-    return [
-        score_run(
-            run, faults[run.fault_id], had_prior_postmortem(index, run.fault_id, run.injected_at)
-        )
-        for run in recording.runs
-    ]
+    labels = recording.metadata.get("labels")
+    session_labels: Mapping[str, object] = labels if isinstance(labels, Mapping) else {}
+    scores = []
+    for run in recording.runs:
+        # What the agent actually ran with, else what the session said it would.
+        setting = (
+            run.investigation.agent_config.get("postmortemsGamedays")
+            if run.investigation is not None
+            else None
+        ) or session_labels.get("AGENT_POSTMORTEMS_GAMEDAYS")
+        prior = prior_postmortem(postmortems, run.fault_id, run.injected_at, setting)
+        scores.append(score_run(run, faults[run.fault_id], prior, clean_burn, session_labels))
+    return scores
 
 
 def results_for(
     recording: Recording,
     faults: Mapping[str, Fault],
-    postmortems: Path | None,
+    postmortems: PostmortemIndex | None,
     baselines: Sequence[Baseline],
     mode: str,
     generated_at: datetime,
     extra_metadata: Mapping[str, object] | None = None,
+    clean_burn: float = DEFAULT_CLEAN_BURN,
 ) -> JSONDict:
-    scores = score_recording(recording, faults, postmortems)
+    scores = score_recording(recording, faults, postmortems, clean_burn)
     metadata: dict[str, object] = {
         **recording.metadata,
         **(extra_metadata or {}),
         "mode": mode,
         "synthetic": recording.synthetic,
+        "cleanBurn1h": clean_burn,
     }
     return build_results(
         scores,

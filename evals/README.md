@@ -13,12 +13,17 @@ From the repository root (the `mk/evals.mk` targets wrap these):
 ```sh
 uv run --project evals mamori-evals faults                # list chaos/faults and check what scoring needs
 uv run --project evals mamori-evals run --faults game-day --project-id "$PROJECT_ID" --port-forward \
-    --label AGENT_POSTMORTEMS_GAMEDAYS=exclude            # live session: injects real faults
+    --label APPROVALS=none                                # live session: injects real faults
 uv run --project evals mamori-evals replay --recording evals/results/<session>.recording.json
 uv run --project evals mamori-evals report evals/results/<session>.results.json
 ```
 
-`run --dry-run` prints the plan and touches nothing. `run --help` lists every timeout.
+`run --dry-run` prints the plan and touches nothing. `run --help` lists every timeout and gate.
+
+Before each fault the runner waits until the agent is idle (`GET /v1/status`), checks the agent's daily model budget,
+and waits until every journey is steady with its 1-hour burn rate below 6.72. At the start of a session it reads the
+agent Deployment's evaluation switches and refuses typed `--label` values that disagree. The agent and executor are
+forwarded to local ports 18181 and 18182.
 
 ## Layout
 
@@ -26,13 +31,14 @@ uv run --project evals mamori-evals report evals/results/<session>.results.json
 |---|---|
 | `faults.py` | Reads `chaos/faults/*.yaml` (#23) and checks the fields scoring needs |
 | `records.py` | Parses what the eval observes: investigations (#24), proposals and audit lines (#25), runs |
-| `scoring.py` | Pure functions: one run + its fault -> scores; matching an investigation to a run |
+| `scoring.py` | Pure functions: one run + its fault -> scores; what reached the agent; matching an investigation to a run |
 | `aggregate.py` | Rates as k/n with a Wilson 95 % interval; durations as median, range and n |
 | `pricing.py` | List prices, for the check that the agent's reported cost is possible |
-| `baseline.py` | Human baseline from game-day postmortems (#20); baseline files for other tools |
+| `baseline.py` | Human baseline from game-day postmortems (#20); which postmortems reached `main` when; baseline files for other tools |
 | `live.py` | The live runner: steady state, inject, wait, read, stop, cool down |
 | `clients.py` | Agent and executor APIs, Managed Prometheus, the gameday CLI, the executor's audit log |
-| `steady.py` | Steady state from the prober SLIs (#16) |
+| `steady.py` | Steady state and the burn-rate gate from the prober SLIs (#16) and the SLO spec (#18) |
+| `conditions.py` | The session's conditions, checked against the agent Deployment and the running agent |
 | `replay.py`, `report.py`, `cli.py` | Offline scoring, the results JSON and Markdown, the command line |
 
 ## Files
@@ -40,7 +46,8 @@ uv run --project evals mamori-evals report evals/results/<session>.results.json
 A live session writes three files to `evals/results/` (gitignored), named after the session's start time:
 
 - `<session>.recording.json` (`kind: EvalRecording`): the raw observations, written again after every run so a
-  crash keeps what was done. It holds the investigations and audit lines exactly as the APIs returned them.
+  crash keeps what was done. It holds, per run, every investigation in the window, the agent's intake lines, the
+  executor's audit lines, the burn rates before the injection and the agent's status, exactly as read.
 - `<session>.results.json` (`kind: EvalResults`): per-run scores, the summary and the baselines.
 - `<session>.md`: the Markdown table for `EVALS.md`.
 

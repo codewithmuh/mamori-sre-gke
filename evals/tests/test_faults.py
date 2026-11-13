@@ -24,6 +24,9 @@ def test_fixture_library_loads(synthetic_faults: dict[str, Any]) -> None:
         "remove-fault virtualservice/f91-synthetic-currency-abort"
     )
     assert not synthetic_faults["F96-synthetic-recommendation-cpu-stress"].impact_expected
+    node = synthetic_faults["F95-synthetic-node-preemption"]
+    assert node.root_cause_service == "node"
+    assert node.acceptable_services == ("frontend",)
 
 
 def test_cujs_are_put_in_journey_order() -> None:
@@ -38,6 +41,11 @@ def test_cujs_are_put_in_journey_order() -> None:
         ({"category": "meteor"}, "category"),
         ({"expected": {"cujs": ["search"]}}, "unknown journeys"),
         ({"expected": {"rootCause": {"service": " "}}}, "service is empty"),
+        ({"expected": {"rootCause": {"service": "gke-node"}}}, "not a name the agent can give"),
+        (
+            {"expected": {"rootCause": {"service": "cartservice", "acceptableServices": ["db"]}}},
+            "'db' is not a name",
+        ),
         ({"expected": {"correctAction": {"type": "delete"}}}, "correctAction.type"),
         ({"expected": {"correctAction": {"type": "restart"}}}, "target is required"),
         ({"expected": {"unsafeActions": [" "]}}, "empty entry"),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import signal
 import subprocess
 import sys
@@ -12,36 +13,52 @@ from pathlib import Path
 from types import FrameType
 
 from . import GENERATOR
-from .baseline import Baseline, baseline_from_postmortems, load_baseline
+from .baseline import (
+    Baseline,
+    PostmortemIndex,
+    baseline_from_postmortems,
+    load_baseline,
+    postmortem_dates,
+    postmortems_on_ref,
+)
 from .clients import (
     AgentApi,
+    AgentLogs,
+    ApiError,
     CommandToken,
     ExecutorApi,
     ExecutorLogs,
     GamedayCli,
     JsonHttp,
     PrometheusApi,
+    deployment_env,
     managed_prometheus_url,
     split_command,
 )
+from .conditions import session_conditions
 from .faults import FaultError, describe_faults, load_faults, select_faults
 from .jsonutil import DocumentError, read_json, write_json
 from .live import MANUAL_MODES, LiveConfig, LiveRunner
 from .portforward import Forward, PortForwards
 from .records import Recording, RunObservation, parse_recording
-from .replay import merge_recordings, results_for
+from .replay import DEFAULT_CLEAN_BURN, merge_recordings, results_for
 from .report import render_markdown
-from .steady import SteadyStateCheck, load_thresholds
+from .steady import DEFAULT_MAX_BURN_1H, SteadyStateCheck, load_slo_spec
 from .timeutil import SystemClock, format_seconds, format_time, parse_duration
 
 EXIT_ERROR = 1
 EXIT_INTERRUPTED = 130
-AGENT_FORWARD = Forward("mamori-agent", "agent", 18080)
-EXECUTOR_FORWARD = Forward("mamori-agent", "executor", 18081)
+# Local ports for the port-forwards; 18080 is the prober's (make prober-run), 8080 the agent's
+# own (make agent-port-forward).
+AGENT_LOCAL_PORT = 18181
+EXECUTOR_LOCAL_PORT = 18182
+POSTMORTEMS_PATH = "docs/incidents/postmortems"
 
 
 def _log(message: str) -> None:
-    print(f"{datetime.now(UTC):%H:%M:%S} {message}", file=sys.stderr, flush=True)
+    # A closed terminal must not break the cleanup that follows a SIGHUP.
+    with contextlib.suppress(OSError, ValueError):
+        print(f"{datetime.now(UTC):%H:%M:%S} {message}", file=sys.stderr, flush=True)
 
 
 def _duration(text: str) -> timedelta:
@@ -71,8 +88,13 @@ def _parser() -> argparse.ArgumentParser:
         cmd.add_argument(
             "--postmortems",
             type=Path,
-            default=Path("docs/incidents/postmortems"),
-            help="split accuracy by whether a postmortem of the fault existed (skipped if absent)",
+            default=Path(POSTMORTEMS_PATH),
+            help="game-day postmortems, for the human baseline and the 'seen before?' split",
+        )
+        cmd.add_argument(
+            "--postmortems-ref",
+            default="origin/main",
+            help="git ref the agent reads postmortems from; '' uses the files' front-matter dates",
         )
         cmd.add_argument(
             "--baseline", type=Path, action="append", default=[], help="a kind: EvalBaseline file"
@@ -81,6 +103,12 @@ def _parser() -> argparse.ArgumentParser:
             "--human-baseline",
             action="store_true",
             help="add the human baseline from the postmortems' timelines",
+        )
+        cmd.add_argument(
+            "--clean-burn-1h",
+            type=float,
+            default=DEFAULT_CLEAN_BURN,
+            help="a run is in a clean window when every journey's 1h burn rate was below this",
         )
         cmd.add_argument("--out-dir", type=Path, default=Path("evals/results"))
 
@@ -110,8 +138,10 @@ def _parser() -> argparse.ArgumentParser:
         help="prints a bearer token for the query API "
         "(default with --project-id: gcloud auth print-access-token)",
     )
-    run.add_argument("--agent-url", default=AGENT_FORWARD.url)
-    run.add_argument("--executor-url", default=EXECUTOR_FORWARD.url)
+    run.add_argument("--agent-local-port", type=int, default=AGENT_LOCAL_PORT)
+    run.add_argument("--executor-local-port", type=int, default=EXECUTOR_LOCAL_PORT)
+    run.add_argument("--agent-url", help="default: the agent's local port")
+    run.add_argument("--executor-url", help="default: the executor's local port")
     run.add_argument(
         "--port-forward", action="store_true", help="kubectl port-forward both Services"
     )
@@ -122,10 +152,31 @@ def _parser() -> argparse.ArgumentParser:
         default="kubectl -n mamori-agent logs deploy/executor -c executor",
         help="command that prints the executor's audit log (gets --since-time)",
     )
+    run.add_argument(
+        "--agent-logs",
+        default="kubectl -n mamori-agent logs deploy/agent -c agent",
+        help="command that prints the agent's log (gets --since-time)",
+    )
+    run.add_argument(
+        "--agent-deployment",
+        default="kubectl -n mamori-agent get deployment agent -o json",
+        help="command that prints the agent Deployment, to check the run conditions",
+    )
+    run.add_argument(
+        "--no-verify-conditions",
+        action="store_true",
+        help="don't check --label values against the agent (development only)",
+    )
     run.add_argument("--slos", type=Path, default=Path("slo/slos.yaml"))
     run.add_argument("--no-latency-check", action="store_true")
     run.add_argument("--steady-window", default="5m")
     run.add_argument("--steady-min-success", type=float, default=0.99)
+    run.add_argument(
+        "--max-burn-1h",
+        type=float,
+        default=DEFAULT_MAX_BURN_1H,
+        help="inject only while every journey's 1h burn rate is below this (page at 13.44)",
+    )
     defaults = LiveConfig()
     for flag, value in [
         ("--investigation-timeout", defaults.investigation_timeout),
@@ -136,8 +187,12 @@ def _parser() -> argparse.ArgumentParser:
         ("--proposal-wait", defaults.proposal_wait),
         ("--clock-skew", defaults.clock_skew),
         ("--budget", defaults.budget),
+        ("--reread-wait", defaults.reread_wait),
     ]:
         run.add_argument(flag, type=_duration, default=value, metavar="DURATION")
+    run.add_argument(
+        "--min-budget-investigations", type=int, default=defaults.min_budget_investigations
+    )
     run.add_argument("--manual-faults", choices=MANUAL_MODES, default="skip")
     run.add_argument(
         "--label",
@@ -145,7 +200,7 @@ def _parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="KEY=VALUE",
-        help="record a condition, e.g. AGENT_POSTMORTEMS_GAMEDAYS=exclude",
+        help="a condition, e.g. APPROVALS=none; AGENT_* ones are checked against the agent",
     )
     run.add_argument("--dry-run", action="store_true", help="print the plan; touch nothing")
     return parser
@@ -158,6 +213,22 @@ def _baselines(args: argparse.Namespace) -> list[Baseline]:
             raise DocumentError(f"--human-baseline: {args.postmortems} does not exist")
         baselines.insert(0, baseline_from_postmortems(args.postmortems))
     return baselines
+
+
+def _postmortem_index(args: argparse.Namespace) -> tuple[PostmortemIndex | None, str]:
+    """When each game-day postmortem reached the branch the agent reads; front-matter dates
+    when git can't say; nothing when there are no postmortems."""
+    if args.postmortems_ref:
+        try:
+            return (
+                postmortems_on_ref(Path("."), args.postmortems_ref, POSTMORTEMS_PATH),
+                f"git {args.postmortems_ref}",
+            )
+        except (DocumentError, OSError, subprocess.SubprocessError) as err:
+            _log(f"postmortems on {args.postmortems_ref} not read ({err}); using their dates")
+    if args.postmortems.is_dir():
+        return postmortem_dates(args.postmortems), "front-matter dates (approximate)"
+    return None, "none"
 
 
 def _write_outputs(out_dir: Path, name: str, results: dict[str, object]) -> str:
@@ -181,10 +252,11 @@ def cmd_replay(args: argparse.Namespace) -> int:
     faults = load_faults(args.faults_dir)
     paths: list[Path] = args.recording
     recording = merge_recordings([parse_recording(read_json(path)) for path in paths])
+    index, index_source = _postmortem_index(args)
     results = results_for(
         recording,
         faults,
-        args.postmortems,
+        index,
         _baselines(args),
         mode="replay",
         generated_at=datetime.now(UTC),
@@ -192,7 +264,9 @@ def cmd_replay(args: argparse.Namespace) -> int:
             "recordings": [str(path) for path in paths],
             "faultsDir": str(args.faults_dir),
             "scoredAtCommit": _git_commit(),
+            "postmortemIndex": index_source,
         },
+        clean_burn=args.clean_burn_1h,
     )
     single = paths[0].name.removesuffix(".json").removesuffix(".recording")
     name = args.name or (single if len(paths) == 1 else f"combined-{len(paths)}-sessions")
@@ -240,6 +314,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         clock_skew=args.clock_skew,
         budget=args.budget,
         manual_faults=args.manual_faults,
+        min_budget_investigations=args.min_budget_investigations,
+        reread_wait=args.reread_wait,
     )
     worst = config.max_run_time * len(selected)
     _log(
@@ -268,9 +344,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         PrometheusApi(JsonHttp(prom_url, token=token)),
         window=args.steady_window,
         min_success=args.steady_min_success,
-        thresholds_ms=load_thresholds(args.slos),
         check_latency=not args.no_latency_check,
+        spec=load_slo_spec(args.slos),
+        max_burn_1h=args.max_burn_1h,
     )
+    agent_forward = Forward("mamori-agent", "agent", args.agent_local_port)
+    executor_forward = Forward("mamori-agent", "executor", args.executor_local_port)
+    agent = AgentApi(JsonHttp(args.agent_url or agent_forward.url))
     session = datetime.now(UTC)
     session_id = session.strftime("%Y%m%dT%H%M%SZ")
     metadata: dict[str, object] = {
@@ -288,6 +368,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "steadyWindow": args.steady_window,
             "steadyMinSuccess": args.steady_min_success,
             "latencyCheck": not args.no_latency_check,
+            "maxBurn1h": args.max_burn_1h,
         },
     }
     recording_path = args.out_dir / f"{session_id}.recording.json"
@@ -296,42 +377,60 @@ def cmd_run(args: argparse.Namespace) -> int:
         write_json(recording_path, Recording(metadata, list(runs)).to_dict())
 
     forwards = PortForwards(
-        [AGENT_FORWARD, EXECUTOR_FORWARD] if args.port_forward else [],
+        [agent_forward, executor_forward] if args.port_forward else [],
         kubectl=split_command(args.kubectl),
     )
-    previous_term = signal.signal(signal.SIGTERM, _raise_interrupt)
+    previous = {
+        sig: signal.signal(sig, _raise_interrupt) for sig in (signal.SIGTERM, signal.SIGHUP)
+    }
     ask: Callable[[str], str] | None = input if sys.stdin.isatty() else None
     try:
         with forwards:
+            if not args.no_verify_conditions:
+                status = agent.status()
+                metadata["labels"] = session_conditions(
+                    dict(args.label),
+                    deployment_env(split_command(args.agent_deployment), "agent"),
+                    status.agent_config if status else None,
+                )
+                _log(f"conditions: {metadata['labels']}")
             runner = LiveRunner(
                 selected,
                 config,
                 SystemClock(),
                 GamedayCli(split_command(args.gameday)),
-                AgentApi(JsonHttp(args.agent_url)),
-                ExecutorApi(JsonHttp(args.executor_url)),
+                agent,
+                ExecutorApi(JsonHttp(args.executor_url or executor_forward.url)),
                 ExecutorLogs(split_command(args.executor_logs)),
                 steady,
                 log=_log,
                 on_update=save,
                 ask=ask,
                 keepalive=forwards.ensure if args.port_forward else None,
+                agent_logs=AgentLogs(split_command(args.agent_logs)),
             )
             runs = runner.run()
     finally:
-        signal.signal(signal.SIGTERM, previous_term)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
     metadata["finishedAt"] = format_time(datetime.now(UTC))
     recording = Recording(metadata, runs)
     write_json(recording_path, recording.to_dict())
     _log(f"wrote {recording_path}")
+    index, index_source = _postmortem_index(args)
     results = results_for(
         recording,
         faults,
-        args.postmortems,
+        index,
         baselines,
         mode="live",
         generated_at=datetime.now(UTC),
-        extra_metadata={"recording": str(recording_path), "faultsDir": str(args.faults_dir)},
+        extra_metadata={
+            "recording": str(recording_path),
+            "faultsDir": str(args.faults_dir),
+            "postmortemIndex": index_source,
+        },
+        clean_burn=args.clean_burn_1h,
     )
     print(_write_outputs(args.out_dir, session_id, results), end="")
     if runner.abort_reason:
@@ -351,7 +450,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         return COMMANDS[args.command](args)
-    except (FaultError, DocumentError, ValueError, OSError) as err:
+    except (FaultError, DocumentError, ApiError, ValueError, OSError) as err:
         print(f"error: {err}", file=sys.stderr)
         return EXIT_ERROR
     except KeyboardInterrupt:

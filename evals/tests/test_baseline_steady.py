@@ -8,20 +8,26 @@ import pytest
 
 from mamori_evals.baseline import (
     baseline_from_postmortems,
-    had_prior_postmortem,
     load_baseline,
     parse_baseline,
     postmortem_dates,
+    postmortems_on_ref,
+    prior_postmortem,
     read_front_matter,
 )
+from mamori_evals.clients import CommandResult
 from mamori_evals.jsonutil import DocumentError
 from mamori_evals.steady import (
+    DEFAULT_MAX_BURN_1H,
     DEFAULT_THRESHOLDS_MS,
+    SloSpec,
     SteadyStateCheck,
     availability_query,
+    burn_rates,
     by_cuj,
     evaluate,
     latency_query,
+    load_slo_spec,
     load_thresholds,
 )
 
@@ -61,12 +67,41 @@ class TestBaseline:
         (tmp_path / "c.md").write_text("---\nfaultId: F02-x\n---\n")
         (tmp_path / "d.md").write_text("# no front matter\n")
         index = postmortem_dates(tmp_path)
-        assert [d.isoformat() for d in index["F01-x"]] == ["2026-12-05", "2026-12-20"]
+        assert [d.date().isoformat() for d in index["F01-x"]] == ["2026-12-05", "2026-12-20"]
         when = datetime(2026, 12, 10, tzinfo=UTC)
-        assert had_prior_postmortem(index, "F01-x", when) is True
-        assert had_prior_postmortem(index, "F02-x", when) is False
-        assert had_prior_postmortem(None, "F01-x", when) is None
-        assert had_prior_postmortem(index, "F01-x", None) is None
+        assert prior_postmortem(index, "F01-x", when) == "seen"
+        assert prior_postmortem(index, "F01-x", when, "exclude") == "hidden"
+        assert prior_postmortem(index, "F01-x", when, "include") == "seen"
+        assert prior_postmortem(index, "F02-x", when) == "none"
+        assert prior_postmortem(None, "F01-x", when) is None
+        assert prior_postmortem(index, "F01-x", None) is None
+
+    def test_postmortems_on_the_agents_branch(self) -> None:
+        files = {
+            "docs/incidents/postmortems/a.md": "---\nfaultId: F01-x\n---\n",
+            "docs/incidents/postmortems/b.md": "---\nfaultId: null\n---\n",
+            "docs/incidents/postmortems/README": "not a postmortem",
+        }
+        calls: list[list[str]] = []
+
+        def git(argv: list[str], timeout: float) -> CommandResult:
+            calls.append(list(argv))
+            command = argv[3]
+            if command == "ls-tree":
+                return CommandResult(0, "\n".join(files), "")
+            if command == "show":
+                return CommandResult(0, files[argv[4].split(":", 1)[1]], "")
+            return CommandResult(0, "2026-12-07T10:00:00+09:00\n2026-12-06T00:00:00Z\n", "")
+
+        index = postmortems_on_ref(Path("repo"), "origin/main", runner=git)  # type: ignore[arg-type]
+        assert index == {"F01-x": [datetime(2026, 12, 6, tzinfo=UTC)]}
+        assert calls[0][:4] == ["git", "-C", "repo", "ls-tree"]
+
+        def broken(argv: list[str], timeout: float) -> CommandResult:
+            return CommandResult(128, "", "fatal: bad revision")
+
+        with pytest.raises(DocumentError, match="bad revision"):
+            postmortems_on_ref(Path("repo"), "origin/main", runner=broken)  # type: ignore[arg-type]
 
     def test_bad_postmortems(self, tmp_path: Path) -> None:
         (tmp_path / "a.md").write_text("---\nfaultId: F01-x\ndate: soon\n---\n")
@@ -87,7 +122,7 @@ class TestBaseline:
             "  rootCauseIdentified: 2026-12-05T10:30:00Z\n"
             "---\n| Blind run | Yes |\n"
         )
-        assert postmortem_dates(tmp_path)["F01-x"][0].isoformat() == "2026-12-05"
+        assert postmortem_dates(tmp_path)["F01-x"][0].date().isoformat() == "2026-12-05"
         (run,) = baseline_from_postmortems(tmp_path).runs
         assert run.blind is True
         assert run.root_cause_at is not None
@@ -163,3 +198,67 @@ class TestSteady:
         thresholds = load_thresholds(spec)
         assert thresholds["browse"] == 300
         assert thresholds["checkout"] == 1000
+
+
+class BurnProm:
+    """1h and 6h windows answer with their own success ratios."""
+
+    def __init__(self, ratios: dict[str, float]) -> None:
+        self.ratios = ratios
+        self.queries: list[str] = []
+
+    def query(self, promql: str) -> list[tuple[dict[str, str], float]]:
+        self.queries.append(promql)
+        if "mamori_cuj_probe_total" in promql:
+            window = "1h" if "[1h]" in promql else "6h" if "[6h]" in promql else "5m"
+            return [({"cuj": c}, self.ratios.get(window, 1.0)) for c in ALL]
+        return [({"cuj": c}, 0.2) for c in ALL]
+
+
+class TestBurnAndSteps:
+    def test_burn_rates(self) -> None:
+        rates = burn_rates({"browse": 0.99, "checkout": 0.99}, {"browse": 0.995, "checkout": 0.99})
+        assert rates == {"browse": 2.0, "checkout": 1.0}
+        assert burn_rates({"x": 1.0}, {"x": 1.0}) == {}
+
+    def test_gate(self) -> None:
+        clean = SteadyStateCheck(BurnProm({"1h": 1.0, "6h": 1.0})).check(burn_gate=True)
+        assert clean.ok
+        assert clean.burn["1h"]["browse"] == 0.0
+        leftover = SteadyStateCheck(BurnProm({"1h": 0.95, "6h": 0.99})).check(burn_gate=True)
+        assert not leftover.ok
+        assert "browse: 1h burn rate 10.00 >= 6.72" in leftover.describe()
+        assert leftover.burn["6h"]["checkout"] == 1.0
+        # Without the gate (the recovery check after a fault) leftover burn doesn't matter.
+        assert SteadyStateCheck(BurnProm({"1h": 0.95})).check().ok
+        assert pytest.approx(6.72) == DEFAULT_MAX_BURN_1H
+
+    def test_missing_burn_data_fails_the_gate(self) -> None:
+        result = evaluate({"browse": 1.0}, None, ["browse"], 0.99, {}, {}, 6.72)
+        assert result.describe() == "not steady: browse: no 1h burn rate"
+
+    def test_latency_uses_the_slo_steps(self) -> None:
+        spec = SloSpec(dict(DEFAULT_THRESHOLDS_MS), {}, {"browse": ("home", "product")})
+        prom = BurnProm({})
+        assert SteadyStateCheck(prom, spec=spec, cujs=["browse", "checkout"]).check().ok
+        latency = [q for q in prom.queries if "histogram_quantile" in q]
+        assert 'cuj="browse",step=~"home|product"' in latency[0]
+        assert 'cuj="checkout"' in latency[1]
+        assert "step=~" not in latency[1]
+
+    def test_slo_spec(self, tmp_path: Path) -> None:
+        spec_file = tmp_path / "slos.yaml"
+        spec_file.write_text(
+            "journeys:\n"
+            "  - {id: checkout, availability: {target: 0.98}, latency: {thresholdMs: 800}}\n"
+            "prober:\n"
+            "  latencySteps: {checkout: [place-order], browse: [home, product]}\n"
+        )
+        spec = load_slo_spec(spec_file)
+        assert spec.targets["checkout"] == 0.98
+        assert spec.targets["browse"] == 0.995
+        assert spec.thresholds_ms["checkout"] == 800
+        assert spec.latency_steps == {"checkout": ("place-order",), "browse": ("home", "product")}
+        spec_file.write_text('prober:\n  latencySteps: {browse: ["home|.*"]}\n')
+        with pytest.raises(DocumentError, match="step name"):
+            load_slo_spec(spec_file)

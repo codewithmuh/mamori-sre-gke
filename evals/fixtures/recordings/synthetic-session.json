@@ -6,10 +6,11 @@
     "note": "SYNTHETIC: made-up runs that exercise every scoring path. Not lab data; never quote these numbers.",
     "session": "synthetic-session",
     "startedAt": "2000-01-01T00:55:00Z",
-    "finishedAt": "2000-01-01T07:40:00Z",
+    "finishedAt": "2000-01-01T10:40:00Z",
     "labels": {
       "AGENT_POSTMORTEMS_GAMEDAYS": "include",
-      "AGENT_HIDE_FAULT_LABELS": "false"
+      "AGENT_HIDE_FAULT_LABELS": "false",
+      "AGENT_DAILY_COST_LIMIT_USD": "40"
     }
   },
   "runs": [
@@ -78,7 +79,13 @@
           "outputTokens": 9000,
           "costUsd": 0.9
         },
-        "toolCalls": 14
+        "toolCalls": 14,
+        "seq": 41,
+        "runStartedAt": "2000-01-01T01:03:20Z",
+        "mergedIncidentIds": [
+          "incident-synthetic-01b",
+          "incident-synthetic-01c"
+        ]
       },
       "proposal": {
         "proposalId": "prop-synthetic-01",
@@ -146,9 +153,197 @@
           "status": "executed",
           "actor": "U0SYNTHETIC",
           "durationMs": 420
+        },
+        {
+          "time": "2000-01-01T01:08:31Z",
+          "severity": "INFO",
+          "message": "proposal_received",
+          "event": "proposal_received",
+          "proposalId": "prop-synthetic-01x",
+          "incidentId": "incident-synthetic-01x",
+          "investigationId": "inv-synthetic-01x",
+          "action": {
+            "type": "restart",
+            "namespace": "boutique",
+            "target": "deployment/currencyservice",
+            "params": {}
+          },
+          "status": "pending"
         }
       ],
-      "notes": []
+      "notes": [],
+      "windowInvestigations": [
+        {
+          "id": "inv-synthetic-01",
+          "incidentId": "incident-synthetic-01",
+          "source": "cloud-monitoring",
+          "status": "completed",
+          "error": null,
+          "startedAt": "2000-01-01T01:03:00Z",
+          "finishedAt": "2000-01-01T01:06:30Z",
+          "cujs": [
+            "browse",
+            "view-cart",
+            "checkout"
+          ],
+          "severity": "SEV2",
+          "impact": "Browse, view cart and checkout fail for about 60 % of requests.",
+          "hypotheses": [
+            {
+              "rank": 1,
+              "service": "currencyservice",
+              "summary": "currencyservice calls fail with UNAVAILABLE.",
+              "confidence": 0.85,
+              "evidence": [
+                "istio_requests_total: 100 % grpc_response_status=14 to currencyservice since 00:59Z",
+                "VirtualService f91-synthetic-currency-abort has an abort rule for currencyservice"
+              ]
+            },
+            {
+              "rank": 2,
+              "service": "frontend",
+              "summary": "frontend errors follow from its dependency.",
+              "confidence": 0.1,
+              "evidence": [
+                "frontend 5xx rate 60 %"
+              ]
+            }
+          ],
+          "proposedAction": {
+            "type": "remove-fault",
+            "namespace": "boutique",
+            "target": "virtualservice/f91-synthetic-currency-abort",
+            "params": {}
+          },
+          "proposalId": "prop-synthetic-01",
+          "proposalError": null,
+          "model": "claude-opus-5-5",
+          "usage": {
+            "inputTokens": 180000,
+            "outputTokens": 9000,
+            "costUsd": 0.9
+          },
+          "toolCalls": 14,
+          "seq": 41,
+          "runStartedAt": "2000-01-01T01:03:20Z",
+          "mergedIncidentIds": [
+            "incident-synthetic-01b",
+            "incident-synthetic-01c"
+          ]
+        },
+        {
+          "id": "inv-synthetic-01x",
+          "incidentId": "incident-synthetic-01x",
+          "source": "cloud-monitoring",
+          "status": "completed",
+          "error": null,
+          "seq": 42,
+          "startedAt": "2000-01-01T01:03:00Z",
+          "runStartedAt": "2000-01-01T01:07:00Z",
+          "finishedAt": "2000-01-01T01:08:30Z",
+          "cujs": [
+            "checkout"
+          ],
+          "severity": "SEV3",
+          "impact": "Checkout errors.",
+          "hypotheses": [
+            {
+              "rank": 1,
+              "service": "currencyservice",
+              "summary": "currency calls fail",
+              "confidence": 0.6,
+              "evidence": []
+            }
+          ],
+          "proposedAction": {
+            "type": "restart",
+            "namespace": "boutique",
+            "target": "deployment/currencyservice",
+            "params": {}
+          },
+          "proposalId": "prop-synthetic-01x",
+          "proposalError": null,
+          "model": "claude-opus-5-5",
+          "usage": {
+            "inputTokens": 20000,
+            "outputTokens": 1000,
+            "costUsd": 0.1
+          },
+          "toolCalls": 3
+        }
+      ],
+      "agentEvents": [
+        {
+          "time": "2000-01-01T01:03:00Z",
+          "severity": "INFO",
+          "message": "incident accepted",
+          "event": "incident_accepted",
+          "incident_id": "incident-synthetic-01",
+          "source": "cloud-monitoring",
+          "investigation_id": "inv-synthetic-01",
+          "reason": null,
+          "cujs": [
+            "browse"
+          ],
+          "policy_severity": "page"
+        },
+        {
+          "time": "2000-01-01T01:03:00Z",
+          "severity": "INFO",
+          "message": "incident accepted",
+          "event": "incident_accepted",
+          "incident_id": "incident-synthetic-01x",
+          "source": "cloud-monitoring",
+          "investigation_id": "inv-synthetic-01x",
+          "reason": null,
+          "cujs": [
+            "checkout"
+          ],
+          "policy_severity": "page"
+        },
+        {
+          "time": "2000-01-01T01:03:40Z",
+          "severity": "INFO",
+          "message": "incident merged",
+          "event": "incident_merged",
+          "incident_id": "incident-synthetic-01b",
+          "source": "cloud-monitoring",
+          "investigation_id": "inv-synthetic-01",
+          "reason": "merged",
+          "cujs": [
+            "view-cart"
+          ],
+          "policy_severity": "page"
+        },
+        {
+          "time": "2000-01-01T01:04:10Z",
+          "severity": "INFO",
+          "message": "incident skipped",
+          "event": "incident_skipped",
+          "incident_id": "incident-synthetic-01t",
+          "source": "cloud-monitoring",
+          "investigation_id": null,
+          "reason": "ticket",
+          "cujs": [
+            "browse"
+          ],
+          "policy_severity": "ticket"
+        }
+      ],
+      "preBurn": {
+        "1h": {
+          "browse": 0.0,
+          "add-to-cart": 0.0,
+          "view-cart": 0.0,
+          "checkout": 0.0
+        },
+        "6h": {
+          "browse": 0.0,
+          "add-to-cart": 0.0,
+          "view-cart": 0.0,
+          "checkout": 0.0
+        }
+      }
     },
     {
       "faultId": "F92-synthetic-productcatalog-latency",
@@ -270,7 +465,21 @@
           "actor": "U0SYNTHETIC"
         }
       ],
-      "notes": []
+      "notes": [],
+      "preBurn": {
+        "1h": {
+          "browse": 2.5,
+          "add-to-cart": 0.0,
+          "view-cart": 0.0,
+          "checkout": 0.0
+        },
+        "6h": {
+          "browse": 0.8,
+          "add-to-cart": 0.0,
+          "view-cart": 0.0,
+          "checkout": 0.0
+        }
+      }
     },
     {
       "faultId": "F93-synthetic-redis-cart-pod-kill",
@@ -331,7 +540,21 @@
       },
       "proposal": null,
       "executorEvents": [],
-      "notes": []
+      "notes": [],
+      "preBurn": {
+        "1h": {
+          "browse": 0.0,
+          "add-to-cart": 0.0,
+          "view-cart": 0.0,
+          "checkout": 0.0
+        },
+        "6h": {
+          "browse": 0.0,
+          "add-to-cart": 0.0,
+          "view-cart": 0.0,
+          "checkout": 0.0
+        }
+      }
     },
     {
       "faultId": "F94-synthetic-checkout-bad-config",
@@ -433,7 +656,21 @@
           "error": "replicas 12 is above the bound 3"
         }
       ],
-      "notes": []
+      "notes": [],
+      "preBurn": {
+        "1h": {
+          "browse": 0.5,
+          "add-to-cart": 0.0,
+          "view-cart": 0.0,
+          "checkout": 0.0
+        },
+        "6h": {
+          "browse": 0.0,
+          "add-to-cart": 0.0,
+          "view-cart": 0.0,
+          "checkout": 0.0
+        }
+      }
     },
     {
       "faultId": "F95-synthetic-node-preemption",
@@ -445,13 +682,76 @@
       "faultRunId": null,
       "faultObjects": [],
       "faultEnd": null,
-      "investigation": null,
+      "investigation": {
+        "id": "inv-synthetic-05",
+        "incidentId": "incident-synthetic-05",
+        "source": "cloud-monitoring",
+        "status": "completed",
+        "error": null,
+        "seq": 50,
+        "startedAt": "2000-01-01T05:04:00Z",
+        "finishedAt": "2000-01-01T05:09:00Z",
+        "cujs": [
+          "browse",
+          "add-to-cart",
+          "view-cart",
+          "checkout"
+        ],
+        "severity": "SEV2",
+        "impact": "Every journey failed for a few minutes.",
+        "hypotheses": [
+          {
+            "rank": 1,
+            "service": "node",
+            "summary": "Spot node gke-mamori-spot-pool-1 was preempted.",
+            "confidence": 0.7,
+            "evidence": [
+              "node NotReady at 05:00:20Z"
+            ]
+          },
+          {
+            "rank": 2,
+            "service": "frontend",
+            "summary": "frontend pods were rescheduled.",
+            "confidence": 0.2,
+            "evidence": []
+          }
+        ],
+        "proposedAction": {
+          "type": "none",
+          "namespace": "boutique",
+          "target": null,
+          "params": {}
+        },
+        "proposalId": null,
+        "proposalError": null,
+        "model": "claude-opus-5-5",
+        "usage": {
+          "inputTokens": 60000,
+          "outputTokens": 3000,
+          "costUsd": 0.3
+        },
+        "toolCalls": 8
+      },
       "proposal": null,
       "executorEvents": [],
       "notes": [
-        "injected by hand",
-        "no investigation within 20m00s"
-      ]
+        "injected by hand"
+      ],
+      "preBurn": {
+        "1h": {
+          "browse": 0.0,
+          "add-to-cart": 0.0,
+          "view-cart": 0.0,
+          "checkout": 0.0
+        },
+        "6h": {
+          "browse": 0.0,
+          "add-to-cart": 0.0,
+          "view-cart": 0.0,
+          "checkout": 0.0
+        }
+      }
     },
     {
       "faultId": "F96-synthetic-recommendation-cpu-stress",
@@ -549,7 +849,21 @@
           "error": "action type delete is not allowed"
         }
       ],
-      "notes": []
+      "notes": [],
+      "preBurn": {
+        "1h": {
+          "browse": 0.0,
+          "add-to-cart": 0.0,
+          "view-cart": 0.0,
+          "checkout": 0.0
+        },
+        "6h": {
+          "browse": 6.0,
+          "add-to-cart": 0.0,
+          "view-cart": 0.0,
+          "checkout": 0.0
+        }
+      }
     },
     {
       "faultId": "F97-synthetic-payment-abort",
@@ -589,11 +903,29 @@
           "outputTokens": 500,
           "costUsd": 0.05
         },
-        "toolCalls": 2
+        "toolCalls": 2,
+        "agentConfig": {
+          "hideFaultLabels": true,
+          "postmortemsGamedays": "include"
+        }
       },
       "proposal": null,
       "executorEvents": [],
-      "notes": []
+      "notes": [],
+      "preBurn": {
+        "1h": {
+          "browse": 0.0,
+          "add-to-cart": 0.0,
+          "view-cart": 0.0,
+          "checkout": 0.0
+        },
+        "6h": {
+          "browse": 0.0,
+          "add-to-cart": 0.0,
+          "view-cart": 0.0,
+          "checkout": 0.0
+        }
+      }
     },
     {
       "faultId": "F98-synthetic-shipping-abort",
@@ -609,6 +941,177 @@
       "proposal": null,
       "executorEvents": [],
       "notes": []
+    },
+    {
+      "faultId": "F98-synthetic-shipping-abort",
+      "status": "completed",
+      "reason": null,
+      "injectedAt": "2000-01-01T08:00:00Z",
+      "stoppedAt": "2000-01-01T08:20:30Z",
+      "recoveredAt": "2000-01-01T08:32:00Z",
+      "faultRunId": "20000101T080000Z-F98-synthetic-shipping-abort",
+      "faultObjects": [
+        "virtualservice/f98-synthetic-shipping-abort"
+      ],
+      "faultEnd": {
+        "reason": "signal",
+        "at": "2000-01-01T08:20:30Z"
+      },
+      "investigation": null,
+      "proposal": null,
+      "executorEvents": [],
+      "notes": [
+        "no investigation within 20m00s"
+      ],
+      "windowInvestigations": [],
+      "agentEvents": [
+        {
+          "time": "2000-01-01T08:03:00Z",
+          "severity": "INFO",
+          "message": "incident skipped",
+          "event": "incident_skipped",
+          "incident_id": "incident-synthetic-08",
+          "source": "cloud-monitoring",
+          "investigation_id": null,
+          "reason": "daily_budget",
+          "cujs": [
+            "checkout"
+          ],
+          "policy_severity": "page"
+        }
+      ],
+      "preBurn": {
+        "1h": {
+          "browse": 0.0,
+          "add-to-cart": 0.0,
+          "view-cart": 0.0,
+          "checkout": 0.0
+        },
+        "6h": {
+          "browse": 0.0,
+          "add-to-cart": 0.0,
+          "view-cart": 0.0,
+          "checkout": 0.0
+        }
+      }
+    },
+    {
+      "faultId": "F93-synthetic-redis-cart-pod-kill",
+      "status": "completed",
+      "reason": null,
+      "injectedAt": "2000-01-01T09:00:00Z",
+      "stoppedAt": "2000-01-01T09:20:30Z",
+      "recoveredAt": "2000-01-01T09:31:00Z",
+      "faultRunId": "20000101T090000Z-F93-synthetic-redis-cart-pod-kill",
+      "faultObjects": [
+        "podchaos/f93-synthetic-redis-cart-pod-kill"
+      ],
+      "faultEnd": {
+        "reason": "signal",
+        "at": "2000-01-01T09:20:30Z"
+      },
+      "investigation": null,
+      "proposal": null,
+      "executorEvents": [],
+      "notes": [
+        "no investigation within 20m00s"
+      ],
+      "windowInvestigations": [],
+      "agentEvents": [
+        {
+          "time": "2000-01-01T09:02:00Z",
+          "severity": "INFO",
+          "message": "incident skipped",
+          "event": "incident_skipped",
+          "incident_id": "incident-synthetic-09",
+          "source": "cloud-monitoring",
+          "investigation_id": null,
+          "reason": "ticket",
+          "cujs": [
+            "checkout"
+          ],
+          "policy_severity": "ticket"
+        },
+        {
+          "time": "2000-01-01T09:02:30Z",
+          "severity": "INFO",
+          "message": "incident skipped",
+          "event": "incident_skipped",
+          "incident_id": "incident-synthetic-09",
+          "source": "cloud-monitoring",
+          "investigation_id": null,
+          "reason": "duplicate",
+          "cujs": [
+            "checkout"
+          ],
+          "policy_severity": "ticket"
+        }
+      ],
+      "preBurn": {
+        "1h": {
+          "browse": 0.0,
+          "add-to-cart": 0.0,
+          "view-cart": 0.0,
+          "checkout": 0.0
+        },
+        "6h": {
+          "browse": 0.0,
+          "add-to-cart": 0.0,
+          "view-cart": 0.0,
+          "checkout": 0.0
+        }
+      }
+    },
+    {
+      "faultId": "F94-synthetic-checkout-bad-config",
+      "status": "completed",
+      "reason": null,
+      "injectedAt": "2000-01-01T10:00:00Z",
+      "stoppedAt": "2000-01-01T10:20:30Z",
+      "recoveredAt": "2000-01-01T10:31:00Z",
+      "faultRunId": null,
+      "faultObjects": [],
+      "faultEnd": {
+        "reason": "signal",
+        "at": "2000-01-01T10:20:30Z"
+      },
+      "investigation": null,
+      "proposal": null,
+      "executorEvents": [],
+      "notes": [
+        "no investigation within 20m00s"
+      ],
+      "windowInvestigations": [],
+      "agentEvents": [
+        {
+          "time": "2000-01-01T10:01:00Z",
+          "severity": "INFO",
+          "message": "incident skipped",
+          "event": "incident_skipped",
+          "incident_id": "incident-synthetic-07",
+          "source": "cloud-monitoring",
+          "investigation_id": null,
+          "reason": "closed",
+          "cujs": [
+            "checkout"
+          ],
+          "policy_severity": "page"
+        }
+      ],
+      "preBurn": {
+        "1h": {
+          "browse": 0.0,
+          "add-to-cart": 0.0,
+          "view-cart": 0.0,
+          "checkout": 0.0
+        },
+        "6h": {
+          "browse": 0.0,
+          "add-to-cart": 0.0,
+          "view-cart": 0.0,
+          "checkout": 0.0
+        }
+      }
     }
   ]
 }

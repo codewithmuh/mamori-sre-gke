@@ -13,11 +13,15 @@ from mamori_evals.clients import FaultRefusedError, GamedayError, ManualFaultErr
 from mamori_evals.faults import Fault
 from mamori_evals.live import LiveConfig, LiveRunner
 from mamori_evals.records import (
+    AgentEvent,
+    AgentStatus,
     ExecutorEvent,
     FaultEnd,
     Investigation,
     Proposal,
     RunObservation,
+    parse_agent_event,
+    parse_agent_status,
     parse_executor_event,
     parse_proposal,
 )
@@ -113,13 +117,24 @@ class FakeAgent:
         self.clock, self.delay, self.inv = clock, delay, inv
         self.injections: list[datetime] = []
         self.errors: list[BaseException] = []
+        # Status answers in turn (the last repeats); None means GET /v1/status is not served.
+        self.statuses: list[dict[str, Any] | None] = [{"queued": 0, "running": 0}]
+        self.status_calls = 0
+        self.extra: list[Investigation] = []
+
+    def status(self) -> AgentStatus | None:
+        self.status_calls += 1
+        answer = self.statuses[min(self.status_calls - 1, len(self.statuses) - 1)]
+        if isinstance(answer, dict) and answer.get("raise"):
+            raise RuntimeError("status down")
+        return parse_agent_status(answer) if answer is not None else None
 
     def investigations_since(self, since: datetime) -> list[Investigation]:
         if self.errors:
             raise self.errors.pop(0)
         if self.delay is None:
-            return []
-        found = []
+            return list(self.extra)
+        found = list(self.extra)
         for index, injected in enumerate(self.injections):
             start = injected + self.delay
             if self.clock.now() >= start:
@@ -136,9 +151,15 @@ class FakeAgent:
 
 
 class FakeExecutor:
-    def __init__(self, statuses: list[str] | None = None, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        statuses: list[str] | None = None,
+        error: Exception | None = None,
+        expires_at: datetime | None = None,
+    ) -> None:
         self.statuses = statuses or ["pending"]
         self.error = error
+        self.expires_at = expires_at
         self.calls = 0
 
     def proposal(self, proposal_id: str) -> Proposal | None:
@@ -146,7 +167,12 @@ class FakeExecutor:
         if self.error:
             raise self.error
         status = self.statuses[min(self.calls - 1, len(self.statuses) - 1)]
-        return parse_proposal({"proposalId": proposal_id, "status": status}) if status else None
+        if not status:
+            return None
+        doc: dict[str, Any] = {"proposalId": proposal_id, "status": status}
+        if self.expires_at is not None:
+            doc["expiresAt"] = self.expires_at.isoformat()
+        return parse_proposal(doc)
 
 
 class FakeLogs:
@@ -168,13 +194,29 @@ class FakeSteady:
     ) -> None:
         self.results = results
         self.calls = 0
+        self.gates: list[bool] = []
 
-    def check(self) -> SteadyResult:
+    def check(self, burn_gate: bool = False) -> SteadyResult:
         self.calls += 1
+        self.gates.append(burn_gate)
         result = self.results(self.calls)
         if isinstance(result, BaseException):
             raise result
+        if burn_gate:
+            burn = {"1h": {"browse": 0.2}, "6h": {"browse": 0.1}}
+            return SteadyResult(result.ok, result.reasons, burn=burn)
         return result
+
+
+class FakeAgentLogs:
+    def __init__(self, events: list[dict[str, Any]] | None = None, error: bool = False) -> None:
+        self.events = events or []
+        self.error = error
+
+    def events_since(self, since: datetime) -> list[AgentEvent]:
+        if self.error:
+            raise RuntimeError("agent logs forbidden")
+        return [parse_agent_event(e) for e in self.events]
 
 
 @dataclass
@@ -187,6 +229,7 @@ class Harness:
     executor: FakeExecutor = field(default_factory=FakeExecutor)
     logs: FakeLogs = field(default_factory=FakeLogs)
     steady: FakeSteady = field(default_factory=FakeSteady)
+    agent_logs: FakeAgentLogs | None = None
     ask: Callable[[str], str] | None = None
     logged: list[str] = field(default_factory=list)
     updates: int = 0
@@ -224,6 +267,7 @@ class Harness:
             on_update=update,
             ask=self.ask,
             keepalive=keepalive,
+            agent_logs=self.agent_logs,
         )
 
 
@@ -246,7 +290,12 @@ def test_happy_path_two_faults() -> None:
     assert first.investigation.id == "inv-0"
     assert first.proposal is not None
     assert first.proposal.status == "pending"
-    assert [e.proposal_id for e in first.executor_events] == ["p-0"]
+    assert [e.proposal_id for e in first.executor_events] == ["p-0", "x"]
+    assert [inv.id for inv in first.window_investigations or ()] == ["inv-0"]
+    assert first.pre_burn == {"1h": {"browse": 0.2}, "6h": {"browse": 0.1}}
+    assert first.agent_status_before == {"queued": 0, "running": 0}
+    assert True in h.steady.gates
+    assert False in h.steady.gates
     assert first.fault_end is not None
     assert first.fault_end.reason == "signal"
     assert first.recovered_at is not None
@@ -287,22 +336,27 @@ def test_not_steady_before_the_first_fault() -> None:
     assert [r.status for r in runs] == ["skipped", "skipped"]
     assert runs[0].reason is not None
     assert "probe success" in runs[0].reason
-    assert runs[1].reason == "shop not steady before F01-fault-1"
+    assert runs[1].reason == "shop not ready before F01-fault-1"
     assert h.gameday.calls == []
 
 
 def test_budget_skips_what_does_not_fit() -> None:
-    h = Harness([fault(1), fault(2)], config=LiveConfig(budget=timedelta(minutes=40)))
+    config = LiveConfig(budget=timedelta(minutes=50), steady_timeout=timedelta(minutes=10))
+    h = Harness([fault(1), fault(2)], config=config)
     runs = h.runner().run()
     assert runs[0].status == "completed"
     assert (runs[1].status, runs[1].reason) == ("skipped", "time budget used up")
 
 
 def test_budget_runs_out_while_waiting() -> None:
-    # Room for one run at the start (20 + 1 min), but the steady wait takes 2 minutes.
-    config = LiveConfig(budget=timedelta(minutes=21), cooldown_min=timedelta(minutes=1))
-    steady = FakeSteady(lambda n: UNSTEADY if n <= 3 else STEADY)
-    h = Harness([fault(1)], config=config, agent_delay=None, steady=steady)
+    # Room for one run at the start (1 + 20 + 1 min), but the approval wait is longer.
+    config = LiveConfig(
+        budget=timedelta(minutes=22),
+        steady_timeout=timedelta(minutes=1),
+        cooldown_min=timedelta(minutes=1),
+        proposal_wait=timedelta(minutes=30),
+    )
+    h = Harness([fault(1)], config=config)
     (run,) = h.runner().run()
     assert (run.status, run.reason) == ("aborted", "time budget used up")
     assert h.gameday.handles[0].stopped
@@ -410,7 +464,7 @@ def test_proposal_wait_follows_the_status() -> None:
     (run,) = h.runner().run()
     assert run.proposal is not None
     assert run.proposal.status == "executed"
-    assert executor.calls == 3
+    assert executor.calls == 4  # three while waiting, one more at the end of the session
 
 
 def test_refused_proposal_reads_as_none() -> None:
@@ -450,7 +504,7 @@ def test_steady_query_errors_count_as_not_steady() -> None:
 )
 def test_cooldown_interruptions(error: BaseException | None, reason: str) -> None:
     if error is None:
-        config = LiveConfig(budget=timedelta(minutes=35))
+        config = LiveConfig(budget=timedelta(minutes=35), steady_timeout=timedelta(minutes=1))
         h = Harness([fault(1), fault(2)], config=config)
     else:
         h = Harness([fault(1), fault(2)], steady=FakeSteady(lambda n: STEADY if n <= 2 else error))
@@ -460,17 +514,18 @@ def test_cooldown_interruptions(error: BaseException | None, reason: str) -> Non
     assert runs[1].reason == reason
 
 
-def test_unattributed_executor_lines_are_noted() -> None:
+def test_executor_lines_without_an_investigation_are_kept() -> None:
     h = Harness(
         [fault(1)], agent_delay=None, logs=FakeLogs([{"event": "blocked", "proposalId": "x"}])
     )
     (run,) = h.runner().run()
-    assert "1 executor audit lines in the window, none tied to an investigation" in run.notes
+    assert [e.proposal_id for e in run.executor_events] == ["x"]
 
 
-def test_signals_wait_until_the_fault_is_gone() -> None:
+@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGHUP])
+def test_signals_wait_until_the_fault_is_gone(sig: signal.Signals) -> None:
     h = Harness([fault(1), fault(2)])
-    h.gameday.on_stop = lambda: os.kill(os.getpid(), signal.SIGINT)
+    h.gameday.on_stop = lambda: os.kill(os.getpid(), sig)
     runner = h.runner()
     runs = runner.run()
     assert runs[0].status == "completed"
@@ -485,6 +540,99 @@ def test_config() -> None:
     assert LiveConfig(investigation_timeout=timedelta(hours=1)).fault_duration == timedelta(
         minutes=30
     )
-    assert LiveConfig().max_run_time == timedelta(minutes=62)
+    assert LiveConfig().max_run_time == timedelta(minutes=127)
+    assert LiveConfig().room_needed == timedelta(minutes=105)
     with pytest.raises(ValueError, match="manual_faults"):
         Harness([fault(1)], config=LiveConfig(manual_faults="yolo")).runner()
+
+
+def test_waits_for_the_agent_to_be_idle() -> None:
+    h = Harness([fault(1)])
+    h.agent.statuses = [
+        {"queued": 1, "running": 1},
+        {"queued": 0, "running": 1},
+        {"queued": 0, "running": 0},
+    ]
+    (run,) = h.runner().run()
+    assert run.status == "completed"
+    assert "waiting for the agent to finish 2 investigation(s)" in h.logged
+    assert run.injected_at == T0 + timedelta(seconds=60)  # 2 polls, then 2 steady checks
+
+
+@pytest.mark.parametrize(
+    ("statuses", "reason"),
+    [
+        ([{"queued": 1, "running": 0}], "the agent is still busy with earlier investigations"),
+        ([{"raise": True}], "the agent's status could not be read"),
+    ],
+)
+def test_a_busy_agent_ends_the_session(statuses: list[dict[str, Any]], reason: str) -> None:
+    h = Harness([fault(1), fault(2)])
+    h.agent.statuses = statuses
+    runs = h.runner().run()
+    assert [(r.status, r.reason) for r in runs] == [("skipped", reason)] * 2
+    assert h.gameday.calls == []
+
+
+def test_without_a_status_endpoint_busy_records_count() -> None:
+    h = Harness([fault(1)])
+    h.agent.statuses = [None]
+    h.agent.extra = [make_investigation(id="old", status="queued", finishedAt=None)]
+    (run,) = h.runner().run()
+    assert run.reason == "the agent is still busy with earlier investigations"
+
+
+def test_too_little_model_budget_ends_the_session() -> None:
+    h = Harness([fault(1)])
+    h.agent.statuses = [
+        {
+            "queued": 0,
+            "running": 0,
+            "dailySpentUsd": 14.0,
+            "dailyReservedUsd": 0.0,
+            "agentConfig": {"dailyCostLimitUsd": 15, "maxCostUsd": 1.5},
+        }
+    ]
+    (run,) = h.runner().run()
+    assert run.status == "skipped"
+    assert "raise AGENT_DAILY_COST_LIMIT_USD" in (run.reason or "")
+
+
+def test_agent_intake_lines_are_recorded() -> None:
+    line = {"time": (T0 + timedelta(minutes=2)).isoformat(), "event": "incident_skipped"}
+    old = {"time": (T0 - timedelta(hours=1)).isoformat(), "event": "incident_skipped"}
+    h = Harness([fault(1)], agent_logs=FakeAgentLogs([{**line, "reason": "ticket"}, old]))
+    (run,) = h.runner().run()
+    assert run.agent_events is not None
+    assert [e.reason for e in run.agent_events] == ["ticket"]
+    broken = Harness([fault(1)], agent_logs=FakeAgentLogs(error=True))
+    (run,) = broken.runner().run()
+    assert run.agent_events is None
+    assert "agent intake log not read: agent logs forbidden" in run.notes
+
+
+def test_pending_proposals_are_read_again_after_they_expire() -> None:
+    executor = FakeExecutor(["pending", "expired"], expires_at=T0 + timedelta(minutes=40))
+    h = Harness([fault(1)], executor=executor)
+    (run,) = h.runner().run()
+    assert run.proposal is not None
+    assert run.proposal.status == "expired"
+    assert h.clock.now() >= T0 + timedelta(minutes=40)
+    assert any(line.startswith("waiting") and "expire" in line for line in h.logged)
+
+
+def test_the_reread_tolerates_errors() -> None:
+    executor = FakeExecutor(["pending"])
+    h = Harness([fault(1)], executor=executor)
+    runner = h.runner()
+    original = executor.proposal
+
+    def flaky(proposal_id: str) -> Proposal | None:
+        if executor.calls >= 1:
+            executor.calls += 1
+            raise RuntimeError("gone")
+        return original(proposal_id)
+
+    executor.proposal = flaky  # type: ignore[method-assign]
+    (run,) = runner.run()
+    assert "proposal not read again: gone" in run.notes

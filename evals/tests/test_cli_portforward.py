@@ -129,12 +129,14 @@ class TestCli:
             str(FIXTURES / "baselines" / "synthetic-other-tool.yaml"),
             "--out-dir",
             str(tmp_path),
+            "--postmortems-ref",
+            "",
         ]
         assert cli.main(args) == 0
         out = capsys.readouterr().out
         assert "Synthetic replay" in out
         results = tmp_path / "synthetic-session.results.json"
-        assert json.loads(results.read_text())["summary"]["top1"]["k"] == 3
+        assert json.loads(results.read_text())["summary"]["top1"]["k"] == 4
         assert (tmp_path / "synthetic-session.md").read_text() == out
         assert cli.main(["report", str(results)]) == 0
         assert capsys.readouterr().out == out
@@ -154,9 +156,10 @@ class TestCli:
             "--faults-dir",
             FAULTS,
         ]
-        assert cli.main([*args, "--out-dir", str(tmp_path), "--postmortems", str(tmp_path)]) == 0
+        more = ["--out-dir", str(tmp_path), "--postmortems", str(tmp_path), "--postmortems-ref", ""]
+        assert cli.main([*args, *more]) == 0
         results = json.loads((tmp_path / "combined-2-sessions.results.json").read_text())
-        assert results["summary"]["runs"]["total"] == 16
+        assert results["summary"]["runs"]["total"] == 22
         assert results["metadata"]["recordings"] == [RECORDING, RECORDING]
         capsys.readouterr()
 
@@ -248,6 +251,9 @@ def test_run_live_with_fakes(
         "AGENT_POSTMORTEMS_GAMEDAYS=exclude",
         "--postmortems",
         str(tmp_path / "none"),
+        "--postmortems-ref",
+        "",
+        "--no-verify-conditions",
     ]
     assert cli.main(args) == cli.EXIT_INTERRUPTED
     recordings = list(tmp_path.glob("*.recording.json"))
@@ -258,3 +264,65 @@ def test_run_live_with_fakes(
     assert "finishedAt" in recording["metadata"]
     assert len(list(tmp_path.glob("*.results.json"))) == 1
     assert "session ended early: interrupted" in capsys.readouterr().err
+
+
+def test_run_checks_the_conditions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mamori_evals.records import RunObservation
+
+    class StubRunner:
+        def __init__(self, faults: list[Any], *args: Any, **kwargs: Any) -> None:
+            self.faults = faults
+            self.abort_reason, self.interrupted = None, False
+
+        def run(self) -> list[RunObservation]:
+            return [RunObservation(f.id, "skipped", reason="test") for f in self.faults]
+
+    env = {"AGENT_POSTMORTEMS_GAMEDAYS": "exclude", "AGENT_DAILY_COST_LIMIT_USD": "40"}
+    monkeypatch.setattr(cli, "LiveRunner", StubRunner)
+    monkeypatch.setattr(cli, "deployment_env", lambda argv, container: env)
+    monkeypatch.setattr(cli.AgentApi, "status", lambda self: None)
+    base = [
+        "run",
+        "--faults",
+        "F91-synthetic-currency-abort",
+        "--faults-dir",
+        FAULTS,
+        "--prometheus-url",
+        "http://127.0.0.1:9090",
+        "--out-dir",
+        str(tmp_path),
+        "--postmortems",
+        str(tmp_path / "none"),
+        "--postmortems-ref",
+        "",
+    ]
+    assert cli.main([*base, "--label", "AGENT_POSTMORTEMS_GAMEDAYS=exclude"]) == 0
+    (recording,) = tmp_path.glob("*.recording.json")
+    assert json.loads(recording.read_text())["metadata"]["labels"] == env
+    capsys.readouterr()
+    assert cli.main([*base, "--label", "AGENT_POSTMORTEMS_GAMEDAYS=include"]) == cli.EXIT_ERROR
+    assert "you typed include" in capsys.readouterr().err
+
+
+def test_replay_falls_back_to_postmortem_dates(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = [
+        "replay",
+        "--recording",
+        RECORDING,
+        "--faults-dir",
+        FAULTS,
+        "--postmortems",
+        str(FIXTURES / "postmortems"),
+        "--postmortems-ref",
+        "no-such-ref-for-evals-tests",
+        "--out-dir",
+        str(tmp_path),
+    ]
+    assert cli.main(args) == 0
+    results = json.loads((tmp_path / "synthetic-session.results.json").read_text())
+    assert results["metadata"]["postmortemIndex"] == "front-matter dates (approximate)"
+    assert "using their dates" in capsys.readouterr().err

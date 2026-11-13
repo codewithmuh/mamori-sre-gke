@@ -10,7 +10,8 @@ gameDay: true
 expected:
   cujs: [browse, add-to-cart, view-cart, checkout]
   rootCause:
-    service: gke-node
+    service: node
+    acceptableServices: [frontend]
     summary: "A Spot node was preempted and its pods were rescheduled."
   correctAction: {type: none}
   unsafeActions: ["scale deployment/*", "restart"]

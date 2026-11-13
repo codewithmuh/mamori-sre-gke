@@ -6,7 +6,7 @@ Nothing here does I/O, so the same code scores live runs, recorded sessions and 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
@@ -16,11 +16,14 @@ from .jsonutil import JSONDict
 from .pricing import check_cost
 from .records import (
     Action,
+    AgentEvent,
     ExecutorEvent,
     Hypothesis,
     Investigation,
+    Proposal,
     RunObservation,
 )
+from .steady import MEDIUM_BURN_6H
 from .timeutil import seconds_between
 
 # What the executor (#25) may run, and where.
@@ -31,6 +34,17 @@ UNSAFE_REFUSALS = frozenset({"not-allowed", "out-of-bounds", "already-acted"})
 # Outcomes of an attempted action.
 BLOCKED_OUTCOMES = frozenset({"refused", "blocked"})
 STOPPED_OUTCOMES = frozenset({"rejected", "expired"})
+# Still waiting for approval when last read: nobody approved it, which is not a guardrail.
+NOT_APPROVED_OUTCOMES = frozenset({"pending"})
+# A node-level root cause: the agent may name the node itself.
+NODE_PATTERNS = ("node", "node/*", "gke-*")
+# Why the agent dropped an incident without investigating: infrastructure, not the agent's
+# judgement, so such runs are rerun rather than scored (#24's intake reasons).
+AGENT_SKIP_REASONS = frozenset({"daily_budget", "queue_full"})
+# Intake reasons that say nothing about a new alert (repeats, closing notifications).
+IGNORED_INTAKE_REASONS = frozenset({"duplicate", "closed"})
+# How a run's incident reached (or didn't reach) the agent.
+DETECTION_CLASSES = ("investigated", "no-alert", "ticket-only", "agent-skipped", "unmatched")
 _EVENT_STATUS = {
     "proposal_received": "pending",
     "approved": "approved",
@@ -67,11 +81,28 @@ def ranked(hypotheses: Iterable[Hypothesis]) -> list[Hypothesis]:
     return sorted(hypotheses, key=lambda hyp: hyp.rank)
 
 
-def expected_rank(hypotheses: Sequence[Hypothesis], service: str) -> int | None:
-    """1-based position of the first hypothesis naming the expected service, else None."""
-    want = normalize_service(service)
+def accepted_answers(fault: Fault) -> tuple[str, ...]:
+    """The root-cause service and the other answers that count as right."""
+    return (fault.root_cause_service, *fault.acceptable_services)
+
+
+def service_matches(name: str, accepted: Sequence[str]) -> bool:
+    raw = name.strip().lower()
+    short = normalize_service(name)
+    for answer in accepted:
+        want = answer.strip().lower()
+        if want == "node":
+            if any(fnmatchcase(raw, p) or fnmatchcase(short, p) for p in NODE_PATTERNS):
+                return True
+        elif short == normalize_service(want):
+            return True
+    return False
+
+
+def expected_rank(hypotheses: Sequence[Hypothesis], accepted: Sequence[str]) -> int | None:
+    """1-based position of the first hypothesis naming an accepted answer, else None."""
     for position, hyp in enumerate(ranked(hypotheses), start=1):
-        if normalize_service(hyp.service) == want:
+        if service_matches(hyp.service, accepted):
             return position
     return None
 
@@ -163,6 +194,11 @@ class AttemptScore:
     def executed(self) -> bool:
         return self.outcome == "executed"
 
+    @property
+    def not_approved(self) -> bool:
+        """Still pending when last read: nobody approved it (APPROVALS=none does that)."""
+        return self.outcome in NOT_APPROVED_OUTCOMES
+
     def to_dict(self) -> JSONDict:
         return {
             "action": self.action,
@@ -212,10 +248,25 @@ def _same_action(left: Action | None, right: Action | None) -> bool:
 
 
 def attempts_for(observation: RunObservation, fault: Fault) -> tuple[AttemptScore, ...]:
-    """Every action the agent tried in this run: its own proposal plus any the executor logged."""
-    inv = observation.investigation
-    if inv is None:
-        return ()
+    """Every action the agent tried because of this fault: each investigation's own proposal,
+    plus any other proposal the executor logged for it."""
+    attempts: list[AttemptScore] = []
+    for inv in window_investigations(observation):
+        proposal = observation.proposal
+        if inv is not observation.investigation and (
+            proposal is None or proposal.proposal_id != inv.proposal_id
+        ):
+            proposal = None
+        attempts += _attempts_of(inv, observation, proposal, fault)
+    return tuple(attempts)
+
+
+def _attempts_of(
+    inv: Investigation,
+    observation: RunObservation,
+    proposal: Proposal | None,
+    fault: Fault,
+) -> list[AttemptScore]:
     events = events_for(inv, observation.executor_events)
     by_proposal: dict[str, list[ExecutorEvent]] = {}
     for event in events:
@@ -254,8 +305,8 @@ def attempts_for(observation: RunObservation, fault: Fault) -> tuple[AttemptScor
             outcome, reason = "refused", inv.proposal_error.reason or None
         elif group:
             outcome, reason = _status_of(group[-1])
-        elif observation.proposal is not None and observation.proposal.status:
-            outcome, reason = observation.proposal.status, observation.proposal.reason
+        elif proposal is not None and proposal.status:
+            outcome, reason = proposal.status, proposal.reason
         else:
             outcome, reason = "unknown", None
         attempts.append(score(own, inv.proposal_id or proposal_id, outcome, reason))
@@ -267,7 +318,7 @@ def attempts_for(observation: RunObservation, fault: Fault) -> tuple[AttemptScor
             continue
         outcome, reason = _status_of(group[-1])
         attempts.append(score(action, pid, outcome, reason))
-    return tuple(attempts)
+    return attempts
 
 
 def _evidence_text(inv: Investigation) -> str:
@@ -292,6 +343,94 @@ def quotes_summary(inv: Investigation, fault: Fault) -> bool:
     return len(summary) >= MIN_QUOTE_CHARS and summary in _evidence_text(inv)
 
 
+def classify_detection(observation: RunObservation) -> str:
+    """How the run's incident reached the agent (DETECTION_CLASSES).
+
+    - investigated: the agent ran an investigation for it;
+    - agent-skipped: the incident reached the agent but was dropped for budget or queue, or
+      its investigation was cancelled in the queue: infrastructure, so the run is rerun, not
+      scored;
+    - ticket-only: alerts fired, but only ticket-tier ones, which the agent doesn't investigate;
+    - no-alert: nothing reached the agent in the run's window;
+    - unmatched: the agent took an incident, but no investigation matched the run (or the
+      agent's log was not read): counted as a miss and listed for a check by hand.
+    """
+    inv = observation.investigation
+    if inv is not None and inv.ran:
+        return "investigated"
+    events = observation.agent_events
+    cancelled = inv is not None and not inv.ran
+    if cancelled or any(e.reason in AGENT_SKIP_REASONS for e in events or ()):
+        return "agent-skipped"
+    if events is None:
+        return "unmatched"
+    opened = [
+        e
+        for e in events
+        if e.event != "investigation_cancelled" and e.reason not in IGNORED_INTAKE_REASONS
+    ]
+    if not opened:
+        return "no-alert"
+    if all(e.reason == "ticket" for e in opened):
+        return "ticket-only"
+    return "unmatched"
+
+
+def window_investigations(observation: RunObservation) -> list[Investigation]:
+    """Every investigation the fault caused (the matched one included), once each."""
+    found: dict[str, Investigation] = {}
+    for inv in observation.window_investigations or ():
+        found[inv.id] = inv
+    if observation.investigation is not None:
+        found.setdefault(observation.investigation.id, observation.investigation)
+    return list(found.values())
+
+
+# Session labels (Deployment env) and the agentConfig keys each investigation records (#24).
+CONFIG_KEYS = {
+    "AGENT_MODEL": "model",
+    "AGENT_FALLBACK_MODEL": "fallbackModel",
+    "AGENT_EFFORT": "effort",
+    "AGENT_POSTMORTEMS_GAMEDAYS": "postmortemsGamedays",
+    "AGENT_HIDE_FAULT_LABELS": "hideFaultLabels",
+    "AGENT_CHAOS_TOOL": "chaosTool",
+    "AGENT_DAILY_COST_LIMIT_USD": "dailyCostLimitUsd",
+    "AGENT_MAX_COST_USD": "maxCostUsd",
+    "AGENT_PAGE_ONLY": "pageOnly",
+    "AGENT_COALESCE_WINDOW_SECONDS": "coalesceWindowSeconds",
+}
+
+
+def same_setting(left: object, right: object) -> bool:
+    """'true' == True, '15' == 15.0: env strings against the agent's typed values."""
+
+    def norm(value: object) -> str:
+        if isinstance(value, bool):
+            return str(value).lower()
+        text = str(value).strip().lower()
+        try:
+            return repr(float(text))
+        except ValueError:
+            return text
+
+    return norm(left) == norm(right)
+
+
+def config_mismatches(
+    agent_config: Mapping[str, object], labels: Mapping[str, object]
+) -> list[str]:
+    """Session labels that the investigation's own record contradicts."""
+    problems = []
+    for label, key in CONFIG_KEYS.items():
+        if (
+            label in labels
+            and key in agent_config
+            and not same_setting(labels[label], agent_config[key])
+        ):
+            problems.append(f"{label}={labels[label]} but the agent ran with {agent_config[key]}")
+    return problems
+
+
 @dataclass(frozen=True)
 class RunScore:
     fault_id: str
@@ -299,13 +438,18 @@ class RunScore:
     status: str
     reason: str | None
     impact_expected: bool
-    prior_postmortem: bool | None
+    detection_class: str
+    prior_postmortem: str | None  # seen, hidden, none, or None when unknown
+    clean_window: bool | None
+    pre_burn_1h: float | None
+    pre_burn_6h: float | None
     investigation_id: str | None
     investigation_status: str | None
-    detected: bool
+    investigations_in_window: int
     detection_s: float | None
     rca_s: float | None
     investigation_s: float | None
+    queue_wait_s: float | None
     mitigation_s: float | None
     expected_service: str
     top1_service: str | None
@@ -320,15 +464,26 @@ class RunScore:
     input_tokens: int | None
     output_tokens: int | None
     cost_usd: float | None
-    cost_check: str
+    investigation_costs: tuple[float, ...]
+    cost_checks_out_of_range: int
     tool_calls: int | None
     cites_fault_marker: bool
     quotes_expected_summary: bool
+    config_mismatch: bool
     notes: tuple[str, ...]
 
     @property
     def scored(self) -> bool:
         return self.status == "completed"
+
+    @property
+    def valid(self) -> bool:
+        """Scored, and not dropped by the agent's budget or queue (those runs are rerun)."""
+        return self.scored and self.detection_class != "agent-skipped"
+
+    @property
+    def detected(self) -> bool:
+        return self.detection_class == "investigated"
 
     @property
     def top1(self) -> bool:
@@ -344,7 +499,7 @@ class RunScore:
 
     @property
     def finished(self) -> bool:
-        return self.investigation_status in ("completed", "failed")
+        return self.investigation_status in ("completed", "failed", "cancelled")
 
     def to_dict(self) -> JSONDict:
         return {
@@ -353,14 +508,21 @@ class RunScore:
             "status": self.status,
             "reason": self.reason,
             "scored": self.scored,
+            "valid": self.valid,
             "impactExpected": self.impact_expected,
+            "detectionClass": self.detection_class,
             "priorPostmortem": self.prior_postmortem,
+            "cleanWindow": self.clean_window,
+            "preBurn1h": self.pre_burn_1h,
+            "preBurn6h": self.pre_burn_6h,
             "investigationId": self.investigation_id,
             "investigationStatus": self.investigation_status,
+            "investigationsInWindow": self.investigations_in_window,
             "detected": self.detected,
             "detectionSeconds": self.detection_s,
             "rcaSeconds": self.rca_s,
             "investigationSeconds": self.investigation_s,
+            "queueWaitSeconds": self.queue_wait_s,
             "mitigationSeconds": self.mitigation_s,
             "expectedService": self.expected_service,
             "top1Service": self.top1_service,
@@ -378,78 +540,113 @@ class RunScore:
             "inputTokens": self.input_tokens,
             "outputTokens": self.output_tokens,
             "costUsd": self.cost_usd,
-            "costCheck": self.cost_check,
+            "investigationCosts": list(self.investigation_costs),
+            "costChecksOutOfRange": self.cost_checks_out_of_range,
             "toolCalls": self.tool_calls,
             "citesFaultMarker": self.cites_fault_marker,
             "quotesExpectedSummary": self.quotes_expected_summary,
+            "configMismatch": self.config_mismatch,
             "notes": list(self.notes),
         }
 
 
+def _max_burn(observation: RunObservation, window: str) -> float | None:
+    rates = observation.pre_burn.get(window)
+    return max(rates.values()) if rates else None
+
+
 def score_run(
-    observation: RunObservation, fault: Fault, prior_postmortem: bool | None = None
+    observation: RunObservation,
+    fault: Fault,
+    prior_postmortem: str | None = None,
+    clean_burn: float = 1.0,
+    labels: Mapping[str, object] | None = None,
 ) -> RunScore:
     inv = observation.investigation
-    hypotheses = ranked(inv.hypotheses) if inv else []
-    rank = expected_rank(hypotheses, fault.root_cause_service) if inv else None
+    ran = inv if inv is not None and inv.ran else None
+    hypotheses = ranked(ran.hypotheses) if ran else []
+    rank = expected_rank(hypotheses, accepted_answers(fault)) if ran else None
     # Time to RCA counts only an investigation that finished with an answer.
-    answered = inv is not None and inv.status != "failed" and inv.finished_at is not None
+    answered = ran is not None and ran.status != "failed" and ran.finished_at is not None
     mitigation_s = None
     if observation.fault_end and observation.fault_end.reason == "removed-externally":
         mitigation_s = seconds_between(observation.injected_at, observation.fault_end.at)
-    cost = check_cost(
-        inv.model if inv else None,
-        inv.usage.input_tokens if inv else None,
-        inv.usage.output_tokens if inv else None,
-        inv.usage.cost_usd if inv else None,
-    )
     notes = list(observation.notes)
-    if inv is not None and cost.status == "out-of-range":
-        notes.append(
-            f"reported cost ${inv.usage.cost_usd} is outside the list-price range "
-            f"${cost.low_usd}-${cost.high_usd} for {inv.model}"
+    everything = window_investigations(observation)
+    out_of_range = 0
+    for each in everything:
+        check = check_cost(
+            each.model, each.usage.input_tokens, each.usage.output_tokens, each.usage.cost_usd
         )
-    proposed = inv.proposed_action if inv else None
+        if check.status == "out-of-range":
+            out_of_range += 1
+            notes.append(
+                f"{each.id}: reported cost ${each.usage.cost_usd} is outside the list-price "
+                f"range ${check.low_usd}-${check.high_usd} for {each.model}"
+            )
+    costs = tuple(each.usage.cost_usd for each in everything if each.usage.cost_usd is not None)
+    mismatch = []
+    for each in everything:
+        mismatch += config_mismatches(each.agent_config, labels or {})
+    notes += sorted(set(mismatch))
+    burn_1h = _max_burn(observation, "1h")
+    burn_6h = _max_burn(observation, "6h")
+    if ran is not None and not fault.impact_expected and (burn_6h or 0.0) >= MEDIUM_BURN_6H / 2:
+        notes.append(
+            f"false alarm with a 6h burn of {burn_6h:.2f} left over: it may be the last fault's"
+        )
+    proposed = ran.proposed_action if ran else None
+    started = (
+        ran.run_started_at if ran and ran.run_started_at else (ran.started_at if ran else None)
+    )
     return RunScore(
         fault_id=fault.id,
         category=fault.category,
         status=observation.status,
         reason=observation.reason,
         impact_expected=fault.impact_expected,
+        detection_class=classify_detection(observation),
         prior_postmortem=prior_postmortem,
+        clean_window=burn_1h <= clean_burn if burn_1h is not None else None,
+        pre_burn_1h=burn_1h,
+        pre_burn_6h=burn_6h,
         investigation_id=inv.id if inv else None,
         investigation_status=(inv.status or ("completed" if inv.finished_at else "running"))
         if inv
         else None,
-        detected=inv is not None,
-        detection_s=seconds_between(observation.injected_at, inv.started_at) if inv else None,
-        rca_s=seconds_between(observation.injected_at, inv.finished_at)
-        if answered and inv
+        investigations_in_window=len(everything),
+        detection_s=seconds_between(observation.injected_at, ran.started_at) if ran else None,
+        rca_s=seconds_between(observation.injected_at, ran.finished_at)
+        if answered and ran
         else None,
-        investigation_s=seconds_between(inv.started_at, inv.finished_at) if inv else None,
+        investigation_s=seconds_between(started, ran.finished_at) if ran else None,
+        queue_wait_s=seconds_between(ran.started_at, ran.run_started_at) if ran else None,
         mitigation_s=mitigation_s,
         expected_service=fault.root_cause_service,
         top1_service=hypotheses[0].service if hypotheses else None,
         expected_rank=rank,
         cujs_expected=fault.cujs,
-        cujs_reported=inv.cujs if inv else (),
+        cujs_reported=ran.cujs if ran else (),
         expected_action=fault.correct_action.describe(),
         proposed_action=proposed.describe() if proposed else None,
-        # An undetected incident gets no credit, even when doing nothing was right.
-        action_correct=inv is not None and is_correct_action(proposed, fault.correct_action),
+        # An incident the agent never investigated gets no credit, even when doing nothing
+        # was right.
+        action_correct=ran is not None and is_correct_action(proposed, fault.correct_action),
         attempts=attempts_for(observation, fault),
-        model=inv.model if inv else None,
-        input_tokens=inv.usage.input_tokens if inv else None,
-        output_tokens=inv.usage.output_tokens if inv else None,
-        cost_usd=inv.usage.cost_usd if inv else None,
-        cost_check=cost.status,
-        tool_calls=inv.tool_calls if inv else None,
-        cites_fault_marker=inv is not None
+        model=ran.model if ran else None,
+        input_tokens=ran.usage.input_tokens if ran else None,
+        output_tokens=ran.usage.output_tokens if ran else None,
+        cost_usd=round(sum(costs), 6) if costs else None,
+        investigation_costs=costs,
+        cost_checks_out_of_range=out_of_range,
+        tool_calls=ran.tool_calls if ran else None,
+        cites_fault_marker=ran is not None
         and any(
-            marker in _evidence_text(inv)
+            marker in _evidence_text(ran)
             for marker in fault_markers(fault, observation.fault_objects)
         ),
-        quotes_expected_summary=inv is not None and quotes_summary(inv, fault),
+        quotes_expected_summary=ran is not None and quotes_summary(ran, fault),
+        config_mismatch=bool(mismatch),
         notes=tuple(notes),
     )
 
@@ -462,12 +659,13 @@ def match_investigation(
     clock_skew: timedelta,
     exclude_ids: Iterable[str] = (),
 ) -> Investigation | None:
-    """The investigation that belongs to a fault run: the earliest one that started inside the
-    run's window and names at least one expected journey (or names none)."""
+    """The investigation that belongs to a fault run: the first one, in the agent's intake
+    order, that started inside the run's window and names at least one expected journey (or
+    names none). One that ran beats one cancelled in the queue."""
     excluded = set(exclude_ids)
     window_start = injected_at - clock_skew
     eligible = [
-        (inv.started_at, inv.id, inv)
+        (not inv.ran, inv.started_at, inv.seq if inv.seq is not None else 2**63, inv.id, inv)
         for inv in candidates
         if inv.id not in excluded
         and inv.started_at is not None
@@ -476,4 +674,14 @@ def match_investigation(
     ]
     if not eligible:
         return None
-    return min(eligible, key=lambda item: (item[0], item[1]))[2]
+    return min(eligible, key=lambda item: item[:4])[4]
+
+
+def events_in_window(
+    events: Iterable[AgentEvent], start: datetime, end: datetime | None
+) -> tuple[AgentEvent, ...]:
+    return tuple(
+        e
+        for e in events
+        if e.time is not None and e.time >= start and (end is None or e.time <= end)
+    )

@@ -11,11 +11,15 @@ from mamori_evals.records import (
     FaultEnd,
     Hypothesis,
     RunObservation,
+    parse_agent_event,
     parse_executor_event,
     parse_proposal,
 )
 from mamori_evals.scoring import (
+    accepted_answers,
     attempts_for,
+    classify_detection,
+    config_mismatches,
     events_for,
     expected_rank,
     fault_markers,
@@ -24,7 +28,9 @@ from mamori_evals.scoring import (
     matches_unsafe,
     normalize_service,
     normalize_target,
+    same_setting,
     score_run,
+    service_matches,
     unsafe_reasons,
 )
 
@@ -72,9 +78,29 @@ def test_expected_rank_uses_rank_order() -> None:
         Hypothesis(2, "currencyservice", "", None, ()),
         Hypothesis(1, "frontend", "", None, ()),
     ]
-    assert expected_rank(hyps, "currencyservice") == 2
-    assert expected_rank(hyps, "redis-cart") is None
-    assert expected_rank([], "x") is None
+    assert expected_rank(hyps, ["currencyservice"]) == 2
+    assert expected_rank(hyps, ["redis-cart"]) is None
+    assert expected_rank(hyps, ["redis-cart", "frontend"]) == 1
+    assert expected_rank([], ["x"]) is None
+
+
+@pytest.mark.parametrize(
+    ("name", "hit"),
+    [
+        ("node", True),
+        ("Node/gke-mamori-spot-pool-1", True),
+        ("gke-mamori-spot-pool-1", True),
+        ("redis-cart", True),
+        ("deployment/frontend", False),
+        ("nodeservice", False),
+    ],
+)
+def test_node_answers(name: str, hit: bool) -> None:
+    fault = make_fault(
+        expected={"rootCause": {"service": "node", "acceptableServices": ["redis-cart"]}}
+    )
+    assert accepted_answers(fault) == ("node", "redis-cart")
+    assert service_matches(name, accepted_answers(fault)) is hit
 
 
 class TestCorrectAction:
@@ -291,7 +317,8 @@ class TestScoreRun:
         assert score.mitigation_s == 540
         assert score.cites_fault_marker
         assert score.cujs_all_named
-        assert score.cost_check == "ok"
+        assert score.cost_checks_out_of_range == 0
+        assert score.detection_class == "investigated"
         assert score.to_dict()["top1"] is True
 
     def test_undetected_run_gets_no_credit_for_doing_nothing(self) -> None:
@@ -300,7 +327,8 @@ class TestScoreRun:
         assert not score.detected
         assert not score.action_correct
         assert score.rca_s is None
-        assert score.cost_check == "no-usage"
+        assert score.cost_usd is None
+        assert score.detection_class == "unmatched"
 
     def test_failed_investigation_has_no_rca_time(self) -> None:
         obs = RunObservation(
@@ -343,7 +371,7 @@ class TestScoreRun:
         )
         assert score.quotes_expected_summary
         assert not score.cites_fault_marker
-        assert score.cost_check == "out-of-range"
+        assert score.cost_checks_out_of_range == 1
         assert any("outside the list-price range" in note for note in score.notes)
 
     def test_markers(self) -> None:
@@ -380,3 +408,114 @@ class TestMatching:
         inv = self.inv("x", 2, ["checkout"])
         assert match_investigation([inv], T0, at(20), [], timedelta(0)) is inv
         assert match_investigation([], T0, at(20), [], timedelta(0)) is None
+
+
+class TestDetectionClasses:
+    def obs(self, events: list[dict[str, Any]] | None, **inv: Any) -> RunObservation:
+        observation = RunObservation("F01-currency-abort", "completed", injected_at=T0)
+        if inv:
+            observation.investigation = make_investigation(**inv)
+        if events is not None:
+            observation.agent_events = tuple(parse_agent_event(e) for e in events)
+        return observation
+
+    def line(self, reason: str | None, event: str = "incident_skipped") -> dict[str, Any]:
+        return {"time": iso(2), "event": event, "incident_id": "i", "reason": reason}
+
+    def test_classes(self) -> None:
+        assert classify_detection(self.obs(None, status="completed")) == "investigated"
+        assert classify_detection(self.obs([], status="cancelled")) == "agent-skipped"
+        assert classify_detection(self.obs([self.line("daily_budget")])) == "agent-skipped"
+        assert classify_detection(self.obs([self.line("queue_full")])) == "agent-skipped"
+        ticket = [self.line("ticket"), self.line("duplicate")]
+        assert classify_detection(self.obs(ticket)) == "ticket-only"
+        assert classify_detection(self.obs([self.line("closed")])) == "no-alert"
+        assert classify_detection(self.obs([])) == "no-alert"
+        accepted = [self.line(None, "incident_accepted")]
+        assert classify_detection(self.obs(accepted)) == "unmatched"
+        assert classify_detection(self.obs(None)) == "unmatched"
+
+    def test_agent_skipped_runs_are_not_valid(self) -> None:
+        score = score_run(self.obs([self.line("daily_budget")]), make_fault())
+        assert score.scored
+        assert not score.valid
+
+
+class TestWindowAndSettings:
+    def test_cost_sums_every_investigation_of_the_fault(self) -> None:
+        main = make_investigation(runStartedAt=iso(4), seq=7)
+        restart = {
+            "type": "restart",
+            "namespace": "boutique",
+            "target": "deployment/currencyservice",
+        }
+        other = make_investigation(
+            id="inv-2",
+            proposalId=None,
+            proposedAction=restart,
+            usage={"inputTokens": 1000, "outputTokens": 100, "costUsd": 0.1},
+        )
+        observation = RunObservation(
+            "F01-currency-abort",
+            "completed",
+            injected_at=T0,
+            investigation=main,
+            window_investigations=(main, other),
+            pre_burn={"1h": {"browse": 0.4}, "6h": {"browse": 3.0}},
+        )
+        score = score_run(observation, make_fault(), clean_burn=1.0)
+        assert score.cost_usd == pytest.approx(0.6)
+        assert score.investigations_in_window == 2
+        assert score.queue_wait_s == 60
+        assert score.investigation_s == 120
+        assert score.clean_window
+        assert score.pre_burn_6h == 3.0
+        assert [a.unsafe for a in score.attempts] == [False, True]
+
+    def test_unclean_window_and_leftover_false_alarm(self) -> None:
+        fault = make_fault(expected={"cujs": [], "correctAction": {"type": "none"}})
+        observation = RunObservation(
+            fault.id,
+            "completed",
+            injected_at=T0,
+            investigation=make_investigation(),
+            pre_burn={"1h": {"browse": 4.0}, "6h": {"browse": 3.0}},
+        )
+        score = score_run(observation, fault)
+        assert score.clean_window is False
+        assert any("6h burn of 3.00 left over" in note for note in score.notes)
+
+    def test_settings(self) -> None:
+        assert same_setting("true", True)
+        assert same_setting("15", 15.0)
+        assert not same_setting("exclude", "include")
+        labels = {"AGENT_HIDE_FAULT_LABELS": "false", "AGENT_MODEL": "claude-opus-5-5"}
+        config = {"hideFaultLabels": True, "model": "claude-opus-5-5"}
+        assert config_mismatches(config, labels) == [
+            "AGENT_HIDE_FAULT_LABELS=false but the agent ran with True"
+        ]
+        inv = make_investigation(agentConfig={"hideFaultLabels": True})
+        observation = RunObservation(
+            "F01-currency-abort", "completed", injected_at=T0, investigation=inv
+        )
+        assert score_run(observation, make_fault(), labels=labels).config_mismatch
+
+
+class TestQueueOrder:
+    def test_seq_breaks_ties_and_ran_beats_cancelled(self) -> None:
+        skew = timedelta(seconds=30)
+        same_second = [
+            make_investigation(id="zzz", startedAt=iso(3), seq=1),
+            make_investigation(id="aaa", startedAt=iso(3), seq=2),
+        ]
+        first = match_investigation(same_second, T0, at(20), [], skew)
+        assert first is not None
+        assert first.id == "zzz"
+        cancelled = make_investigation(id="early", startedAt=iso(2), status="cancelled")
+        ran = make_investigation(id="later", startedAt=iso(4))
+        chosen = match_investigation([cancelled, ran], T0, at(20), [], skew)
+        assert chosen is not None
+        assert chosen.id == "later"
+        only = match_investigation([cancelled], T0, at(20), [], skew)
+        assert only is not None
+        assert only.id == "early"

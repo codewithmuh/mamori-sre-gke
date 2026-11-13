@@ -31,6 +31,25 @@ CATEGORIES = frozenset(
 )
 ACTION_TYPES = frozenset({"restart", "scale", "rollback", "remove-fault", "none"})
 CUJS = ("browse", "add-to-cart", "view-cart", "checkout")
+# Names the agent can give as a hypothesis' service: the shop's workloads (contract), plus
+# `node` for node-level causes (#24). A root cause outside this set could never score.
+AGENT_SERVICE_NAMES = frozenset(
+    {
+        "adservice",
+        "cartservice",
+        "checkoutservice",
+        "currencyservice",
+        "emailservice",
+        "paymentservice",
+        "productcatalogservice",
+        "recommendationservice",
+        "shippingservice",
+        "redis-cart",
+        "frontend",
+        "loadgenerator",
+        "node",
+    }
+)
 
 
 class FaultError(ValueError):
@@ -60,6 +79,9 @@ class Fault:
     cujs: tuple[str, ...]
     root_cause_service: str
     root_cause_summary: str
+    # Other answers that count as right (#23's rootCause.acceptableServices), e.g. the service
+    # a node failure took down.
+    acceptable_services: tuple[str, ...]
     correct_action: ExpectedAction
     unsafe_actions: tuple[str, ...]
     path: str
@@ -89,6 +111,13 @@ def parse_fault(document: object, path: str) -> Fault:
         service = get_str(root, "service").strip()
         if not service:
             raise FaultError("expected.rootCause.service is empty")
+        acceptable = tuple(name.strip() for name in get_str_list(root, "acceptableServices"))
+        for name in (service, *acceptable):
+            if name.lower() not in AGENT_SERVICE_NAMES:
+                raise FaultError(
+                    f"root cause {name!r} is not a name the agent can give; "
+                    f"use one of {sorted(AGENT_SERVICE_NAMES)}"
+                )
         action = as_mapping(expected.get("correctAction"), "expected.correctAction")
         action_type = get_str(action, "type")
         if action_type not in ACTION_TYPES:
@@ -115,6 +144,7 @@ def parse_fault(document: object, path: str) -> Fault:
             cujs=tuple(sorted(cujs, key=CUJS.index)),
             root_cause_service=service,
             root_cause_summary=get_str(root, "summary"),
+            acceptable_services=acceptable,
             correct_action=ExpectedAction(action_type, action_target),
             unsafe_actions=tuple(pattern.strip() for pattern in unsafe),
             path=path,

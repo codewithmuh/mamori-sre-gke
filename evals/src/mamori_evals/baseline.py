@@ -10,14 +10,15 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 
 import yaml
 
 from .aggregate import Stats, proportion
+from .clients import CommandRunner, run_command
 from .faults import Fault
 from .jsonutil import (
     DocumentError,
@@ -32,8 +33,8 @@ from .jsonutil import (
     get_str,
 )
 from .records import Hypothesis
-from .scoring import expected_rank
-from .timeutil import seconds_between
+from .scoring import accepted_answers, expected_rank
+from .timeutil import parse_time, seconds_between
 
 BASELINE_KIND = "EvalBaseline"
 _BLIND_ROW = re.compile(r"^\|\s*blind\b[^|]*\|\s*(yes|no)\b", re.IGNORECASE | re.MULTILINE)
@@ -174,9 +175,16 @@ def baseline_from_postmortems(directory: Path) -> Baseline:
     )
 
 
-def postmortem_dates(directory: Path) -> dict[str, list[date]]:
-    """faultId -> dates of the postmortems written about it (for the 'seen before?' split)."""
-    index: dict[str, list[date]] = {}
+type PostmortemIndex = dict[str, list[datetime]]
+
+
+def postmortem_dates(directory: Path) -> PostmortemIndex:
+    """faultId -> when each postmortem about it existed, from the front matter's `date`.
+
+    An approximation: a postmortem is merged some time after its incident. Prefer
+    postmortems_on_ref, which knows when each file reached the branch the agent reads.
+    """
+    index: PostmortemIndex = {}
     for path, front, _ in _postmortems(directory):
         fault_id = get_opt_str(front, "faultId")
         raw = front.get("date")
@@ -191,24 +199,64 @@ def postmortem_dates(directory: Path) -> dict[str, list[date]]:
                 when = date.fromisoformat(str(raw).strip())
             except ValueError as err:
                 raise DocumentError(f"{path}: date {raw!r} is not YYYY-MM-DD") from err
-        index.setdefault(fault_id, []).append(when)
+        index.setdefault(fault_id, []).append(datetime.combine(when, time.min, UTC))
     return index
 
 
-def had_prior_postmortem(
-    index: Mapping[str, Sequence[date]] | None, fault_id: str, when: datetime | None
-) -> bool | None:
-    """True when a postmortem about this fault existed on or before the run's day."""
+def postmortems_on_ref(
+    repo: Path,
+    ref: str,
+    path: str = "docs/incidents/postmortems",
+    runner: CommandRunner = run_command,
+) -> PostmortemIndex:
+    """faultId -> when each game-day postmortem landed on `ref` (the agent reads
+    postmortems from the repository's main branch, #24)."""
+
+    def git(*args: str) -> str:
+        result = runner(["git", "-C", str(repo), *args], 60.0)
+        if result.code != 0:
+            raise DocumentError(f"git {args[0]} {ref}: {result.stderr.strip()[:200]}")
+        return result.stdout
+
+    index: PostmortemIndex = {}
+    for name in git("ls-tree", "-r", "--name-only", ref, "--", path).split():
+        if not name.endswith(".md"):
+            continue
+        front, _ = read_front_matter(git("show", f"{ref}:{name}"))
+        fault_id = get_opt_str(front, "faultId") if front else None
+        if not fault_id:
+            continue
+        added = [
+            parse_time(line)
+            for line in git("log", "--diff-filter=A", "--format=%cI", ref, "--", name).split()
+        ]
+        if added:
+            index.setdefault(fault_id, []).append(min(added))
+    return index
+
+
+def prior_postmortem(
+    index: PostmortemIndex | None,
+    fault_id: str,
+    when: datetime | None,
+    gamedays_setting: object = None,
+) -> str | None:
+    """Whether the agent could have read a postmortem of this fault: `seen`, `hidden` (one
+    existed, but AGENT_POSTMORTEMS_GAMEDAYS=exclude hid it), `none`, or None if unknown."""
     if index is None or when is None:
         return None
-    return any(day <= when.date() for day in index.get(fault_id, ()))
+    if not any(landed <= when for landed in index.get(fault_id, ())):
+        return "none"
+    if str(gamedays_setting).strip().lower() == "exclude":
+        return "hidden"
+    return "seen"
 
 
 def summarize_baseline(baseline: Baseline, faults: Mapping[str, Fault]) -> JSONDict:
     runs = [run for run in baseline.runs if run.fault_id in faults]
     ranked_runs = [run for run in runs if run.hypotheses]
     ranks = {
-        id(run): expected_rank(run.hypotheses, faults[run.fault_id].root_cause_service)
+        id(run): expected_rank(run.hypotheses, accepted_answers(faults[run.fault_id]))
         for run in ranked_runs
     }
     rows: list[JSONDict] = []

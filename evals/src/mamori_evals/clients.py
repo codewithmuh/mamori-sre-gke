@@ -19,11 +19,16 @@ from typing import IO
 
 from .jsonutil import DocumentError, as_mapping, get_list, get_opt_str, get_opt_time, get_str
 from .records import (
+    AGENT_EVENTS,
     LIFECYCLE_EVENTS,
+    AgentEvent,
+    AgentStatus,
     ExecutorEvent,
     FaultEnd,
     Investigation,
     Proposal,
+    parse_agent_event,
+    parse_agent_status,
     parse_executor_event,
     parse_investigation,
     parse_proposal,
@@ -152,6 +157,15 @@ class AgentApi:
             items = get_list(as_mapping(document, "investigations response"), "investigations")
         return [parse_investigation(item) for item in items]
 
+    def status(self) -> AgentStatus | None:
+        """GET /v1/status: queue depth, the day's spend and settings; None if not served."""
+        try:
+            return parse_agent_status(self.http.get("/v1/status"))
+        except ApiError as err:
+            if err.status == 404:
+                return None
+            raise
+
 
 class ExecutorApi:
     """GET /v1/proposals/{id} (#25). Refused proposals are not stored: 404."""
@@ -198,35 +212,85 @@ class PrometheusApi:
         return series
 
 
-# --- Executor audit log ----------------------------------------------------------------------
+# --- Logs and the agent's Deployment --------------------------------------------------------
 
 
-def parse_executor_log(text: str) -> list[ExecutorEvent]:
-    """The executor's lifecycle lines (one JSON object per line); everything else is skipped."""
-    events = []
-    for line in text.splitlines():
-        line = line.strip()
+def _json_lines(text: str, names: frozenset[str]) -> list[dict[str, object]]:
+    """JSON objects, one per line, whose `event` is one of `names`; everything else skipped."""
+    found = []
+    for raw in text.splitlines():
+        line = raw.strip()
         if not line.startswith("{"):
             continue
         try:
             document = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(document, dict) and document.get("event") in LIFECYCLE_EVENTS:
-            events.append(parse_executor_event(document))
-    return events
+        if isinstance(document, dict) and document.get("event") in names:
+            found.append(document)
+    return found
 
 
-class ExecutorLogs:
+def parse_executor_log(text: str) -> list[ExecutorEvent]:
+    """The executor's lifecycle lines (#25)."""
+    return [parse_executor_event(doc) for doc in _json_lines(text, LIFECYCLE_EVENTS)]
+
+
+def parse_agent_log(text: str) -> list[AgentEvent]:
+    """The agent's intake lines (#24): accepted, merged, skipped, cancelled."""
+    return [parse_agent_event(doc) for doc in _json_lines(text, AGENT_EVENTS)]
+
+
+class _Logs:
     def __init__(self, argv: Sequence[str], runner: CommandRunner = run_command) -> None:
         self.argv = list(argv)
         self.runner = runner
 
-    def events_since(self, since: datetime) -> list[ExecutorEvent]:
+    def _text(self, since: datetime) -> str:
         result = self.runner([*self.argv, f"--since-time={format_time(since)}"], 120.0)
         if result.code != 0:
-            raise ApiError(f"executor logs: {result.stderr.strip()[:300]}")
-        return parse_executor_log(result.stdout)
+            raise ApiError(f"{self.argv[0]} logs: {result.stderr.strip()[:300]}")
+        return result.stdout
+
+
+class ExecutorLogs(_Logs):
+    def events_since(self, since: datetime) -> list[ExecutorEvent]:
+        return parse_executor_log(self._text(since))
+
+
+class AgentLogs(_Logs):
+    def events_since(self, since: datetime) -> list[AgentEvent]:
+        return parse_agent_log(self._text(since))
+
+
+def deployment_env(
+    argv: Sequence[str], container: str, runner: CommandRunner = run_command
+) -> dict[str, str]:
+    """Literal env values of one container (`kubectl get deployment ... -o json`).
+
+    Values from Secrets or ConfigMaps (valueFrom) are left out: they are not conditions, and
+    the eval never reads secrets.
+    """
+    result = runner(list(argv), 60.0)
+    if result.code != 0:
+        raise ApiError(f"reading the Deployment: {result.stderr.strip()[:300]}")
+    try:
+        document = as_mapping(json.loads(result.stdout), "deployment")
+    except json.JSONDecodeError as err:
+        raise ApiError(f"reading the Deployment: not JSON: {err}") from err
+    spec = as_mapping(as_mapping(document.get("spec"), "spec").get("template"), "template")
+    containers = get_list(as_mapping(spec.get("spec"), "pod spec"), "containers")
+    for item in containers:
+        entry = as_mapping(item, "container")
+        if get_str(entry, "name") != container:
+            continue
+        env = {}
+        for var in get_list(entry, "env"):
+            pair = as_mapping(var, "env")
+            if "value" in pair:
+                env[get_str(pair, "name")] = get_str(pair, "value")
+        return env
+    raise ApiError(f"the Deployment has no container {container!r}")
 
 
 # --- gameday CLI (#23) -----------------------------------------------------------------------
@@ -352,7 +416,11 @@ class GamedayCli:
 
     def start(self, fault_id: str, duration: timedelta) -> FaultProcess:
         argv = [*self.argv, "start", fault_id, "--duration", go_duration(duration), "-o", "json"]
-        process = self.popen(argv, stdout=subprocess.PIPE, text=True, bufsize=1)
+        # Its own session: a closed terminal (SIGHUP) or Ctrl-C reaches the runner, which
+        # stops the fault in order; nothing kills the child without its cleanup.
+        process = self.popen(
+            argv, stdout=subprocess.PIPE, text=True, bufsize=1, start_new_session=True
+        )
         if process.stdout is None:
             raise GamedayError("gameday start: no stdout pipe")
         lines: queue.Queue[str | None] = queue.Queue()

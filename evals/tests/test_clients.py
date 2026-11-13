@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 from collections.abc import Iterator, Sequence
@@ -14,6 +15,7 @@ import pytest
 
 from mamori_evals.clients import (
     AgentApi,
+    AgentLogs,
     ApiError,
     CommandResult,
     CommandToken,
@@ -25,7 +27,9 @@ from mamori_evals.clients import (
     JsonHttp,
     ManualFaultError,
     PrometheusApi,
+    deployment_env,
     managed_prometheus_url,
+    parse_agent_log,
     parse_executor_log,
     run_command,
     split_command,
@@ -259,3 +263,97 @@ class TestGameday:
         cli.stop_all()
         with pytest.raises(GamedayError, match="stop F07-stuck failed"):
             cli.stop("F07-stuck")
+
+
+def test_agent_status(server: str) -> None:
+    Handler.routes["/v1/status"] = (
+        200,
+        {
+            "queued": 1,
+            "running": 0,
+            "dailySpentUsd": 3.0,
+            "dailyReservedUsd": 1.5,
+            "agentConfig": {"dailyCostLimitUsd": 40, "maxCostUsd": 1.5},
+        },
+    )
+    status = AgentApi(JsonHttp(server)).status()
+    assert status is not None
+    assert not status.idle
+    assert status.headroom_usd() == 35.5
+    Handler.routes["/v1/status"] = (200, {"queued": 0, "running": 0})
+    quiet = AgentApi(JsonHttp(server)).status()
+    assert quiet is not None
+    assert quiet.idle
+    assert quiet.headroom_usd() is None
+    del Handler.routes["/v1/status"]
+    assert AgentApi(JsonHttp(server)).status() is None
+    Handler.routes["/v1/status"] = (500, {"error": "x"})
+    with pytest.raises(ApiError, match="HTTP 500"):
+        AgentApi(JsonHttp(server)).status()
+
+
+def test_agent_log() -> None:
+    lines = [
+        json.dumps({"event": "investigation_completed", "id": "inv-1"}),
+        json.dumps(
+            {
+                "time": "2026-12-10T05:01:02Z",
+                "event": "incident_skipped",
+                "incident_id": "i-1",
+                "reason": "ticket",
+                "cujs": ["browse"],
+                "policy_severity": "ticket",
+            }
+        ),
+        json.dumps({"event": "incident_accepted", "investigationId": "inv-2"}),
+    ]
+    events = parse_agent_log("\n".join(lines))
+    assert [e.event for e in events] == ["incident_skipped", "incident_accepted"]
+    assert events[0].severity == "ticket"
+    assert events[0].cujs == ("browse",)
+    assert events[1].investigation_id == "inv-2"
+    logs = AgentLogs(["kubectl"], lambda argv, timeout: CommandResult(0, "\n".join(lines), ""))
+    assert len(logs.events_since(datetime(2000, 1, 1, tzinfo=UTC))) == 2
+
+
+def test_deployment_env() -> None:
+    document = {
+        "spec": {
+            "template": {
+                "spec": {
+                    "containers": [
+                        {"name": "sidecar", "env": [{"name": "X", "value": "1"}]},
+                        {
+                            "name": "agent",
+                            "env": [
+                                {"name": "AGENT_CHAOS_TOOL", "value": "true"},
+                                {
+                                    "name": "AGENT_SLACK_BOT_TOKEN",
+                                    "valueFrom": {"secretKeyRef": {}},
+                                },
+                            ],
+                        },
+                    ]
+                }
+            }
+        }
+    }
+
+    def runner(argv: Sequence[str], timeout: float) -> CommandResult:
+        return CommandResult(0, json.dumps(document), "")
+
+    assert deployment_env(["kubectl"], "agent", runner) == {"AGENT_CHAOS_TOOL": "true"}
+    with pytest.raises(ApiError, match="no container 'executor'"):
+        deployment_env(["kubectl"], "executor", runner)
+    with pytest.raises(ApiError, match="forbidden"):
+        deployment_env(["kubectl"], "agent", lambda a, t: CommandResult(1, "", "forbidden"))
+    with pytest.raises(ApiError, match="not JSON"):
+        deployment_env(["kubectl"], "agent", lambda a, t: CommandResult(0, "{", ""))
+
+
+def test_gameday_runs_in_its_own_session() -> None:
+    handle = GamedayCli(FAKE_GAMEDAY).start("F01-ok", timedelta(minutes=5))
+    try:
+        assert os.getpgid(handle.process.pid) != os.getpgrp()
+    finally:
+        handle.stop()

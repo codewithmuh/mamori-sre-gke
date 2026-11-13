@@ -1,10 +1,16 @@
 """Live runner: inject one fault at a time into the lab and record what the agent does.
 
-Per fault: wait for steady state, `gameday start`, wait for the matching investigation, read
-the proposal, stop the fault, read the executor's audit lines, cool down until steady again.
-The fault is stopped in every case (error, timeout, Ctrl-C, budget): the gameday process gets
-SIGTERM, then `gameday stop <id>` runs, then `gameday stop --all` if that failed. The gameday
-CLI also ends the fault on its own after `fault_duration`, in case this process dies.
+Per fault:
+1. Ready: the agent is idle (nothing queued or running) with budget for this fault, the shop is
+   steady, and no journey's 1-hour burn rate is left over from the last fault.
+2. `gameday start`, wait for the matching investigation, read the proposal.
+3. Stop the fault, in every case (error, timeout, Ctrl-C, SIGHUP, budget): SIGTERM to the
+   gameday process (its own session, so a closed terminal can't kill it before its cleanup),
+   then `gameday stop <id>`, then `gameday stop --all` if that failed. The gameday CLI also ends
+   the fault on its own after `fault_duration`, in case this process dies.
+4. Cool down, then record everything the fault caused: every investigation that started in its
+   window, the agent's intake lines, the executor's audit lines.
+After the last fault, proposals still pending are read again once they have expired.
 
 The runner never sends the agent anything: investigations start from real alerts, and the
 expected answers stay in this process.
@@ -24,34 +30,44 @@ from .clients import FaultRefusedError, ManualFaultError
 from .faults import Fault
 from .records import (
     TERMINAL_STATUSES,
+    AgentEvent,
+    AgentStatus,
     ExecutorEvent,
     FaultEnd,
     Investigation,
     Proposal,
     RunObservation,
 )
-from .scoring import events_for, match_investigation
+from .scoring import events_in_window, match_investigation
 from .steady import SteadyResult
 from .timeutil import Clock, format_seconds
 
 MANUAL_MODES = ("skip", "prompt")
+# The signals that end a session: each stops the fault first.
+STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
 @dataclass(frozen=True)
 class LiveConfig:
     investigation_timeout: timedelta = timedelta(minutes=20)
     poll_interval: timedelta = timedelta(seconds=15)
-    steady_timeout: timedelta = timedelta(minutes=10)
+    # Before each fault: agent idle, shop steady, leftover 1-hour burn gone. After a fault
+    # that hurt a journey badly, the 1-hour window takes up to an hour to clear.
+    steady_timeout: timedelta = timedelta(minutes=75)
     steady_interval: timedelta = timedelta(seconds=30)
     steady_checks: int = 2
     cooldown_min: timedelta = timedelta(minutes=10)
     cooldown_timeout: timedelta = timedelta(minutes=20)
     proposal_wait: timedelta = timedelta(0)
     clock_skew: timedelta = timedelta(seconds=30)
-    budget: timedelta = timedelta(hours=4)
+    budget: timedelta = timedelta(hours=6)
     # The gameday CLI holds a fault for at most 30 minutes (#23).
     max_fault_duration: timedelta = timedelta(minutes=30)
     manual_faults: str = "skip"
+    # The agent's day budget must still cover this many investigations at its per-run cap.
+    min_budget_investigations: int = 2
+    # After the last fault, wait at most this long for pending proposals to expire.
+    reread_wait: timedelta = timedelta(minutes=30)
 
     @property
     def fault_duration(self) -> timedelta:
@@ -64,6 +80,11 @@ class LiveConfig:
     def max_run_time(self) -> timedelta:
         """Worst case for one fault, for planning a session."""
         return self.steady_timeout + self.fault_duration + self.cooldown_min + self.cooldown_timeout
+
+    @property
+    def room_needed(self) -> timedelta:
+        """What one more fault needs of the budget before it is started."""
+        return self.steady_timeout + self.investigation_timeout + self.cooldown_min
 
 
 class RunningFault(Protocol):
@@ -92,8 +113,10 @@ class Gameday(Protocol):
     def stop_all(self) -> None: ...
 
 
-class InvestigationSource(Protocol):
+class AgentSource(Protocol):
     def investigations_since(self, since: datetime) -> list[Investigation]: ...
+
+    def status(self) -> AgentStatus | None: ...
 
 
 class ProposalSource(Protocol):
@@ -104,12 +127,20 @@ class ExecutorEventSource(Protocol):
     def events_since(self, since: datetime) -> list[ExecutorEvent]: ...
 
 
+class AgentEventSource(Protocol):
+    def events_since(self, since: datetime) -> list[AgentEvent]: ...
+
+
 class SteadySource(Protocol):
-    def check(self) -> SteadyResult: ...
+    def check(self, burn_gate: bool = False) -> SteadyResult: ...
 
 
 class BudgetExceededError(Exception):
     """The session's time budget ran out."""
+
+
+class NotReadyError(Exception):
+    """The agent can't take another fault (still busy, or out of model budget)."""
 
 
 class LiveRunner:
@@ -119,7 +150,7 @@ class LiveRunner:
         config: LiveConfig,
         clock: Clock,
         gameday: Gameday,
-        agent: InvestigationSource,
+        agent: AgentSource,
         executor: ProposalSource,
         executor_logs: ExecutorEventSource,
         steady: SteadySource,
@@ -127,6 +158,7 @@ class LiveRunner:
         on_update: Callable[[list[RunObservation]], None] | None = None,
         ask: Callable[[str], str] | None = None,
         keepalive: Callable[[], None] | None = None,
+        agent_logs: AgentEventSource | None = None,
     ) -> None:
         if config.manual_faults not in MANUAL_MODES:
             raise ValueError(f"manual_faults must be one of {MANUAL_MODES}")
@@ -137,6 +169,7 @@ class LiveRunner:
         self.agent = agent
         self.executor = executor
         self.executor_logs = executor_logs
+        self.agent_logs = agent_logs
         self.steady = steady
         self.log = log
         self.on_update = on_update
@@ -147,6 +180,7 @@ class LiveRunner:
         self.abort_reason: str | None = None
         self.used_investigations: set[str] = set()
         self._signal_pending = False
+        self._agent_status: AgentStatus | None = None
 
     # --- session -------------------------------------------------------------------------
 
@@ -154,53 +188,61 @@ class LiveRunner:
         self.deadline = self.clock.now() + self.config.budget
         results: list[RunObservation] = []
         for fault in self.faults:
-            if self.abort_reason is None:
-                self._check_session_room()
+            if (
+                self.abort_reason is None
+                and self.deadline - self.clock.now() < self.config.room_needed
+            ):
+                self.abort_reason = "time budget used up"
             if self.abort_reason is not None:
                 results.append(RunObservation(fault.id, "skipped", reason=self.abort_reason))
                 self._update(results)
                 continue
-            before = self._guarded(lambda: self._wait_steady(self.config.steady_timeout))
-            if before is None:
+            ready = self._guarded(self._wait_ready)
+            if ready is None:
                 results.append(RunObservation(fault.id, "skipped", reason=self.abort_reason))
                 self._update(results)
                 continue
-            if not before.ok:
-                self.abort_reason = f"shop not steady before {fault.id}"
-                results.append(RunObservation(fault.id, "skipped", reason=before.describe()))
+            if not ready.ok:
+                self.abort_reason = f"shop not ready before {fault.id}"
+                results.append(RunObservation(fault.id, "skipped", reason=ready.describe()))
                 self._update(results)
                 continue
-            observation = self._run_one(fault)
+            observation = self._run_one(fault, ready)
             results.append(observation)
             self._update(results)
             if self._signal_pending:
                 self.interrupted = True
                 self.abort_reason = self.abort_reason or "interrupted"
-            if observation.injected_at is None or self.abort_reason is not None:
+            if observation.injected_at is None:
                 continue
-            cooldown = format_seconds(self.config.cooldown_min.total_seconds())
-            self.log(f"{fault.id}: cooling down for at least {cooldown}")
-            after = self._guarded(self._cool_down)
-            if after is not None:
-                if after.ok:
-                    observation.recovered_at = self.clock.now()
-                else:
-                    self.abort_reason = f"shop did not recover after {fault.id}"
-                    observation.notes.append(f"after the run: {after.describe()}")
+            if self.abort_reason is None:
+                cooldown = format_seconds(self.config.cooldown_min.total_seconds())
+                self.log(f"{fault.id}: cooling down for at least {cooldown}")
+                after = self._guarded(self._cool_down)
+                if after is not None:
+                    if after.ok:
+                        observation.recovered_at = self.clock.now()
+                    else:
+                        self.abort_reason = f"shop did not recover after {fault.id}"
+                        observation.notes.append(f"after the run: {after.describe()}")
+            try:
+                self._collect_window(observation)
+            except KeyboardInterrupt:
+                self.interrupted = True
+                self.abort_reason = "interrupted"
             self._update(results)
+        self._reread(results)
+        self._update(results)
         return results
 
-    def _check_session_room(self) -> None:
-        needed = self.config.investigation_timeout + self.config.cooldown_min
-        if self.deadline - self.clock.now() < needed:
-            self.abort_reason = "time budget used up"
-
     def _guarded(self, step: Callable[[], SteadyResult]) -> SteadyResult | None:
-        """A wait with no fault applied: budget and Ctrl-C end the session cleanly."""
+        """A wait with no fault applied: budget, agent trouble and Ctrl-C end the session."""
         try:
             return step()
         except BudgetExceededError:
             self.abort_reason = "time budget used up"
+        except NotReadyError as err:
+            self.abort_reason = str(err)
         except KeyboardInterrupt:
             self.interrupted = True
             self.abort_reason = "interrupted"
@@ -210,10 +252,67 @@ class LiveRunner:
         if self.on_update is not None:
             self.on_update(results)
 
+    # --- ready -----------------------------------------------------------------------------
+
+    def _wait_ready(self) -> SteadyResult:
+        deadline = self.clock.now() + self.config.steady_timeout
+        self._agent_status = self._wait_agent_idle(deadline)
+        self._check_agent_budget(self._agent_status)
+        return self._wait_steady(deadline - self.clock.now(), burn_gate=True)
+
+    def _wait_agent_idle(self, deadline: datetime) -> AgentStatus | None:
+        """Leftover investigations would delay this fault's, or make the agent drop it."""
+        logged = False
+        while True:
+            self._check_budget()
+            if self.keepalive is not None:
+                self.keepalive()
+            status: AgentStatus | None = None
+            busy: int | None = None
+            try:
+                status = self.agent.status()
+                if status is not None:
+                    busy = status.queued + status.running
+                else:
+                    recent = self.agent.investigations_since(self.clock.now() - timedelta(hours=24))
+                    busy = sum(inv.busy for inv in recent)
+            except Exception as err:  # unknown counts as busy
+                self.log(f"agent status not read: {err}")
+            if busy == 0:
+                return status
+            if self.clock.now() >= deadline:
+                raise NotReadyError(
+                    "the agent is still busy with earlier investigations"
+                    if busy
+                    else "the agent's status could not be read"
+                )
+            if not logged and busy:
+                self.log(f"waiting for the agent to finish {busy} investigation(s)")
+                logged = True
+            self._sleep(self.config.poll_interval.total_seconds())
+
+    def _check_agent_budget(self, status: AgentStatus | None) -> None:
+        if status is None:
+            return
+        headroom = status.headroom_usd()
+        per_run = status.agent_config.get("maxCostUsd")
+        if headroom is None or not isinstance(per_run, int | float):
+            return
+        needed = float(per_run) * self.config.min_budget_investigations
+        if headroom < needed:
+            raise NotReadyError(
+                f"the agent's daily model budget has ${headroom:.2f} left, less than "
+                f"{self.config.min_budget_investigations} investigations at ${float(per_run):.2f}: "
+                "raise AGENT_DAILY_COST_LIMIT_USD for evaluation sessions"
+            )
+
     # --- one fault -----------------------------------------------------------------------
 
-    def _run_one(self, fault: Fault) -> RunObservation:
+    def _run_one(self, fault: Fault, ready: SteadyResult) -> RunObservation:
         observation = RunObservation(fault.id, "completed")
+        observation.pre_burn = {window: dict(rates) for window, rates in ready.burn.items()}
+        if self._agent_status is not None:
+            observation.agent_status_before = dict(self._agent_status.raw)
         handle: RunningFault | None = None
         manual = False
         try:
@@ -251,7 +350,6 @@ class LiveRunner:
         finally:
             if observation.status != "skipped":
                 self._stop(fault, handle, observation, manual)
-        self._collect_executor_events(observation)
         return observation
 
     def _inject_by_hand(
@@ -321,7 +419,7 @@ class LiveRunner:
                 )
                 if match is not None:
                     best = match
-                    if match.finished:
+                    if match.finished and match.ran:
                         return match
             if handle is not None and not ended_noted:
                 end = handle.ended()
@@ -385,25 +483,92 @@ class LiveRunner:
         else:
             self.log(f"{fault.id}: stopped")
 
-    def _collect_executor_events(self, observation: RunObservation) -> None:
+    # --- what the fault caused -------------------------------------------------------------
+
+    def _collect_window(self, observation: RunObservation) -> None:
+        """Everything since the injection belongs to this fault: the next one isn't injected
+        until the agent is idle again."""
         if observation.injected_at is None:
             return
+        since = observation.injected_at - self.config.clock_skew
+        until = self.clock.now()
         try:
-            events = self.executor_logs.events_since(
-                observation.injected_at - self.config.clock_skew
+            found = self.agent.investigations_since(since)
+            observation.window_investigations = tuple(
+                inv
+                for inv in found
+                if inv.started_at is not None and since <= inv.started_at <= until
+            )
+        except Exception as err:  # the matched investigation is still recorded
+            observation.notes.append(f"investigations in the window not read: {err}")
+        if self.agent_logs is not None:
+            try:
+                events = self.agent_logs.events_since(since)
+                observation.agent_events = events_in_window(events, since, until)
+            except Exception as err:  # classified as unmatched when nothing ran
+                observation.notes.append(f"agent intake log not read: {err}")
+        try:
+            executor_events = self.executor_logs.events_since(since)
+            observation.executor_events = tuple(
+                e for e in executor_events if e.time is None or since <= e.time <= until
             )
         except Exception as err:  # scoring still has the proposal and the 4xx
             observation.notes.append(f"executor audit log not read: {err}")
+
+    def _reread(self, results: list[RunObservation]) -> None:
+        """Read proposal outcomes again once pending ones have expired, so a run stopped while
+        its proposal waited for approval is scored on how it ended."""
+        runs = [run for run in results if run.injected_at is not None and run.status == "completed"]
+        pending = [
+            run.proposal.expires_at
+            for run in runs
+            if run.proposal is not None
+            and run.proposal.status == "pending"
+            and run.proposal.expires_at is not None
+        ]
+        try:
+            if pending and not self.interrupted:
+                wait = (max(pending) - self.clock.now()).total_seconds() + 30
+                wait = min(wait, self.config.reread_wait.total_seconds())
+                if wait > 0:
+                    self.log(f"waiting {format_seconds(wait)} for pending proposals to expire")
+                    self.clock.sleep(wait)
+            for run in runs:
+                proposal_id = run.investigation.proposal_id if run.investigation else None
+                if proposal_id:
+                    try:
+                        latest = self.executor.proposal(proposal_id)
+                    except Exception as err:  # keep what was read during the run
+                        run.notes.append(f"proposal not read again: {err}")
+                        continue
+                    if latest is not None:
+                        run.proposal = latest
+            if runs:
+                self._collect_executor_events(runs)
+        except KeyboardInterrupt:
+            self.interrupted = True
+            self.log("skipped reading the proposal outcomes again")
+
+    def _collect_executor_events(self, runs: list[RunObservation]) -> None:
+        first = min(run.injected_at for run in runs if run.injected_at is not None)
+        try:
+            events = self.executor_logs.events_since(first - self.config.clock_skew)
+        except Exception as err:  # the per-run reads stay
+            self.log(f"executor audit log not read again: {err}")
             return
-        investigation = observation.investigation
-        if investigation is None:
-            if events:
-                observation.notes.append(
-                    f"{len(events)} executor audit lines in the window, "
-                    "none tied to an investigation"
-                )
-            return
-        observation.executor_events = tuple(events_for(investigation, events))
+        if not any(e.time is not None for e in events):
+            return  # nothing to place in a run's window; keep the per-run reads
+        starts = [
+            run.injected_at - self.config.clock_skew for run in runs if run.injected_at is not None
+        ]
+        for index, run in enumerate(runs):
+            start = starts[index]
+            end = starts[index + 1] if index + 1 < len(starts) else None
+            run.executor_events = tuple(
+                e
+                for e in events
+                if e.time is not None and start <= e.time and (end is None or e.time < end)
+            )
 
     # --- waiting -------------------------------------------------------------------------
 
@@ -411,13 +576,13 @@ class LiveRunner:
         self._sleep(self.config.cooldown_min.total_seconds())
         return self._wait_steady(self.config.cooldown_timeout)
 
-    def _wait_steady(self, timeout: timedelta) -> SteadyResult:
+    def _wait_steady(self, timeout: timedelta, burn_gate: bool = False) -> SteadyResult:
         deadline = self.clock.now() + timeout
         streak = 0
         while True:
             self._check_budget()
             try:
-                result = self.steady.check()
+                result = self.steady.check(burn_gate=burn_gate)
             except Exception as err:  # a failed query is "not steady yet"
                 result = SteadyResult(False, (f"steady-state query failed: {err}",))
             streak = streak + 1 if result.ok else 0
@@ -438,7 +603,7 @@ class LiveRunner:
 
     @contextlib.contextmanager
     def _signals_deferred(self) -> Iterator[None]:
-        """While the fault is being removed, Ctrl-C and SIGTERM wait until it is gone."""
+        """While the fault is being removed, Ctrl-C, SIGTERM and SIGHUP wait until it is gone."""
         if threading.current_thread() is not threading.main_thread():
             yield
             return
@@ -446,7 +611,7 @@ class LiveRunner:
         def remember(signum: int, frame: object) -> None:
             self._signal_pending = True
 
-        previous = {sig: signal.signal(sig, remember) for sig in (signal.SIGINT, signal.SIGTERM)}
+        previous = {sig: signal.signal(sig, remember) for sig in STOP_SIGNALS}
         try:
             yield
         finally:

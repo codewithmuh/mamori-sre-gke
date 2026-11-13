@@ -31,6 +31,12 @@ LIFECYCLE_EVENTS = frozenset(
 )
 # Proposal statuses after which nothing more happens to it.
 TERMINAL_STATUSES = frozenset({"rejected", "executed", "failed", "expired", "blocked"})
+# The agent's intake log lines (#24): what happened to each incident it was sent.
+AGENT_EVENTS = frozenset(
+    {"incident_accepted", "incident_merged", "incident_skipped", "investigation_cancelled"}
+)
+# Investigation statuses that mean the agent is still busy with it.
+BUSY_STATUSES = frozenset({"queued", "running"})
 RECORDING_KIND = "EvalRecording"
 API_VERSION = "mamori/v1"
 
@@ -107,12 +113,27 @@ class Investigation:
     tool_calls: int | None
     error: str | None
     raw: JSONDict
+    # Additive fields from #24: intake order, when the worker began, coalesced incidents and
+    # the switches it ran with.
+    seq: int | None = None
+    run_started_at: datetime | None = None
+    merged_incident_ids: tuple[str, ...] = ()
+    agent_config: Mapping[str, object] = field(default_factory=dict)
 
     @property
     def finished(self) -> bool:
-        return self.status in ("completed", "failed") or (
+        return self.status in ("completed", "failed", "cancelled") or (
             self.status == "" and self.finished_at is not None
         )
+
+    @property
+    def busy(self) -> bool:
+        return self.status in BUSY_STATUSES or (self.status == "" and self.finished_at is None)
+
+    @property
+    def ran(self) -> bool:
+        """Started work (not dropped from the queue before the worker reached it)."""
+        return self.status != "cancelled"
 
 
 def parse_investigation(document: object) -> Investigation:
@@ -164,6 +185,10 @@ def parse_investigation(document: object) -> Investigation:
         tool_calls=get_opt_int(data, "toolCalls"),
         error=get_opt_str(data, "error"),
         raw=dict(data),
+        seq=get_opt_int(data, "seq"),
+        run_started_at=get_opt_time(data, "runStartedAt"),
+        merged_incident_ids=get_str_list(data, "mergedIncidentIds"),
+        agent_config=dict(get_opt_mapping(data, "agentConfig") or {}),
     )
 
 
@@ -174,6 +199,7 @@ class Proposal:
     reason: str | None
     action: Action | None
     raw: JSONDict
+    expires_at: datetime | None = None
 
 
 def parse_proposal(document: object) -> Proposal:
@@ -183,6 +209,74 @@ def parse_proposal(document: object) -> Proposal:
         status=get_str(data, "status"),
         reason=get_opt_str(data, "reason"),
         action=parse_action(data.get("action"), "action"),
+        raw=dict(data),
+        expires_at=get_opt_time(data, "expiresAt"),
+    )
+
+
+@dataclass(frozen=True)
+class AgentEvent:
+    """One intake line from the agent's log: incident accepted, merged, skipped or cancelled."""
+
+    time: datetime | None
+    event: str
+    incident_id: str | None
+    investigation_id: str | None
+    reason: str | None
+    severity: str | None
+    cujs: tuple[str, ...]
+    raw: JSONDict
+
+
+def _either(data: Mapping[str, object], snake: str, camel: str) -> str | None:
+    return get_opt_str(data, snake) or get_opt_str(data, camel)
+
+
+def parse_agent_event(document: object) -> AgentEvent:
+    data = as_mapping(document, "agent event")
+    return AgentEvent(
+        time=get_opt_time(data, "time"),
+        event=get_str(data, "event"),
+        incident_id=_either(data, "incident_id", "incidentId"),
+        investigation_id=_either(data, "investigation_id", "investigationId"),
+        reason=get_opt_str(data, "reason"),
+        severity=get_opt_str(data, "severity_label") or get_opt_str(data, "policy_severity"),
+        cujs=get_str_list(data, "cujs"),
+        raw=dict(data),
+    )
+
+
+@dataclass(frozen=True)
+class AgentStatus:
+    """GET /v1/status (#24): the queue and the day's model budget, and the live settings."""
+
+    queued: int
+    running: int
+    daily_spent_usd: float | None
+    daily_reserved_usd: float | None
+    agent_config: Mapping[str, object]
+    raw: JSONDict
+
+    @property
+    def idle(self) -> bool:
+        return self.queued == 0 and self.running == 0
+
+    def headroom_usd(self) -> float | None:
+        """What the day's budget still allows, or None when the agent doesn't say."""
+        limit = self.agent_config.get("dailyCostLimitUsd")
+        if self.daily_spent_usd is None or not isinstance(limit, int | float):
+            return None
+        return float(limit) - self.daily_spent_usd - (self.daily_reserved_usd or 0.0)
+
+
+def parse_agent_status(document: object) -> AgentStatus:
+    data = as_mapping(document, "agent status")
+    return AgentStatus(
+        queued=get_opt_int(data, "queued") or 0,
+        running=get_opt_int(data, "running") or 0,
+        daily_spent_usd=get_opt_float(data, "dailySpentUsd"),
+        daily_reserved_usd=get_opt_float(data, "dailyReservedUsd"),
+        agent_config=dict(get_opt_mapping(data, "agentConfig") or {}),
         raw=dict(data),
     )
 
@@ -240,6 +334,13 @@ class RunObservation:
     proposal: Proposal | None = None
     executor_events: tuple[ExecutorEvent, ...] = ()
     notes: list[str] = field(default_factory=list)
+    # Every investigation that started in the run's window (the fault's whole cost), and the
+    # agent's intake lines for it; None means they were not read.
+    window_investigations: tuple[Investigation, ...] | None = None
+    agent_events: tuple[AgentEvent, ...] | None = None
+    # Burn rate per journey just before the injection: {"1h": {cuj: burn}, "6h": {...}}.
+    pre_burn: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
+    agent_status_before: JSONDict | None = None
 
     def to_dict(self) -> JSONDict:
         return {
@@ -260,6 +361,18 @@ class RunObservation:
             "proposal": self.proposal.raw if self.proposal else None,
             "executorEvents": [event.raw for event in self.executor_events],
             "notes": list(self.notes),
+            "windowInvestigations": (
+                [inv.raw for inv in self.window_investigations]
+                if self.window_investigations is not None
+                else None
+            ),
+            "agentEvents": (
+                [event.raw for event in self.agent_events]
+                if self.agent_events is not None
+                else None
+            ),
+            "preBurn": {window: dict(rates) for window, rates in self.pre_burn.items()},
+            "agentStatusBefore": self.agent_status_before,
         }
 
 
@@ -291,7 +404,27 @@ def parse_observation(document: object) -> RunObservation:
             parse_executor_event(event) for event in get_list(data, "executorEvents")
         ),
         notes=[str(note) for note in get_list(data, "notes")],
+        window_investigations=(
+            tuple(parse_investigation(item) for item in get_list(data, "windowInvestigations"))
+            if data.get("windowInvestigations") is not None
+            else None
+        ),
+        agent_events=(
+            tuple(parse_agent_event(item) for item in get_list(data, "agentEvents"))
+            if data.get("agentEvents") is not None
+            else None
+        ),
+        pre_burn=_parse_burn(get_opt_mapping(data, "preBurn") or {}),
+        agent_status_before=dict(get_opt_mapping(data, "agentStatusBefore") or {}) or None,
     )
+
+
+def _parse_burn(data: Mapping[str, object]) -> dict[str, dict[str, float]]:
+    burn: dict[str, dict[str, float]] = {}
+    for window, rates in data.items():
+        values = as_mapping(rates, f"preBurn.{window}")
+        burn[window] = {cuj: float(str(value)) for cuj, value in values.items()}
+    return burn
 
 
 @dataclass
