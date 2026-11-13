@@ -1,0 +1,11 @@
+# Inventory for PR-14 (what Gatekeeper's cache would hold): a PDB that keeps 2 frontend pods up.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: frontend
+  namespace: boutique
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: frontend

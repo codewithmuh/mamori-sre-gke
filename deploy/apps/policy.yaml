@@ -1,0 +1,43 @@
+# Wave 6: the production-readiness policies Gatekeeper (wave 5) checks: ConstraintTemplates from
+# the gatekeeper-library, then one Constraint per checklist item, all enforcementAction: dryrun.
+# Control map, exemptions and the path to warn/deny: docs/compliance/controls.md.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: policy
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "6"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    # Wave 0 inside this Application: the templates (kustomize). Gatekeeper turns each one into a
+    # CRD for its Constraint kind a moment after it is applied.
+    - repoURL: https://github.com/codewithmuh/mamori-sre-gke.git
+      targetRevision: main
+      path: deploy/policy/templates
+    # Wave 1: the Constraints (plain directory: their kinds have no published JSON schema, so
+    # deploy/validate.sh can't check them; deploy/policy/tests does, with gator).
+    - repoURL: https://github.com/codewithmuh/mamori-sre-gke.git
+      targetRevision: main
+      path: deploy/policy/constraints
+  destination:
+    server: https://kubernetes.default.svc
+    # Templates and Constraints are cluster-scoped; this only satisfies the field.
+    namespace: gatekeeper-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    # Argo CD has no built-in health check for ConstraintTemplates, so wave 1 can start before
+    # Gatekeeper has created a Constraint kind. That attempt fails with "no matches for kind";
+    # retrying a few seconds later succeeds. Automated sync does not retry a failed revision
+    # without this.
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

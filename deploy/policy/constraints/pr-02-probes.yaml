@@ -1,0 +1,25 @@
+# PR-02: every container has a readiness and a liveness probe of a kind the kubelet can run.
+# gRPC probes count: the Online Boutique services use them.
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequiredProbes
+metadata:
+  name: pr-02-probes
+  labels:
+    app.kubernetes.io/part-of: mamori
+  annotations:
+    # After the ConstraintTemplates (wave 0 of this Application); the dry run at the start of the
+    # first sync can't know this kind until Gatekeeper has made its CRD from the template.
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    mamori.dev/control-id: PR-02
+    mamori.dev/checklist-item: "Set meaningful readiness and liveness probes for your application"
+    mamori.dev/source: "https://docs.cloud.google.com/architecture/best-practices-for-running-cost-effective-kubernetes-applications-on-gke"
+spec:
+  enforcementAction: dryrun
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+  parameters:
+    probes: ["readinessProbe", "livenessProbe"]
+    probeTypes: ["httpGet", "tcpSocket", "grpc", "exec"]

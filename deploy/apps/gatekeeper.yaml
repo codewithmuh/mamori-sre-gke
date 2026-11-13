@@ -1,0 +1,55 @@
+# Wave 5: OPA Gatekeeper (D10), the admission webhook and audit that check workloads against the
+# readiness policies in deploy/policy (wave 6). Every policy starts in dryrun and the webhook fails
+# open, so nothing here can block a deploy yet. Control map: docs/compliance/controls.md.
+# Private nodes: the control plane reaches the webhook on TCP 8443 (infra/envs/lab/firewall_gatekeeper.tf).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gatekeeper
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    - repoURL: https://open-policy-agent.github.io/gatekeeper/charts
+      chart: gatekeeper
+      targetRevision: 3.23.1
+      helm:
+        releaseName: gatekeeper
+        valueFiles:
+          - $values/deploy/gatekeeper/values.yaml
+    - repoURL: https://github.com/codewithmuh/mamori-sre-gke.git
+      targetRevision: main
+      ref: values
+    # Namespace exemptions, the cache list and the metrics scrape (kustomize).
+    - repoURL: https://github.com/codewithmuh/mamori-sre-gke.git
+      targetRevision: main
+      path: deploy/gatekeeper/config
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gatekeeper-system
+  # Gatekeeper rotates its own webhook certificate and writes the CA into the webhook
+  # configuration at runtime; that is not drift.
+  ignoreDifferences:
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    # Replaces the chart's post-install Job that labels the namespace: Gatekeeper's pods meet the
+    # "restricted" Pod Security Standard, so Kubernetes' built-in admission enforces it here.
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/enforce-version: latest
+        pod-security.kubernetes.io/warn: restricted
+        pod-security.kubernetes.io/audit: restricted
+    syncOptions:
+      - CreateNamespace=true
+      - RespectIgnoreDifferences=true

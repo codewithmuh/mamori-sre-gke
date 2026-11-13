@@ -1,0 +1,127 @@
+# Passes every Pod policy: an Online Boutique pod after Istio injection (1.31, native sidecar,
+# no Istio CNI). istio-init runs as root and adds NET_ADMIN and NET_RAW, which PR-08 and PR-10
+# exempt by image; the sidecar sits in initContainers and has no liveness probe, which PR-02
+# does not ask of init containers.
+# Written as the AdmissionReview request the API server sends to Gatekeeper: it is a test
+# input, not a manifest to deploy, and repo scanners such as Trivy don't read it as one.
+apiVersion: admission.k8s.io/v1
+kind: AdmissionReview
+request:
+  uid: ar-meshed-pod-istio-init
+  kind:
+    group: ""
+    version: v1
+    kind: Pod
+  resource:
+    group: ""
+    version: v1
+    resource: pods
+  namespace: boutique
+  name: currencyservice
+  operation: CREATE
+  userInfo:
+    username: gator-test
+  object:
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: currencyservice
+      namespace: boutique
+      labels:
+        app: currencyservice
+        app.kubernetes.io/name: currencyservice
+        app.kubernetes.io/part-of: mamori
+    spec:
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      initContainers:
+        - name: istio-init
+          image: docker.io/istio/proxyv2:1.31.4
+          args:
+            - istio-iptables
+            - -p
+            - '15001'
+            - -z
+            - '15006'
+            - -u
+            - '1337'
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+              drop:
+                - ALL
+            readOnlyRootFilesystem: false
+            runAsGroup: 0
+            runAsNonRoot: false
+            runAsUser: 0
+        - name: istio-proxy
+          image: docker.io/istio/proxyv2:1.31.4
+          restartPolicy: Always
+          args:
+            - proxy
+            - sidecar
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz/ready
+              port: 15021
+          startupProbe:
+            httpGet:
+              path: /healthz/ready
+              port: 15021
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsGroup: 1337
+            runAsNonRoot: true
+            runAsUser: 1337
+      containers:
+        - name: server
+          image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/currencyservice:v0.10.7@sha256:c581681bbf9abec8563e520aac3f3dbe3e7498853b6eb263193bc80c87e42f74
+          ports:
+            - containerPort: 7000
+              name: grpc
+          readinessProbe:
+            grpc:
+              port: 7000
+          livenessProbe:
+            grpc:
+              port: 7000
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true

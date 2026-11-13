@@ -1,0 +1,21 @@
+# PR-13: no Service of type NodePort: it opens a port on every node and bypasses the Gateway.
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sBlockNodePort
+metadata:
+  name: pr-13-no-nodeport
+  labels:
+    app.kubernetes.io/part-of: mamori
+  annotations:
+    # After the ConstraintTemplates (wave 0 of this Application); the dry run at the start of the
+    # first sync can't know this kind until Gatekeeper has made its CRD from the template.
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    mamori.dev/control-id: PR-13
+    mamori.dev/checklist-item: "Use container-native load balancing through Ingress"
+    mamori.dev/source: "https://docs.cloud.google.com/architecture/best-practices-for-running-cost-effective-kubernetes-applications-on-gke"
+spec:
+  enforcementAction: dryrun
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Service"]

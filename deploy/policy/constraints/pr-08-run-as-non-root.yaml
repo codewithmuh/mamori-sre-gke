@@ -1,0 +1,29 @@
+# PR-08: containers must not run as root: runAsNonRoot is true or runAsUser is not 0, set on
+# the container or inherited from the pod.
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sPSPAllowedUsers
+metadata:
+  name: pr-08-run-as-non-root
+  labels:
+    app.kubernetes.io/part-of: mamori
+  annotations:
+    # After the ConstraintTemplates (wave 0 of this Application); the dry run at the start of the
+    # first sync can't know this kind until Gatekeeper has made its CRD from the template.
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    mamori.dev/control-id: PR-08
+    mamori.dev/checklist-item: "Pod Security Standards, Restricted: Running as Non-root"
+    mamori.dev/source: "https://kubernetes.io/docs/concepts/security/pod-security-standards/"
+spec:
+  enforcementAction: dryrun
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+  parameters:
+    runAsUser:
+      rule: MustRunAsNonRoot
+    # Istio without its CNI node agent injects an init container (istio-init) that runs as root
+    # with NET_ADMIN and NET_RAW to write the pod's iptables rules. Accepted risk, recorded in
+    # docs/compliance/controls.md; installing Istio CNI removes it.
+    exemptImages: ["docker.io/istio/proxyv2:*"]

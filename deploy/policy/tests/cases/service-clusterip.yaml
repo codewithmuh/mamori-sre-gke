@@ -1,0 +1,17 @@
+# Passes PR-12 and PR-13: a ClusterIP Service, like every Service in this repo.
+apiVersion: v1
+kind: Service
+metadata:
+  name: prober
+  namespace: prober
+  labels:
+    app.kubernetes.io/name: prober
+    app.kubernetes.io/part-of: mamori
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: prober
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

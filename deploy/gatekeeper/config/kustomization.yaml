@@ -1,0 +1,8 @@
+# Gatekeeper's settings that are not Helm values. Synced by the same Application as the chart
+# (deploy/apps/gatekeeper.yaml).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - config.yaml
+  - podmonitoring.yaml

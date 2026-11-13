@@ -1,0 +1,38 @@
+# Passes: an image pinned by digest only (no tag) and gRPC probes, as Online Boutique uses.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: productcatalogservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: productcatalogservice
+    app.kubernetes.io/part-of: mamori
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: server
+      image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/productcatalogservice@sha256:ba573405e9b03ea29970185eeaf0a9de9db7400b9104695e39d4dfc0fb651cb5
+      ports:
+        - containerPort: 3550
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          memory: 64Mi
+      readinessProbe:
+        grpc:
+          port: 3550
+      livenessProbe:
+        grpc:
+          port: 3550
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL

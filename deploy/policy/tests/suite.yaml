@@ -1,0 +1,369 @@
+# gator verify suite for deploy/policy: every template, run with this repo's own Constraint
+# parameters, against passing and failing objects in cases/. Run with ../check.sh, or:
+#   gator verify --enable-k8s-native-validation=false deploy/policy/tests
+# A failing case names the rule it breaks in its first line. Message patterns are regular
+# expressions, so a case also proves that the intended rule fired, not just any rule.
+# Gatekeeper runs with the CEL engine off (deploy/gatekeeper/values.yaml), so run gator the same
+# way: --enable-k8s-native-validation=false.
+apiVersion: test.gatekeeper.sh/v1alpha1
+kind: Suite
+metadata:
+  name: mamori-readiness-policies
+tests:
+  - name: pr-01-resources
+    template: ../templates/k8srequiredresources.yaml
+    constraint: ../constraints/pr-01-resources.yaml
+    cases:
+      - name: compliant-pod
+        object: cases/pod-compliant.yaml
+        assertions:
+          - violations: no
+      - name: digest-only-image-grpc-probes
+        object: cases/pod-digest-grpc.yaml
+        assertions:
+          - violations: no
+      - name: meshed-pod-with-istio-init
+        object: cases/ar-meshed-pod-istio-init.yaml
+        assertions:
+          - violations: no
+      - name: memory-limit-missing
+        object: cases/ar-pr01-no-memory-limit.yaml
+        assertions:
+          - violations: 1
+            message: "<\\{\"memory\"\\}> limits"
+      - name: init-container-without-resources
+        object: cases/ar-pr01-init-container-no-resources.yaml
+        assertions:
+          - violations: 2
+            message: "<frontend-check> does not have"
+  - name: pr-02-probes
+    template: ../templates/k8srequiredprobes.yaml
+    constraint: ../constraints/pr-02-probes.yaml
+    cases:
+      - name: compliant-pod
+        object: cases/pod-compliant.yaml
+        assertions:
+          - violations: no
+      - name: digest-only-image-grpc-probes
+        object: cases/pod-digest-grpc.yaml
+        assertions:
+          - violations: no
+      - name: meshed-pod-with-istio-init
+        object: cases/ar-meshed-pod-istio-init.yaml
+        assertions:
+          - violations: no
+      - name: liveness-probe-missing
+        object: cases/ar-pr02-no-liveness-probe.yaml
+        assertions:
+          - violations: 1
+            message: "has no <livenessProbe>"
+  - name: pr-03-no-latest-tag
+    template: ../templates/k8sdisallowedtags.yaml
+    constraint: ../constraints/pr-03-no-latest-tag.yaml
+    cases:
+      - name: compliant-pod
+        object: cases/pod-compliant.yaml
+        assertions:
+          - violations: no
+      - name: digest-only-image-grpc-probes
+        object: cases/pod-digest-grpc.yaml
+        assertions:
+          - violations: no
+      - name: meshed-pod-with-istio-init
+        object: cases/ar-meshed-pod-istio-init.yaml
+        assertions:
+          - violations: no
+      - name: third-party-images
+        object: cases/pod-third-party-images.yaml
+        assertions:
+          - violations: no
+      - name: latest-tag
+        object: cases/ar-pr03-latest-tag.yaml
+        assertions:
+          - violations: 1
+            message: "uses a disallowed tag"
+      - name: no-tag-no-digest
+        object: cases/ar-pr03-no-tag.yaml
+        assertions:
+          - violations: 1
+            message: "didn't specify an image tag"
+  - name: pr-04-allowed-registries
+    template: ../templates/k8sallowedreposv2.yaml
+    constraint: ../constraints/pr-04-allowed-registries.yaml
+    cases:
+      - name: compliant-pod
+        object: cases/pod-compliant.yaml
+        assertions:
+          - violations: no
+      - name: digest-only-image-grpc-probes
+        object: cases/pod-digest-grpc.yaml
+        assertions:
+          - violations: no
+      - name: meshed-pod-with-istio-init
+        object: cases/ar-meshed-pod-istio-init.yaml
+        assertions:
+          - violations: no
+      - name: third-party-images
+        object: cases/pod-third-party-images.yaml
+        assertions:
+          - violations: no
+      - name: unknown-registry
+        object: cases/ar-pr04-unknown-registry.yaml
+        assertions:
+          - violations: 1
+            message: "docker.io/library/nginx"
+      - name: lookalike-repository
+        object: cases/ar-pr04-lookalike-prefix.yaml
+        assertions:
+          - violations: 1
+            message: "istio-mirror"
+      - name: lookalike-registry-host
+        object: cases/ar-pr04-lookalike-registry-host.yaml
+        assertions:
+          - violations: 1
+            message: "registry.datadoghq.com.attacker.example"
+  - name: pr-05-no-privileged
+    template: ../templates/k8spspprivilegedcontainer.yaml
+    constraint: ../constraints/pr-05-no-privileged.yaml
+    cases:
+      - name: compliant-pod
+        object: cases/pod-compliant.yaml
+        assertions:
+          - violations: no
+      - name: digest-only-image-grpc-probes
+        object: cases/pod-digest-grpc.yaml
+        assertions:
+          - violations: no
+      - name: meshed-pod-with-istio-init
+        object: cases/ar-meshed-pod-istio-init.yaml
+        assertions:
+          - violations: no
+      - name: privileged-container
+        object: cases/ar-pr05-privileged.yaml
+        assertions:
+          - violations: 1
+            message: "Privileged container is not allowed"
+  - name: pr-06-no-host-pid-ipc
+    template: ../templates/k8spsphostnamespace.yaml
+    constraint: ../constraints/pr-06-no-host-pid-ipc.yaml
+    cases:
+      - name: compliant-pod
+        object: cases/pod-compliant.yaml
+        assertions:
+          - violations: no
+      - name: digest-only-image-grpc-probes
+        object: cases/pod-digest-grpc.yaml
+        assertions:
+          - violations: no
+      - name: meshed-pod-with-istio-init
+        object: cases/ar-meshed-pod-istio-init.yaml
+        assertions:
+          - violations: no
+      - name: host-pid
+        object: cases/ar-pr06-host-pid.yaml
+        assertions:
+          - violations: 1
+            message: "Sharing the host namespace"
+      - name: host-ipc
+        object: cases/ar-pr06-host-ipc.yaml
+        assertions:
+          - violations: 1
+            message: "Sharing the host namespace"
+  - name: pr-07-no-host-network-ports
+    template: ../templates/k8spsphostnetworkingports.yaml
+    constraint: ../constraints/pr-07-no-host-network-ports.yaml
+    cases:
+      - name: compliant-pod
+        object: cases/pod-compliant.yaml
+        assertions:
+          - violations: no
+      - name: digest-only-image-grpc-probes
+        object: cases/pod-digest-grpc.yaml
+        assertions:
+          - violations: no
+      - name: meshed-pod-with-istio-init
+        object: cases/ar-meshed-pod-istio-init.yaml
+        assertions:
+          - violations: no
+      - name: host-network
+        object: cases/ar-pr07-host-network.yaml
+        assertions:
+          - violations: 1
+            message: "hostNetwork and hostPort are not allowed, pod: host-network"
+      - name: host-port
+        object: cases/ar-pr07-host-port.yaml
+        assertions:
+          - violations: 1
+            message: "hostNetwork and hostPort are not allowed, pod: host-port"
+      - name: host-port-next-to-ordinary-port
+        object: cases/ar-pr07-host-port-second.yaml
+        assertions:
+          - violations: 1
+            message: "hostNetwork and hostPort are not allowed, pod: host-port-second"
+  - name: pr-08-run-as-non-root
+    template: ../templates/k8spspallowedusers.yaml
+    constraint: ../constraints/pr-08-run-as-non-root.yaml
+    cases:
+      - name: compliant-pod
+        object: cases/pod-compliant.yaml
+        assertions:
+          - violations: no
+      - name: digest-only-image-grpc-probes
+        object: cases/pod-digest-grpc.yaml
+        assertions:
+          - violations: no
+      - name: meshed-pod-with-istio-init
+        object: cases/ar-meshed-pod-istio-init.yaml
+        assertions:
+          - violations: no
+      - name: container-runs-as-root
+        object: cases/ar-pr08-root-user.yaml
+        assertions:
+          - violations: 1
+            message: "disallowed user 0"
+      - name: no-user-set
+        object: cases/ar-pr08-no-user.yaml
+        assertions:
+          - violations: 1
+            message: "without a required securityContext/runAsNonRoot"
+  - name: pr-09-no-privilege-escalation
+    template: ../templates/k8spspallowprivilegeescalationcontainer.yaml
+    constraint: ../constraints/pr-09-no-privilege-escalation.yaml
+    cases:
+      - name: compliant-pod
+        object: cases/pod-compliant.yaml
+        assertions:
+          - violations: no
+      - name: digest-only-image-grpc-probes
+        object: cases/pod-digest-grpc.yaml
+        assertions:
+          - violations: no
+      - name: meshed-pod-with-istio-init
+        object: cases/ar-meshed-pod-istio-init.yaml
+        assertions:
+          - violations: no
+      - name: escalation-allowed
+        object: cases/ar-pr09-privilege-escalation.yaml
+        assertions:
+          - violations: 1
+            message: "Privilege escalation container is not allowed"
+      - name: escalation-unset
+        object: cases/ar-pr09-unset-privilege-escalation.yaml
+        assertions:
+          - violations: 1
+            message: "Privilege escalation container is not allowed"
+  - name: pr-10-drop-capabilities
+    template: ../templates/k8spspcapabilities.yaml
+    constraint: ../constraints/pr-10-drop-capabilities.yaml
+    cases:
+      - name: compliant-pod
+        object: cases/pod-compliant.yaml
+        assertions:
+          - violations: no
+      - name: digest-only-image-grpc-probes
+        object: cases/pod-digest-grpc.yaml
+        assertions:
+          - violations: no
+      - name: meshed-pod-with-istio-init
+        object: cases/ar-meshed-pod-istio-init.yaml
+        assertions:
+          - violations: no
+      - name: capability-added
+        object: cases/ar-pr10-added-capability.yaml
+        assertions:
+          - violations: 1
+            message: "has a disallowed capability"
+      - name: all-not-dropped
+        object: cases/ar-pr10-no-drop-all.yaml
+        assertions:
+          - violations: 1
+            message: "not dropping all required capabilities"
+  - name: pr-11-recommended-labels
+    template: ../templates/k8srequiredlabels.yaml
+    constraint: ../constraints/pr-11-recommended-labels.yaml
+    cases:
+      - name: compliant-pod
+        object: cases/pod-compliant.yaml
+        assertions:
+          - violations: no
+      - name: digest-only-image-grpc-probes
+        object: cases/pod-digest-grpc.yaml
+        assertions:
+          - violations: no
+      - name: meshed-pod-with-istio-init
+        object: cases/ar-meshed-pod-istio-init.yaml
+        assertions:
+          - violations: no
+      - name: only-app-label
+        object: cases/ar-pr11-only-app-label.yaml
+        assertions:
+          - violations: 1
+            message: "app.kubernetes.io/name and app.kubernetes.io/part-of"
+  - name: pr-12-no-loadbalancer
+    template: ../templates/k8sblockloadbalancer.yaml
+    constraint: ../constraints/pr-12-no-loadbalancer.yaml
+    cases:
+      - name: clusterip-service
+        object: cases/service-clusterip.yaml
+        assertions:
+          - violations: no
+      - name: loadbalancer-service
+        object: cases/ar-pr12-loadbalancer.yaml
+        assertions:
+          - violations: 1
+            message: "LoadBalancer"
+  - name: pr-13-no-nodeport
+    template: ../templates/k8sblocknodeport.yaml
+    constraint: ../constraints/pr-13-no-nodeport.yaml
+    cases:
+      - name: clusterip-service
+        object: cases/service-clusterip.yaml
+        assertions:
+          - violations: no
+      - name: nodeport-service
+        object: cases/ar-pr13-nodeport.yaml
+        assertions:
+          - violations: 1
+            message: "NodePort"
+  - name: pr-14-pdb-allows-drain
+    template: ../templates/k8spoddisruptionbudget.yaml
+    constraint: ../constraints/pr-14-pdb-allows-drain.yaml
+    cases:
+      - name: pdb-allows-one-eviction
+        object: cases/pdb-max-unavailable-1.yaml
+        assertions:
+          - violations: no
+      - name: pdb-allows-no-eviction
+        object: cases/ar-pr14-pdb-max-unavailable-0.yaml
+        assertions:
+          - violations: 1
+            message: "maxUnavailable of 0"
+      - name: replicas-above-min-available
+        object: cases/deployment-three-replicas.yaml
+        inventory:
+          - cases/inventory-pdb-min-available-2.yaml
+        assertions:
+          - violations: no
+      - name: replicas-equal-min-available
+        object: cases/ar-pr14-deployment-blocks-drain.yaml
+        inventory:
+          - cases/inventory-pdb-min-available-2.yaml
+        assertions:
+          - violations: 1
+            message: "minAvailable of 2"
+  # The harness in ../check.sh judges Deployments through their pod templates. This proves the
+  # expansion works: the Deployment has no probes, so the Pod it would create fails PR-02.
+  - name: expansion-judges-pod-templates
+    template: ../templates/k8srequiredprobes.yaml
+    constraint: ../constraints/pr-02-probes.yaml
+    expansion: expansion.yaml
+    cases:
+      - name: deployment-with-probes
+        object: cases/deployment-three-replicas.yaml
+        assertions:
+          - violations: no
+      - name: deployment-without-probes
+        object: cases/deployment-no-probes.yaml
+        assertions:
+          - violations: 2
+            message: "has no <(readiness|liveness)Probe>"

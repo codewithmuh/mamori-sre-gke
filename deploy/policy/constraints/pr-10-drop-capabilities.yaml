@@ -1,0 +1,26 @@
+# PR-10: every container drops ALL capabilities and adds back at most NET_BIND_SERVICE.
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sPSPCapabilities
+metadata:
+  name: pr-10-drop-capabilities
+  labels:
+    app.kubernetes.io/part-of: mamori
+  annotations:
+    # After the ConstraintTemplates (wave 0 of this Application); the dry run at the start of the
+    # first sync can't know this kind until Gatekeeper has made its CRD from the template.
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    mamori.dev/control-id: PR-10
+    mamori.dev/checklist-item: "Pod Security Standards, Restricted: Capabilities"
+    mamori.dev/source: "https://kubernetes.io/docs/concepts/security/pod-security-standards/"
+spec:
+  enforcementAction: dryrun
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+  parameters:
+    requiredDropCapabilities: ["ALL"]
+    allowedCapabilities: ["NET_BIND_SERVICE"]
+    # istio-init adds NET_ADMIN and NET_RAW; see pr-08-run-as-non-root.yaml.
+    exemptImages: ["docker.io/istio/proxyv2:*"]
