@@ -1,0 +1,175 @@
+# CPU autoscaling for the four services that gain from more replicas: on the hot path of the
+# journeys, stateless, and CPU-bound. Starting values; the capacity test (#29) and
+# docs/resilience/experiments.md (E6) tune them.
+#
+#   frontend               every request; renders HTML and fans out ~10-15 gRPC calls per page
+#   currencyservice        Node.js, single-threaded; about 10 Convert calls per home page
+#   productcatalogservice  every page, plus checkout
+#   recommendationservice  Python; product and cart pages; the target of F06 (CPU stress)
+#
+# Not autoscaled: cartservice (cheap calls, bound by the single redis-cart), checkout, payment,
+# shipping and email (one call each per order), adservice (JVM: CPU spikes at start-up skew a CPU
+# target, and the frontend caps it at 100 ms anyway), redis-cart (stateful), loadgenerator.
+#
+# minReplicas 1: nothing extra runs at rest, and the PodDisruptionBudgets never block a drain at rest.
+# The extra pods an HPA can add, with their Istio sidecars (20m / 64 MiB each):
+#   frontend 2 x (100m + 20m) = 240m, 2 x (64 + 64) MiB = 256 MiB
+#   currencyservice           = 240m, 256 MiB
+#   productcatalogservice 1 x = 120m, 128 MiB
+#   recommendationservice 1 x = 120m, 1 x (220 + 64) MiB = 284 MiB
+#   at most 720m CPU and 924 MiB in all, only while load needs them.
+#
+# ContainerResource on container "server" (stable since Kubernetes 1.30): the Envoy sidecar's CPU is
+# left out, so the target measures the app alone.
+# averageUtilization 80: scale out before a pod's usage passes its request (100m) by much; the CPU
+# limit (200m) is where throttling adds latency. If a service sits above about 60 % at steady load,
+# its request is too low; raise the request rather than let the HPA scale at rest.
+# Behaviour: scale up at once, up to 2 pods per 15 s; scale down only after 5 minutes of lower load,
+# one pod a minute, so a short dip does not drop a pod that is needed again seconds later.
+#
+# Argo CD must not reset the replica count: see the ignoreDifferences request in
+# docs/resilience/README.md. The executor (#25) refuses `scale` on Deployments an HPA targets.
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: frontend
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: frontend
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: frontend
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: ContainerResource
+      containerResource:
+        name: cpu
+        container: server
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: currencyservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: currencyservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: currencyservice
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: ContainerResource
+      containerResource:
+        name: cpu
+        container: server
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: productcatalogservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: productcatalogservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: productcatalogservice
+  minReplicas: 1
+  maxReplicas: 2
+  metrics:
+    - type: ContainerResource
+      containerResource:
+        name: cpu
+        container: server
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: recommendationservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: recommendationservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: recommendationservice
+  minReplicas: 1
+  maxReplicas: 2
+  metrics:
+    - type: ContainerResource
+      containerResource:
+        name: cpu
+        container: server
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60

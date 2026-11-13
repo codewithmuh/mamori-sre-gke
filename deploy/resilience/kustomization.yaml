@@ -1,0 +1,23 @@
+# Resilience settings for Online Boutique (issue #27, milestone M4). Why each value is what it is:
+# docs/resilience/README.md. How each one is measured, before and after: docs/resilience/experiments.md.
+# Every number here is a starting estimate until those experiments have run.
+#
+# No `namespace:` field on purpose. The EnvoyFilter must live in istio-ingress, next to the gateway
+# pods it changes; everything else lives in boutique. Each file sets its own namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - destination-rules.yaml
+  - pod-disruption-budgets.yaml
+  - horizontal-pod-autoscalers.yaml
+  - ingress-rate-limit.yaml
+
+labels:
+  # Metadata only. PDB and HPA selectors must keep matching the upstream pods, which carry only
+  # `app: <name>`, so these labels never go into selectors.
+  - pairs:
+      app.kubernetes.io/part-of: mamori
+      app.kubernetes.io/component: resilience
+    includeSelectors: false
+    includeTemplates: false

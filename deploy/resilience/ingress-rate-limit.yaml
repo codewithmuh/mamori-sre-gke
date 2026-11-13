@@ -1,0 +1,123 @@
+# Load shedding at the Istio ingress gateway: Envoy's local rate limit filter (a token bucket).
+# Requests above the limit get 429 Too Many Requests at once, with header `x-local-rate-limit: true`,
+# instead of queueing on a shop that is already full. The admitted requests keep their latency.
+#
+# How it fits with the other limits:
+#   Cloud Armor (mamori-frontend-armor, Terraform)  per client IP, at Google's edge: fairness
+#   this filter                                     total requests into the cluster: capacity
+#   frontend DestinationRule (destination-rules.yaml) requests in flight to the frontend: concurrency
+# The in-cluster load generator calls the frontend Service directly, so it is never limited here.
+#
+# Only the public listener is limited. Both patches below match port 80 only: the gateway listener
+# the GKE load balancer sends traffic to, and its route table (`http.80`). The cluster-internal
+# port 8080 that #8 adds for the prober and load tests is a separate Envoy listener with its own
+# route table (`http.8080`), so in-cluster probes and load tests are never throttled. Keep it that
+# way: never widen the match to all ports.
+#
+# Istio 1.31 has no first-class API for local rate limits; its own docs use an EnvoyFilter, as here.
+# EnvoyFilter is low-level: re-check this file on every Istio upgrade (`istioctl analyze`, and the
+# stats below).
+#
+# The limit: 40 requests/s sustained, bursts up to 80. A starting estimate, not a measurement. Set it
+# to about 90 % of the highest rate that still meets the latency SLO with the HPAs at their maximum,
+# from the capacity test (#29). The bucket is shared by all of the gateway pod's worker threads, so
+# with one gateway replica (deploy/istio/gateway-values.yaml) it is the limit for the whole shop;
+# with N replicas the total is N times this.
+#
+# Static files (/static/, CSS and images) skip the limit. They cost the frontend almost nothing and a
+# browser fetches many per page, so counting them would make the limit mean nothing about load. The
+# skip is keyed to the route name `static` in deploy/online-boutique/public-virtualservice.yaml. If
+# that route is missing or renamed, static files simply count against the limit (safe, not open).
+#
+# The capacity test finds the knee on port 8080, outside this limit. To compare port 80 with and
+# without shedding (docs/resilience/experiments.md, E7), turn enforcement off without touching Git or
+# Argo CD (Envoy runtime, reset when the pod restarts):
+#   kubectl -n istio-ingress exec deploy/istio-ingressgateway -c istio-proxy -- \
+#     pilot-agent request POST 'runtime_modify?ingress_local_rate_limit_enforced=0'
+# Back on with `=100`. While enforcement is off, the filter still counts the requests it would have
+# limited (stat `ingress_local_rate_limit.http_local_rate_limit.rate_limited`; Istio creates it only
+# with the proxyStatsMatcher requested in docs/resilience/README.md).
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: ingress-local-rate-limit
+  namespace: istio-ingress
+  labels:
+    app.kubernetes.io/name: istio-ingressgateway
+spec:
+  # The gateway pods (labels from the gateway chart, deploy/istio/gateway-values.yaml).
+  workloadSelector:
+    labels:
+      istio: ingressgateway
+  configPatches:
+    # 1. Add the filter to the gateway's public plain-HTTP listener (port 80, where the GKE load
+    #    balancer sends traffic), just before the router. Port 80 only: see the header.
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          portNumber: 80
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+              subFilter:
+                name: envoy.filters.http.router
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: envoy.filters.http.local_ratelimit
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+            stat_prefix: ingress_local_rate_limit
+            token_bucket:
+              max_tokens: 80
+              tokens_per_fill: 40
+              fill_interval: 1s
+            # Envoy defaults both to 0 % "for safety"; 100 % means on. The runtime keys allow the
+            # switch described above.
+            filter_enabled:
+              runtime_key: ingress_local_rate_limit_enabled
+              default_value:
+                numerator: 100
+                denominator: HUNDRED
+            filter_enforced:
+              runtime_key: ingress_local_rate_limit_enforced
+              default_value:
+                numerator: 100
+                denominator: HUNDRED
+            # One bucket per Envoy process, not per connection: the load balancer keeps a few
+            # long-lived connections open, so a per-connection bucket would not limit anything useful.
+            local_rate_limit_per_downstream_connection: false
+            status:
+              code: TooManyRequests
+            response_headers_to_add:
+              - append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                header:
+                  key: x-local-rate-limit
+                  value: "true"
+    # 2. Static files skip it. A per-route config replaces the listener-level one for that route;
+    #    Envoy requires a token bucket in it, but with filter_enabled at 0 % the bucket is never used.
+    - applyTo: HTTP_ROUTE
+      match:
+        context: GATEWAY
+        routeConfiguration:
+          portNumber: 80
+          vhost:
+            name: mamori.codewithmuh.com:80
+            route:
+              name: static
+      patch:
+        operation: MERGE
+        value:
+          typed_per_filter_config:
+            envoy.filters.http.local_ratelimit:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+              stat_prefix: ingress_local_rate_limit_static
+              token_bucket:
+                max_tokens: 1
+                tokens_per_fill: 1
+                fill_interval: 1s
+              filter_enabled:
+                default_value:
+                  numerator: 0
+                  denominator: HUNDRED

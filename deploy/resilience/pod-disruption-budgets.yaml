@@ -1,0 +1,169 @@
+# One PodDisruptionBudget per shop workload: the 10 services and redis-cart (not the load generator).
+# Each allows one pod of its workload to be evicted at a time.
+#
+# Why maxUnavailable: 1 and not minAvailable: 1. With one replica (the default here; HPAs start at 1),
+# minAvailable: 1 would forbid every eviction, and GKE would hold a node drain (an upgrade, or the
+# spend guard scaling the pool to zero) for up to an hour. maxUnavailable: 1 never blocks a
+# one-replica workload. It only paces a workload an HPA has scaled out: during a rolling node
+# upgrade the second pod waits until the first one's replacement is Ready.
+# The one case where it can still hold a drain: scaling the whole pool to zero while an HPA has 2+
+# replicas, because the replacement pods have nowhere to run. GKE then gives up after one hour;
+# docs/resilience/README.md ("Spend guard") gives the one-line way to cut that short.
+#
+# unhealthyPodEvictionPolicy AlwaysAllow (stable since Kubernetes 1.31): a pod that is not Ready
+# (crash-looping, stuck) can always be evicted, so a broken pod never blocks a drain.
+# Spot preemptions ignore PodDisruptionBudgets; these only cover voluntary evictions.
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: adservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: adservice
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app: adservice
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cartservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: cartservice
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app: cartservice
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: checkoutservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: checkoutservice
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app: checkoutservice
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: currencyservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: currencyservice
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app: currencyservice
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: emailservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: emailservice
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app: emailservice
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: frontend
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: frontend
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app: frontend
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: paymentservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: paymentservice
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app: paymentservice
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: productcatalogservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: productcatalogservice
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app: productcatalogservice
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: recommendationservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: recommendationservice
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app: recommendationservice
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis-cart
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: redis-cart
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app: redis-cart
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: shippingservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: shippingservice
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app: shippingservice

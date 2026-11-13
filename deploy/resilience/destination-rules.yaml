@@ -1,0 +1,402 @@
+# Client-side traffic policy for every Online Boutique host. Envoy in the *calling* pod applies it
+# (the frontend's sidecar for frontend -> currencyservice, the ingress gateway for gateway -> frontend).
+# One DestinationRule per host. Per-host VirtualServices for these hosts are reserved for fault
+# injection (#17, #23), so per-call timeouts and per-method retry rules are not set here; see
+# docs/resilience/README.md, "Rules this design follows".
+#
+# No `tls` block anywhere: Istio's auto mTLS stays in charge, exactly as in the base (no
+# PeerAuthentication, so PERMISSIVE, and sidecar-to-sidecar traffic is mutual TLS). Setting
+# ISTIO_MUTUAL here would change nothing today, and would break calls to any pod that one day runs
+# without a sidecar.
+#
+# The common profile (all values are starting estimates):
+#   connectTimeout 1s          Istio's default is 10 s. In-cluster connects take milliseconds; a pod IP
+#                              that has gone away should fail fast and be retried on another pod.
+#   tcpKeepalive 30s/10s x 3   TCP keepalive on idle connections, so one to a pod that vanished (node
+#                              lost, network cut) is found dead in about a minute, not the kernel's two
+#                              hours. Kernel-level: the apps never see it. (Not HTTP/2 PINGs: Istio
+#                              applies a DestinationRule's connectionPool to the server's own sidecar
+#                              too, which would then ping its gRPC app; gRPC servers allow one ping per
+#                              5 minutes without data and answer more with GOAWAY "too_many_pings".)
+#   http2MaxRequests 100       At most 100 calls in flight from one client pod to this service, and
+#   http1MaxPendingRequests 50 50 waiting for a connection. Beyond that the call fails at once (503,
+#                              flag UO) instead of piling up behind a slow service. About 10x the
+#                              in-flight calls expected at the capacity limit (estimate, #29 measures it).
+#                              Istio applies the same caps on the server's own sidecar (inbound), there
+#                              for all callers together.
+#   retryBudget 10 % / min 3   Retries in flight may be at most 10 % of active requests (never fewer
+#                              than 3), so retries cannot multiply load during a broad failure. Without
+#                              it Istio allows 2^32-1 concurrent retries. Envoy uses the budget instead
+#                              of the fixed `maxRetries` circuit breaker, so `maxRetries` is not set.
+#   outlierDetection           Leaf services: eject a pod after 3 gateway errors in a row (connect
+#                              failure, reset, timeout, 502/503/504; gRPC UNAVAILABLE and
+#                              DEADLINE_EXCEEDED map to 503 and 504) or 5 errors of any 5xx kind.
+#                              gRPC errors count when the server sends them trailers-only, the normal
+#                              case for these unary calls.
+#                              Services that call others (frontend, checkoutservice,
+#                              recommendationservice): only failures to reach the pod itself count
+#                              (splitExternalLocalOriginErrors, 3 connect failures or timeouts in a
+#                              row). Their error responses, UNAVAILABLE included, usually mean a
+#                              dependency failed: checkoutservice answers UNAVAILABLE when shipping
+#                              fails. Ejecting a healthy pod for that only moves its load.
+#                              Ejection lasts 30 s, longer each time it repeats, and never covers more
+#                              than half of the pods. minHealthPercent 50: below half healthy, Envoy
+#                              ignores ejections (panic mode), so a single-replica service is never
+#                              ejected into a total outage. Istio-injected aborts happen before
+#                              routing and never count.
+---
+# The frontend, as seen by the ingress gateway (public traffic, the prober, load tests) and the load
+# generator. It speaks HTTP/1.1 (Service port "http"), one request per connection at a time, so
+# maxConnections caps the requests in flight from one client pod. Past 100 in flight and 50 queued,
+# the gateway answers 503 at once instead of queueing more work for a frontend that is already behind:
+# a second load-shedding layer, by concurrency, behind the rate limit in ingress-rate-limit.yaml. The
+# frontend's own sidecar applies the same caps to all callers together. The retry budget caps the
+# edge retries set in deploy/online-boutique/public-virtualservice.yaml.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: frontend
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: frontend
+spec:
+  host: frontend.boutique.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        connectTimeout: 1s
+        tcpKeepalive:
+          time: 30s
+          interval: 10s
+          probes: 3
+        maxConnections: 100
+      http:
+        http2MaxRequests: 100
+        http1MaxPendingRequests: 50
+    retryBudget:
+      percent: 10
+      minRetryConcurrency: 3
+    outlierDetection:
+      consecutive5xxErrors: 0
+      consecutiveGatewayErrors: 0
+      splitExternalLocalOriginErrors: true
+      consecutiveLocalOriginFailures: 3
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+      minHealthPercent: 50
+---
+# Ads on home and product pages. The frontend gives it 100 ms and shows no ad on error.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: adservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: adservice
+spec:
+  host: adservice.boutique.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        connectTimeout: 1s
+        tcpKeepalive:
+          time: 30s
+          interval: 10s
+          probes: 3
+      http:
+        http2MaxRequests: 100
+        http1MaxPendingRequests: 50
+    retryBudget:
+      percent: 10
+      minRetryConcurrency: 3
+    outlierDetection:
+      consecutive5xxErrors: 5
+      consecutiveGatewayErrors: 3
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+      minHealthPercent: 50
+---
+# Cart reads on every page, cart writes on add-to-cart and checkout. Stateless; state is in redis-cart.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: cartservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: cartservice
+spec:
+  host: cartservice.boutique.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        connectTimeout: 1s
+        tcpKeepalive:
+          time: 30s
+          interval: 10s
+          probes: 3
+      http:
+        http2MaxRequests: 100
+        http1MaxPendingRequests: 50
+    retryBudget:
+      percent: 10
+      minRetryConcurrency: 3
+    outlierDetection:
+      consecutive5xxErrors: 5
+      consecutiveGatewayErrors: 3
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+      minHealthPercent: 50
+---
+# PlaceOrder only (checkout CUJ). Not idempotent: never retry it after it may have run.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: checkoutservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: checkoutservice
+spec:
+  host: checkoutservice.boutique.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        connectTimeout: 1s
+        tcpKeepalive:
+          time: 30s
+          interval: 10s
+          probes: 3
+      http:
+        http2MaxRequests: 100
+        http1MaxPendingRequests: 50
+    retryBudget:
+      percent: 10
+      minRetryConcurrency: 3
+    outlierDetection:
+      consecutive5xxErrors: 0
+      consecutiveGatewayErrors: 0
+      splitExternalLocalOriginErrors: true
+      consecutiveLocalOriginFailures: 3
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+      minHealthPercent: 50
+---
+# The hottest service: about 10 Convert calls per home page.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: currencyservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: currencyservice
+spec:
+  host: currencyservice.boutique.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        connectTimeout: 1s
+        tcpKeepalive:
+          time: 30s
+          interval: 10s
+          probes: 3
+      http:
+        http2MaxRequests: 100
+        http1MaxPendingRequests: 50
+    retryBudget:
+      percent: 10
+      minRetryConcurrency: 3
+    outlierDetection:
+      consecutive5xxErrors: 5
+      consecutiveGatewayErrors: 3
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+      minHealthPercent: 50
+---
+# Order confirmation at the end of checkout. Failure is only logged by checkoutservice.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: emailservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: emailservice
+spec:
+  host: emailservice.boutique.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        connectTimeout: 1s
+        tcpKeepalive:
+          time: 30s
+          interval: 10s
+          probes: 3
+      http:
+        http2MaxRequests: 100
+        http1MaxPendingRequests: 50
+    retryBudget:
+      percent: 10
+      minRetryConcurrency: 3
+    outlierDetection:
+      consecutive5xxErrors: 5
+      consecutiveGatewayErrors: 3
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+      minHealthPercent: 50
+---
+# Charge (a mock). Not idempotent: a repeat makes a second transaction.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: paymentservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: paymentservice
+spec:
+  host: paymentservice.boutique.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        connectTimeout: 1s
+        tcpKeepalive:
+          time: 30s
+          interval: 10s
+          probes: 3
+      http:
+        http2MaxRequests: 100
+        http1MaxPendingRequests: 50
+    retryBudget:
+      percent: 10
+      minRetryConcurrency: 3
+    outlierDetection:
+      consecutive5xxErrors: 5
+      consecutiveGatewayErrors: 3
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+      minHealthPercent: 50
+---
+# Product reads on every page and in checkout.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: productcatalogservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: productcatalogservice
+spec:
+  host: productcatalogservice.boutique.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        connectTimeout: 1s
+        tcpKeepalive:
+          time: 30s
+          interval: 10s
+          probes: 3
+      http:
+        http2MaxRequests: 100
+        http1MaxPendingRequests: 50
+    retryBudget:
+      percent: 10
+      minRetryConcurrency: 3
+    outlierDetection:
+      consecutive5xxErrors: 5
+      consecutiveGatewayErrors: 3
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+      minHealthPercent: 50
+---
+# Product and cart pages. The frontend tolerates its errors but waits for it with no deadline.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: recommendationservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: recommendationservice
+spec:
+  host: recommendationservice.boutique.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        connectTimeout: 1s
+        tcpKeepalive:
+          time: 30s
+          interval: 10s
+          probes: 3
+      http:
+        http2MaxRequests: 100
+        http1MaxPendingRequests: 50
+    retryBudget:
+      percent: 10
+      minRetryConcurrency: 3
+    outlierDetection:
+      consecutive5xxErrors: 0
+      consecutiveGatewayErrors: 0
+      splitExternalLocalOriginErrors: true
+      consecutiveLocalOriginFailures: 3
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+      minHealthPercent: 50
+---
+# GetQuote on the cart page and in checkout; ShipOrder (not idempotent) in checkout.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: shippingservice
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: shippingservice
+spec:
+  host: shippingservice.boutique.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        connectTimeout: 1s
+        tcpKeepalive:
+          time: 30s
+          interval: 10s
+          probes: 3
+      http:
+        http2MaxRequests: 100
+        http1MaxPendingRequests: 50
+    retryBudget:
+      percent: 10
+      minRetryConcurrency: 3
+    outlierDetection:
+      consecutive5xxErrors: 5
+      consecutiveGatewayErrors: 3
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+      minHealthPercent: 50
+---
+# Redis for the carts: plain TCP (port "tcp-redis"), one stateful pod with an emptyDir. HTTP settings,
+# retries and outlier detection do not apply to TCP, and ejecting the only pod would just turn errors
+# into "no healthy upstream". What helps: a short connect timeout, and TCP keepalive so cartservice's
+# connection to a redis pod that vanished with its node is found dead in about a minute
+# (30 s idle + 3 probes x 10 s) instead of the kernel's two hours.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: redis-cart
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: redis-cart
+spec:
+  host: redis-cart.boutique.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        connectTimeout: 1s
+        tcpKeepalive:
+          time: 30s
+          interval: 10s
+          probes: 3
