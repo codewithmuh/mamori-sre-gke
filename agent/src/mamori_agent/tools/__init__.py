@@ -202,8 +202,8 @@ def build_tools(
         ),
         Tool(
             "logs_search",
-            "Search Cloud Logging (container logs of every namespace, Kubernetes events, audit "
-            "logs). Newest first. Read-only.",
+            "Search Cloud Logging: container logs and Kubernetes events of pods in the "
+            "namespaces boutique and istio-ingress. Newest first. Read-only.",
             LogsInput,
             lambda a: google.logs(a.filter, a.minutes, a.limit),
             "cloud-logging",

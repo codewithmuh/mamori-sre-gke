@@ -55,7 +55,9 @@ objects, chaos experiments, node changes, events.
 postmortem matches.
 4. Rank the hypotheses, most likely first, each with a confidence between 0 and 1 and concrete \
 evidence (metric values, log lines, object names) from your tool results. A hypothesis without \
-evidence gets a low confidence. Name the service as its Deployment name in boutique.
+evidence gets a low confidence. Name the service as its Deployment name in boutique; when a \
+node is the cause (a Spot preemption, a node drain or failure), use the service "node" and name \
+the node in the summary.
 You have a limited number of tool calls. Each call should test a hypothesis; call independent \
 tools in parallel; don't repeat a query.
 
@@ -95,6 +97,13 @@ relatedPostmortems (ids, or empty).
 FINAL_NOTICE = (
     "Tool budget for this investigation is used up. Don't call more tools: give your final "
     "answer now, from the evidence you have, and lower your confidence where evidence is missing."
+)
+
+FINAL_REMINDER = "No more tools can run. Answer now with the JSON object only."
+
+CUT_OFF_NOTICE = (
+    "Your last response was cut off at the output limit and was discarded. Don't call more "
+    "tools: give your final answer now, briefly."
 )
 
 RETRY_NOTICE = (

@@ -27,11 +27,23 @@ anywhere, and every action goes through the executor's allow-list and a human.
 
 - **Pull, not push.** The agent pulls `mamori-agent-incidents` over the Pub/Sub REST API, so no
   endpoint is exposed for Google to call. Each message is acknowledged once the agent has seen
-  it (open, closed, repeat or unreadable alike), so a bad message can't loop. Trade-off: if the
-  pod dies mid-investigation, that incident is not retried. Paging is unaffected; it doesn't
-  depend on the agent.
-- **What starts an investigation.** `state: open` only; `renotify` repeats and an incident id
-  seen in the last 24 h are skipped; one investigation runs at a time and at most 10 wait.
+  it (open, closed, repeat or unreadable alike), so a bad message can't loop. The exception is a
+  full queue: that message is left unacknowledged, and Pub/Sub delivers it again after the 60 s
+  ack deadline (`mamori_agent_pubsub_unacked_total`). Trade-off: if the pod dies
+  mid-investigation, that incident is not retried. Paging is unaffected; it doesn't depend on
+  the agent.
+- **One fault, one investigation.** One fault opens several incidents: every journey, signal,
+  SLI and burn tier has its own policy (#18), and page and ticket tiers both publish to the
+  topic. So:
+  - only page-tier incidents (policy label `severity=page`) start an investigation; ticket-tier
+    ones are skipped (`AGENT_PAGE_ONLY`);
+  - an incident whose journeys overlap a queued or running investigation that started less than
+    30 minutes earlier joins it instead of starting another (`mergedIncidentIds` on the record,
+    `AGENT_COALESCE_WINDOW_SECONDS`, 0 turns it off). Manual runs never merge;
+  - a queued investigation whose incidents have all closed before it starts is cancelled
+    (`status: cancelled`, no model call);
+  - `renotify` repeats and an incident id seen in the last 24 h are skipped; one investigation
+    runs at a time and at most 10 wait.
 - **First triage, without the model.** The slo-gen policy labels give the journey (`cuj`), the
   signal (`prober` or `mesh`), the SLI and the burn tier. Fast and medium burn start as SEV2, slow
   burn and missing data as SEV3. The model refines it with the definitions of
@@ -43,7 +55,7 @@ anywhere, and every action goes through the executor's allow-list and a human.
 | Tool | Reads | Permission |
 |---|---|---|
 | `promql_query`, `promql_range` | Managed Service for Prometheus query API (Istio, prober, SLO recording rules) | `roles/monitoring.viewer` |
-| `logs_search` | Cloud Logging `entries:list` | `roles/logging.viewer` |
+| `logs_search` | Cloud Logging `entries:list`, limited server-side to pods in boutique and istio-ingress (see below) | `roles/logging.viewer` |
 | `traces_search` | Cloud Trace v1 traces | `roles/cloudtrace.user` |
 | `k8s_pods`, `k8s_events`, `k8s_nodes` | pods, events, nodes | ClusterRole `mamori-agent-read` |
 | `k8s_deployments`, `k8s_rollout_history` | Deployments and their ReplicaSets, with what changed between revisions | same |
@@ -58,18 +70,32 @@ Every tool validates its input, has a 20 s timeout, redacts secrets, caps its ou
 characters and wraps it as untrusted data. The Kubernetes client has one verb, GET. No Secrets and
 no ConfigMaps are readable.
 
+**Log scope.** `logs_search` ANDs the model's filter with
+`resource.labels.namespace_name=("boutique" OR "istio-ingress")` (`AGENT_LOG_NAMESPACES`, from
+which `mamori-agent` is always removed), and refuses filters with unbalanced parentheses or
+quotes, so the model's filter can only narrow the scope. That keeps the agent from reading its
+own `investigation_completed` lines and the executor's proposal lines, which hold earlier
+answers. `roles/logging.viewer` itself reads the whole project; the limit is in code. A Cloud
+Logging log view on those namespaces would move it into IAM (a later hardening step).
+
 ## The answer and the action
 
 The final turn is a JSON object constrained by structured outputs (`output_config.format`):
 summary, journeys, severity, impact, up to five hypotheses (rank, service, summary, confidence 0
-to 1, evidence) and one proposed action. Allowed types, all in namespace `boutique`: `restart`,
+to 1, evidence) and one proposed action. A hypothesis names a Deployment in boutique as its
+service, or `node` for a node-level cause (a Spot preemption, a drain), with the node's name in
+the summary. Allowed types, all in namespace `boutique`: `restart`,
 `scale` (replicas), `remove-fault` (an injected fault object), `rollback` and `none`. The agent
 checks the shape before sending; the executor decides. The executor refuses `rollback`, because
 Argo CD's self-heal undoes a cluster-side rollback; the agent may still propose it when a Git
 change is the cause, and the Slack summary says to revert the commit.
 
 The record (`GET /v1/investigations/{id}`, and the log line) is the contract's schema plus
-`status`, `error` and `proposalError`:
+additive fields: `status` (`queued`, `running`, `completed`, `failed`, `cancelled`), `error`,
+`proposalError`, `seq` (intake order), `runStartedAt` (when the worker picked it up;
+`startedAt` is the intake time), `mergedIncidentIds`, and `agentConfig`, the settings it ran with
+(model, fallback model, effort, `postmortemsGamedays`, `hideFaultLabels`, `chaosTool`,
+`maxCostUsd`, `dailyCostLimitUsd`, `pageOnly`, `coalesceWindowSeconds`):
 
 ```json
 {"id":"inv-…","incidentId":"0.abc","source":"cloud-monitoring","startedAt":"…Z","finishedAt":"…Z",
@@ -77,26 +103,37 @@ The record (`GET /v1/investigations/{id}`, and the log line) is the contract's s
  "hypotheses":[{"rank":1,"service":"currencyservice","summary":"…","confidence":0.8,"evidence":["…"]}],
  "proposedAction":{"type":"remove-fault","namespace":"boutique","target":"virtualservice/…","params":{}},
  "proposalId":"…","model":"claude-opus-5-5","usage":{"inputTokens":0,"outputTokens":0,"costUsd":0.0},
- "toolCalls":0,"status":"completed","error":null,"proposalError":null}
+ "toolCalls":0,"status":"completed","error":null,"proposalError":null,"seq":7,
+ "runStartedAt":"…Z","mergedIncidentIds":["0.def"],"agentConfig":{"model":"claude-opus-5-5","…":"…"}}
 ```
+
+`GET /v1/status` answers `{"queued", "running", "dailySpentUsd", "dailyReservedUsd",
+"agentConfig"}`, so the evaluation can wait until the agent is idle and check its settings.
 
 ## Guardrails
 
 | Guardrail | Default | What happens |
 |---|---|---|
 | Tool calls | 25 per investigation | further calls return "not run"; the model is told to answer now |
-| Model calls | 20 per investigation | the 20th call must answer (`tool_choice: none`); none after it |
+| Model calls | 20 per investigation | the 20th call is asked for the answer; none after it |
+| Final answer | 2 calls after it is requested | a model that still calls tools is stopped (`no_answer`) |
 | Tokens | 800,000 (input incl. cache, plus output) | at 75 % answer now; at 100 % stop |
 | Cost | $1.50 per investigation, list prices | at 75 % answer now; at 100 % stop |
-| Daily cost | $15 per UTC day | new incidents are refused until midnight UTC |
-| Wall time | 600 s | answer requested 120 s before; every model call and tool call has its own timeout |
-| Output size | 16,000 tokens per call; 6,000 characters per tool result | |
-| Queue | 1 at a time, 10 waiting | more are dropped with a log line |
+| Daily cost | $15 per UTC day | each queued investigation reserves $1.50; new incidents are refused when the reservations would pass the limit; checked again when it starts and before every model call; rebuilt from the day's `investigation_completed` lines when the pod starts |
+| Wall time | 600 s | answer requested 120 s before; the deadline is checked between tools; each model call's timeout is the time left; one short (60 s) final call is always allowed |
+| Model API errors | 4 retries, 2 s doubling | 429, 529, 5xx, timeouts and connection errors are retried while the deadline allows (the SDK's own retries are off); others end the run with `model_error`, keeping the usage spent so far |
+| Output size | 16,000 tokens per call; 6,000 characters per tool result | a response cut off at the limit is never acted on: it is retried once with 32,000, then the answer is requested |
+| Queue | 1 at a time, 10 waiting | a full queue leaves the Pub/Sub message for redelivery |
 | Refusal | one retry on `claude-opus-5` | `reasoning_extraction` refusals aren't retried |
 | No write path | — | read-only RBAC and IAM; GET-only Kubernetes client; the only POSTs are Pub/Sub pull/ack, Cloud Logging's query, the proposal and Slack |
 
 A stopped investigation still produces a record (`status: failed`, `error` names the guardrail),
-the log line and a Slack summary of the first triage.
+the log line and a Slack summary of the first triage. Nothing outside the model loop can stop the
+worker either: an error there (an executor answer that isn't JSON, an unreadable token file)
+becomes a failed record or a `proposalError`, and the worker goes on with the next incident.
+
+The request parameters stay the same from call to call: the final answer is asked for by an
+appended notice, not by switching `tool_choice`, which would invalidate the prompt cache.
 
 ### Logs are untrusted input (prompt injection)
 
@@ -140,10 +177,14 @@ The evaluation (#26) scores answers against `chaos/faults/*.yaml`. The agent can
 directory: the image is built from `agent/` alone, nothing is mounted, and the knowledge tool
 reads an allow-list of three paths (`slo/cuj-map.yaml`, `slo/slos.yaml`, dated files in
 `docs/incidents/postmortems/`); anything else, `chaos/` and `docs/incidents/game-days.md`
-included, is refused in code and by tests. Switches for scored runs, recorded with each run:
+included, is refused in code and by tests. `logs_search` can't read the agent's own namespace
+(see "Log scope"). Switches for scored runs. They live in `deploy/agent/deployment.yaml`,
+because Argo CD's self-heal reverts a `kubectl set env` within seconds; every record carries the
+values it ran with (`agentConfig`), so the evaluation can refuse a session whose records disagree
+with its labels:
 
-- `AGENT_POSTMORTEMS_GAMEDAYS=exclude`: hide postmortems that carry a `faultId`, so a re-run of a
-  game-day fault can't read its own postmortem.
+- `AGENT_POSTMORTEMS_GAMEDAYS=exclude` (the default): hide postmortems that carry a `faultId`,
+  so a re-run of a game-day fault can't read its own postmortem.
 - `AGENT_HIDE_FAULT_LABELS=true`: strip `mamori.dev/*` labels from tool output. Object names
   such as `f01-currency-abort` stay visible; that is a stated threat to validity.
 - `AGENT_CHAOS_TOOL=false`: no Chaos Mesh reads (the agent then can't name a Chaos Mesh object
@@ -194,16 +235,22 @@ credit can't pay for them (docs/decision-facts.md, D8). At the start of M5:
    project may need an increase, which only paid accounts can request.
 6. Apply the agent's identity (`TF_VAR_gke_workload_pool_exists=true make bootstrap`) and make
    sure the image exists in Artifact Registry.
+7. Enable the agent (below).
 
-Until then the agent can run, but each investigation fails with a permission error from Vertex AI
-and records only the first triage.
+Until then the Deployment stays at `replicas: 0` in Git, so the Application syncs but no agent
+runs (a running agent would only fail every investigation with a permission error from Vertex
+AI). Step 7: set `replicas: 1` in `deploy/agent/deployment.yaml` and merge.
 
 ## Operate
 
-- **Slack (optional):** `SLACK_BOT_TOKEN=xoxb-… SLACK_CHANNEL=C0… make agent-slack-secret`
-  creates Secret `agent-slack` out of band (never in Git or Terraform). Without it the agent
-  skips the Slack post. The bot needs `chat:write` and must be in the channel.
-- **API:** `make agent-port-forward`, then `make agent-investigations`, or
+- **Slack (optional):** `AGENT_SLACK_BOT_TOKEN=xoxb-… AGENT_SLACK_CHANNEL=C0… make
+  agent-slack-secret` creates Secret `agent-slack` out of band (never in Git or Terraform).
+  Without it the agent skips the Slack post. Use a Slack app of its own, not the executor's
+  (`EXECUTOR_SLACK_*`): a bot can edit only messages its own app posted, so the agent must not
+  hold the token that posts the approval messages. The bot needs `chat:write` and must be in the
+  channel.
+- **API:** `make agent-port-forward`, then `make agent-investigations`,
+  `curl localhost:8080/v1/status`, or
   `curl -X POST localhost:8080/v1/investigations -d '{"incidentId":"test-1","summary":"CUJ browse failing"}'`
   for a manual run (costs a real investigation).
 - **Logs:** `make agent-logs`, or in Cloud Logging
@@ -212,9 +259,11 @@ and records only the first triage.
   `mamori_agent_investigation_duration_seconds`, `mamori_agent_tokens_total{kind}`,
   `mamori_agent_cost_usd_total`, `mamori_agent_tool_calls_total{tool,result}`,
   `mamori_agent_guardrail_stops_total{guardrail}`, `mamori_agent_refusals_total`,
-  `mamori_agent_proposals_total{result}`, `mamori_agent_daily_cost_usd`.
-- **Resources:** one pod, requests 20m CPU and 160 MiB memory, limits 500m and 384 MiB
-  (estimates; measure in M5).
+  `mamori_agent_model_errors_total{error}`, `mamori_agent_proposals_total{result}`,
+  `mamori_agent_incidents_total{action}` (investigate, merged, ticket, closed, ...),
+  `mamori_agent_pubsub_unacked_total`, `mamori_agent_daily_cost_usd`.
+- **Resources:** one pod from M5 (`replicas: 0` until then), requests 20m CPU and 160 MiB
+  memory, limits 500m and 384 MiB (estimates; measure in M5).
 
 ## Not verified yet
 

@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     subscription: str = "mamori-agent-incidents"
     dedupe_ttl_seconds: int = Field(default=86_400, ge=60)
     queue_size: int = Field(default=10, ge=1, le=100)
+    # One fault opens several incidents (each journey, signal, SLI and burn tier has its own
+    # policy). Only page-tier incidents (policy label severity=page) start an investigation;
+    # ticket-tier ones are skipped. Incidents without that label are not filtered.
+    page_only: bool = True
+    # A new incident whose journeys overlap a queued or running investigation started within
+    # this window joins it instead of starting another one (its id is recorded as merged).
+    # 0 turns coalescing off.
+    coalesce_window_seconds: int = Field(default=1800, ge=0, le=86_400)
 
     # --- Proposals and Slack ------------------------------------------------------------------
     propose: bool = True
@@ -77,9 +85,10 @@ class Settings(BaseSettings):
     repo_dir: str = "."
     github_repo: str = "codewithmuh/mamori-sre-gke"
     github_ref: str = "main"
-    # include: every postmortem; exclude: drop game-day postmortems (front matter faultId set),
-    # for evaluation runs that must not read the answer to a fault they are scored on.
-    postmortems_gamedays: Literal["include", "exclude"] = "include"
+    # exclude (default): drop game-day postmortems (front matter faultId set), so an evaluation
+    # run can't read the answer to a fault it is scored on; real incidents stay visible.
+    # include: every postmortem.
+    postmortems_gamedays: Literal["include", "exclude"] = "exclude"
     # Strip mamori.dev/* labels and annotations from tool output (blind evaluation runs).
     hide_fault_labels: bool = False
     chaos_tool: bool = True
@@ -97,6 +106,21 @@ class Settings(BaseSettings):
     @property
     def log_namespace_list(self) -> list[str]:
         return _split(self.log_namespaces)
+
+    def effective(self) -> dict[str, object]:
+        """The switches that change what an investigation sees, for every record (#26)."""
+        return {
+            "model": self.model,
+            "fallbackModel": self.fallback_model,
+            "effort": self.effort,
+            "postmortemsGamedays": self.postmortems_gamedays,
+            "hideFaultLabels": self.hide_fault_labels,
+            "chaosTool": self.chaos_tool,
+            "maxCostUsd": self.max_cost_usd,
+            "dailyCostLimitUsd": self.daily_cost_limit_usd,
+            "pageOnly": self.page_only,
+            "coalesceWindowSeconds": self.coalesce_window_seconds,
+        }
 
     def resolved_project_id(self) -> str:
         """Project from settings, then the usual environment variables; may be empty."""

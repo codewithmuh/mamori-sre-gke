@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from . import logs, metrics
-from .app import build
+from .app import build, today_spend_from_logs
 from .config import Settings
 from .incidents import InvalidIncident, parse_any, parse_pubsub_data
 from .pubsub import PubSubPuller
@@ -93,6 +93,13 @@ def cmd_serve(_: argparse.Namespace) -> int:
     settings = Settings()
     logs.setup(settings.log_level)
     agent = build(settings)
+    if agent.project_id:
+        spent = today_spend_from_logs(agent.google, agent.project_id)
+        if spent is not None:
+            agent.service.spend.restore(spent)
+            logs.event(
+                logging.getLogger(__name__), "daily_spend_restored", spent_usd=round(spent, 4)
+            )
     stop = threading.Event()
     threads = [
         threading.Thread(target=agent.service.run_worker, args=(stop,), name="worker", daemon=True)
@@ -135,7 +142,8 @@ def cmd_serve(_: argparse.Namespace) -> int:
     return 0
 
 
-def _on_message(agent: Any, data: bytes, meta: dict[str, Any]) -> None:
+def _on_message(agent: Any, data: bytes, meta: dict[str, Any]) -> bool:
+    """Handle one Pub/Sub message; False leaves it unacknowledged for redelivery."""
     try:
         incident = parse_pubsub_data(data)
     except InvalidIncident as exc:
@@ -147,8 +155,8 @@ def _on_message(agent: Any, data: bytes, meta: dict[str, Any]) -> None:
             error=str(exc),
             message_id=meta.get("messageId"),
         )
-        return
-    agent.service.submit(incident)
+        return True
+    return bool(agent.service.submit(incident).reason != "queue_full")
 
 
 def main(argv: list[str] | None = None) -> int:

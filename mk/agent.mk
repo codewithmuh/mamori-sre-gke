@@ -52,13 +52,15 @@ agent-logs: ## Agent: the investigation_completed log lines of the running pod
 	@$(call require-tools,kubectl)
 	kubectl -n $(AGENT_NAMESPACE) logs deploy/agent --since=24h | grep '"event": "investigation_completed"' || true
 
-# Reads SLACK_BOT_TOKEN and SLACK_CHANNEL from the environment so the token never lands in Git,
-# Terraform state or shell history arguments shown by ps.
-agent-slack-secret: ## Agent: create or replace Secret agent-slack (SLACK_BOT_TOKEN, SLACK_CHANNEL in env)
+# Reads AGENT_SLACK_BOT_TOKEN and AGENT_SLACK_CHANNEL from the environment, so the token never
+# lands in Git, Terraform state or command lines shown by ps. It must be the agent's own Slack
+# app, never the executor's (EXECUTOR_SLACK_*): a bot can edit only messages its own app posted,
+# so the agent must not hold the token that posts the approval messages.
+agent-slack-secret: ## Agent: create or replace Secret agent-slack (AGENT_SLACK_BOT_TOKEN, AGENT_SLACK_CHANNEL in env)
 	@$(call require-tools,kubectl)
-	@test -n "$${SLACK_BOT_TOKEN:-}" && test -n "$${SLACK_CHANNEL:-}" || \
-		{ echo "error: export SLACK_BOT_TOKEN (xoxb-...) and SLACK_CHANNEL (channel ID) first" >&2; exit 1; }
-	@printf 'bot-token=%s\nchannel=%s\n' "$$SLACK_BOT_TOKEN" "$$SLACK_CHANNEL" | \
+	@test -n "$${AGENT_SLACK_BOT_TOKEN:-}" && test -n "$${AGENT_SLACK_CHANNEL:-}" || \
+		{ echo "error: export AGENT_SLACK_BOT_TOKEN (xoxb-...) and AGENT_SLACK_CHANNEL (channel ID) first" >&2; exit 1; }
+	@printf 'bot-token=%s\nchannel=%s\n' "$$AGENT_SLACK_BOT_TOKEN" "$$AGENT_SLACK_CHANNEL" | \
 		kubectl -n $(AGENT_NAMESPACE) create secret generic agent-slack --from-env-file=/dev/stdin \
 		--dry-run=client -o yaml | kubectl apply -f -
 	kubectl -n $(AGENT_NAMESPACE) rollout restart deploy/agent

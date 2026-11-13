@@ -4,6 +4,8 @@ import json
 from collections.abc import Callable
 from typing import Any
 
+import anthropic
+import httpx2
 import pytest
 
 from conftest import (
@@ -130,7 +132,8 @@ def test_tool_budget_forces_final_answer(make_settings: Callable[..., Settings])
         "is_error": True,
     }
     assert results[-1]["type"] == "text" and "Don't call more tools" in results[-1]["text"]
-    assert model.calls[1]["tool_choice"] == {"type": "none"}
+    # tool_choice never changes (that would invalidate the prompt cache); the notice asks.
+    assert all("tool_choice" not in c for c in model.calls)
 
 
 def test_tool_call_after_final_is_not_run(make_settings: Callable[..., Settings]) -> None:
@@ -157,7 +160,7 @@ def test_cost_soft_and_hard_caps(make_settings: Callable[..., Settings]) -> None
     )
     out = run(settings, model)
     assert out.findings is not None and out.stops == ["cost"]
-    assert model.calls[1]["tool_choice"] == {"type": "none"}
+    assert "Don't call more tools" in model.calls[1]["messages"][2]["content"][-1]["text"]
 
     broke = FakeModel(
         [response([tool_block("a", "k8s_pods", {})], stop="tool_use", use=usage(30_000, 0, 0, 0))]
@@ -180,7 +183,8 @@ def test_model_call_cap(make_settings: Callable[..., Settings]) -> None:
     model = FakeModel([response([tool_block("a", "k8s_pods", {})], stop="tool_use")])
     out = run(settings, model)
     assert out.error is not None and out.error.reason == "model_calls"
-    assert model.calls[0]["tool_choice"] == {"type": "none"}  # the only call is the final one
+    # The only call is the final one: the notice goes in before it.
+    assert "Don't call more tools" in model.calls[0]["messages"][1]["content"]
 
 
 def test_deadline(make_settings: Callable[..., Settings]) -> None:
@@ -245,12 +249,9 @@ def test_bad_answer_is_retried_once(settings: Settings) -> None:
     assert out.findings is not None
     retry = model.calls[1]["messages"][-1]
     assert retry["role"] == "user" and "could not be used" in retry["content"]
-    assert model.calls[1]["tool_choice"] == {"type": "none"}
 
     bad_schema = json.dumps(findings(severity="SEV9"))
-    model = FakeModel(
-        [response([text_block(bad_schema)]), response([text_block("{}")], stop="max_tokens")]
-    )
+    model = FakeModel([response([text_block(bad_schema)]), response([text_block("{}")])])
     out = run(settings, model)
     assert out.findings is None and out.error is not None and out.error.reason == "bad_answer"
 
@@ -282,3 +283,190 @@ def test_findings_are_normalised(settings: Settings) -> None:
 def test_regional_endpoint_costs_ten_percent_more(make_settings: Callable[..., Settings]) -> None:
     out = run(make_settings(vertex_region="us"), FakeModel([final(use=usage(1_000_000, 0, 0, 0))]))
     assert out.meter.cost_usd == pytest.approx(4.4)
+
+
+# --- model API errors (review item 3), timeouts (4), max_tokens (7), daily budget (5) ---------
+
+
+def _req() -> httpx2.Request:
+    return httpx2.Request("POST", "https://aiplatform.googleapis.com/v1/x:rawPredict")
+
+
+def api_error(status: int) -> anthropic.APIStatusError:
+    response = httpx2.Response(status, request=_req())
+    return anthropic.APIStatusError(f"HTTP {status}", response=response, body=None)
+
+
+def test_api_error_after_first_call_keeps_the_meter(settings: Settings) -> None:
+    model = FakeModel(
+        [
+            response(
+                [tool_block("t", "k8s_pods", {})], stop="tool_use", use=usage(10_000, 0, 0, 0)
+            ),
+            anthropic.PermissionDeniedError(
+                "denied", response=httpx2.Response(403, request=_req()), body=None
+            ),
+        ]
+    )
+    out = run(settings, model)
+    assert out.findings is None
+    assert out.error is not None and out.error.reason == "model_error"
+    assert "http_403" in str(out.error)
+    assert out.meter.cost_usd == pytest.approx(0.04)  # the first call's usage is kept
+    assert (out.model_calls, out.tool_calls) == (1, 1)
+
+
+def test_transient_errors_are_retried_with_backoff(settings: Settings) -> None:
+    slept: list[float] = []
+    model = FakeModel(
+        [
+            anthropic.RateLimitError(
+                "slow down", response=httpx2.Response(429, request=_req()), body=None
+            ),
+            api_error(529),
+            anthropic.APITimeoutError(request=_req()),
+            anthropic.APIConnectionError(request=_req()),
+            final(),
+        ]
+    )
+    out = Investigator(settings, model, registry(), Clock(), sleep=slept.append).run(INCIDENT)
+    assert out.findings is not None
+    assert slept == [2.0, 4.0, 8.0, 16.0]
+
+
+def test_retries_stop_after_the_limit_or_at_the_deadline(
+    make_settings: Callable[..., Settings],
+) -> None:
+    errors: list[Any] = [api_error(503) for _ in range(6)]
+    out = Investigator(
+        make_settings(), FakeModel(errors), registry(), Clock(), sleep=lambda _: None
+    ).run(INCIDENT)
+    assert out.error is not None and out.error.reason == "model_error"
+    assert "http_503" in str(out.error)
+
+    clock = Clock()
+
+    class Late(FakeModel):
+        def __call__(self, params: dict[str, Any], timeout: float) -> Any:
+            clock.now = 299  # one second before the deadline: no time to back off
+            return super().__call__(params, timeout)
+
+    late = Late([api_error(429)])
+    out = Investigator(
+        make_settings(investigation_timeout_seconds=300),
+        late,
+        registry(),
+        clock,
+        sleep=lambda _: None,
+    ).run(INCIDENT)
+    assert out.error is not None and out.error.reason == "model_error"
+    assert len(late.calls) == 1
+
+
+def test_unexpected_exception_keeps_the_meter(settings: Settings) -> None:
+    model = FakeModel(
+        [response([tool_block("t", "k8s_pods", {})], stop="tool_use"), RuntimeError("boom")]
+    )
+    out = run(settings, model)
+    assert out.error is not None and out.error.reason == "crash"
+    assert out.meter.cost_usd > 0
+
+
+def test_cut_off_turn_is_never_run_and_is_retried_with_more_tokens(settings: Settings) -> None:
+    calls: list[str] = []
+    model = FakeModel(
+        [
+            response([tool_block("t", "k8s_pods", {"namespace": "boutiq"})], stop="max_tokens"),
+            final(),
+        ]
+    )
+    out = run(settings, model, registry(calls))
+    assert out.findings is not None
+    assert calls == []  # the truncated tool call never ran
+    assert model.calls[0]["max_tokens"] == 16000
+    assert model.calls[1]["max_tokens"] == 32000
+    assert len(model.calls[1]["messages"]) == 1  # the cut-off turn was not replayed
+
+
+def test_second_cut_off_asks_for_the_final_answer(settings: Settings) -> None:
+    cut = response([tool_block("t", "k8s_pods", {})], stop="max_tokens")
+    model = FakeModel([cut, cut, final()])
+    out = run(settings, model)
+    assert out.findings is not None
+    last = model.calls[2]["messages"][-1]
+    assert last["role"] == "user" and "cut off at the output limit" in last["content"]
+
+
+def test_model_that_keeps_calling_tools_after_the_notice_is_stopped(
+    make_settings: Callable[..., Settings],
+) -> None:
+    settings = make_settings(max_tool_calls=1)
+    tools_again = [
+        response([tool_block(f"t{i}", "k8s_pods", {})], stop="tool_use") for i in range(4)
+    ]
+    model = FakeModel(tools_again)
+    out = run(settings, model)
+    assert out.error is not None and out.error.reason == "no_answer"
+    assert len(model.calls) == 3  # one normal call, then two after the final notice
+    reminder = model.calls[2]["messages"][-1]["content"][-1]
+    assert reminder == {
+        "type": "text",
+        "text": "No more tools can run. Answer now with the JSON object only.",
+    }
+
+
+def test_deadline_between_tools_and_one_short_final_call(
+    make_settings: Callable[..., Settings],
+) -> None:
+    settings = make_settings(investigation_timeout_seconds=300)
+    clock = Clock()
+    calls: list[str] = []
+
+    def slow_tool(_: Any) -> str:
+        calls.append("slow")
+        clock.now += 250  # the first tool eats the time; the second must not start
+        return "ok"
+
+    tools = ToolRegistry(
+        [Tool("k8s_pods", "pods in a namespace for tests", NoInput, slow_tool, "kubernetes")], 1000
+    )
+    model = FakeModel(
+        [
+            response(
+                [tool_block("a", "k8s_pods", {}), tool_block("b", "k8s_pods", {})], stop="tool_use"
+            ),
+            final(),
+        ]
+    )
+    out = Investigator(settings, model, tools, clock).run(INCIDENT)
+    assert calls == ["slow"]
+    assert out.findings is not None and out.stops == ["deadline"]
+    # 50 s were left; the final call still gets the minimum short window.
+    assert model.calls[1]["timeout"] == 60
+
+    clock.now = 0
+    past = FakeModel([final()])
+
+    class Expired(Clock):
+        """Starts at 0 (the deadline is set to 300), then jumps past it before the first call."""
+
+        def __call__(self) -> float:
+            self.now, current = 1000.0, self.now
+            return current
+
+    out = Investigator(settings, past, registry(), Expired()).run(INCIDENT)
+    assert out.findings is not None and out.stops == ["deadline"]
+    assert past.calls[0]["timeout"] == 60
+
+
+def test_daily_budget_stops_the_loop(settings: Settings) -> None:
+    model = FakeModel([response([tool_block("t", "k8s_pods", {})], stop="tool_use"), final()])
+    seen: list[float] = []
+
+    def budget(run_cost: float) -> bool:
+        seen.append(run_cost)
+        return len(seen) < 2
+
+    out = Investigator(settings, model, registry(), Clock()).run(INCIDENT, budget=budget)
+    assert out.error is not None and out.error.reason == "daily_budget"
+    assert seen[0] == 0.0 and seen[1] > 0

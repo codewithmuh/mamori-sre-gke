@@ -122,7 +122,9 @@ def make_caller(settings: Settings, project_id: str) -> ModelCaller:
             project_id=project_id,
             region=settings.vertex_region,
             timeout=settings.model_timeout_seconds,
-            max_retries=2,
+            # The investigator retries itself, with each attempt's timeout taken from the time
+            # left; SDK retries of a timed-out call could outlast the investigation's deadline.
+            max_retries=0,
         )
     else:
         if in_cluster():
@@ -132,7 +134,7 @@ def make_caller(settings: Settings, project_id: str) -> ModelCaller:
             )
         from anthropic import Anthropic  # noqa: PLC0415
 
-        client = Anthropic(timeout=settings.model_timeout_seconds, max_retries=2)
+        client = Anthropic(timeout=settings.model_timeout_seconds, max_retries=0)
 
     def call(params: dict[str, Any], timeout: float) -> Any:
         return client.messages.create(**params, timeout=timeout)

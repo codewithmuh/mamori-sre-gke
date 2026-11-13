@@ -18,7 +18,7 @@ from .config import ACTION_NAMESPACE, CUJ_IDS
 Severity = Literal["SEV1", "SEV2", "SEV3", "SEV4"]
 Source = Literal["cloud-monitoring", "alertmanager", "manual"]
 ActionType = Literal["restart", "scale", "rollback", "remove-fault", "none"]
-Status = Literal["running", "completed", "failed"]
+Status = Literal["queued", "running", "completed", "failed", "cancelled"]
 
 SEVERITIES: tuple[str, ...] = ("SEV1", "SEV2", "SEV3", "SEV4")
 
@@ -107,8 +107,16 @@ class Investigation(_Camel):
     tool_calls: int = 0
     # Additive fields (not in the contract schema).
     status: Status = "running"
+    # Intake order (startedAt has second precision), and when the worker picked it up:
+    # startedAt is the intake time, so runStartedAt - startedAt is the queue wait.
+    seq: int = 0
+    run_started_at: str | None = None
     error: str | None = None
     proposal_error: dict[str, Any] | None = None
+    # Incidents that joined this investigation instead of starting their own.
+    merged_incident_ids: list[str] = Field(default_factory=list)
+    # The settings that shaped this run (Settings.effective), so an evaluation can check them.
+    agent_config: dict[str, Any] = Field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return self.model_dump(by_alias=True, mode="json")
@@ -167,7 +175,10 @@ _HYPOTHESIS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "rank": {"type": "integer", "description": "1 = most likely"},
-        "service": {"type": "string", "description": "Deployment name, e.g. currencyservice"},
+        "service": {
+            "type": "string",
+            "description": 'Deployment name (currencyservice), or "node" for a node-level cause',
+        },
         "summary": {"type": "string"},
         "confidence": {"type": "number", "description": "0.0 to 1.0"},
         "evidence": {"type": "array", "items": {"type": "string"}},

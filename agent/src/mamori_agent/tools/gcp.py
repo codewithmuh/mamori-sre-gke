@@ -76,11 +76,46 @@ def format_prometheus(data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# The agent's own namespace is never searchable: its investigation_completed lines (and the
+# executor's proposal lines) hold earlier answers, and a later run must not read them.
+OWN_NAMESPACE = "mamori-agent"
+DEFAULT_LOG_NAMESPACES = ("boutique", "istio-ingress")
+
+
+def balanced(query: str) -> bool:
+    """Parentheses outside quoted strings balance and never close more than they opened."""
+    depth, quote, escaped = 0, "", False
+    for ch in query:
+        if quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0 and not quote
+
+
 class GoogleReads:
-    def __init__(self, http: Http, project_id: str, timeout: float) -> None:
+    def __init__(
+        self,
+        http: Http,
+        project_id: str,
+        timeout: float,
+        log_namespaces: list[str] | tuple[str, ...] = DEFAULT_LOG_NAMESPACES,
+    ) -> None:
         self._http = http
         self._project = project_id
         self._timeout = timeout
+        self._log_namespaces = [n for n in log_namespaces if n and n != OWN_NAMESPACE]
 
     # --- Managed Service for Prometheus --------------------------------------------------------
 
@@ -109,8 +144,14 @@ class GoogleReads:
 
     def logs(self, log_filter: str, minutes: int, limit: int) -> str:
         since = rfc3339(datetime.now(UTC) - timedelta(minutes=minutes))
-        full_filter = f'timestamp>="{since}"'
+        # Server-side scope, ANDed with whatever the model asks for: logs of pods in the allowed
+        # namespaces only (container logs and their Kubernetes events). The model's filter
+        # can only narrow this, never widen it.
+        namespaces = " OR ".join(f'"{n}"' for n in self._log_namespaces) or '"none"'
+        full_filter = f'timestamp>="{since}" AND resource.labels.namespace_name=({namespaces})'
         if log_filter.strip():
+            if not balanced(log_filter):
+                return "refused: the filter has unbalanced parentheses or quotes"
             full_filter += f" AND ({log_filter})"
         body = {
             "resourceNames": [f"projects/{self._project}"],

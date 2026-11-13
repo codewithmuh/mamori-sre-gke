@@ -6,13 +6,14 @@ import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import requests
 
 from .config import Settings
 from .executor import ExecutorClient
-from .http import Http, HttpError, RequestsHttp, Response
+from .http import Http, HttpError, RequestsHttp, Response, checked_json
 from .investigator import Investigator
 from .llm import make_caller
 from .logs import event
@@ -26,6 +27,48 @@ from .tools.kube import KubeClient, KubeReads
 log = logging.getLogger(__name__)
 
 CLOUD_PLATFORM = "https://www.googleapis.com/auth/cloud-platform"
+LOGGING = "https://logging.googleapis.com/v2"
+_RESTORE_PAGES = 10
+
+
+def today_spend_from_logs(google: Http, project: str, now: datetime | None = None) -> float | None:
+    """Today's (UTC) estimated spend, summed from this agent's investigation_completed lines.
+
+    The in-memory daily counter starts at zero after a restart; this reads it back, so a crash
+    loop can't reset the daily cap. Read-only (roles/logging.viewer). None if it can't be read.
+    """
+    day = (now or datetime.now(UTC)).strftime("%Y-%m-%d")
+    log_filter = (
+        f'timestamp>="{day}T00:00:00Z" AND resource.type="k8s_container" '
+        'AND resource.labels.namespace_name="mamori-agent" '
+        'AND jsonPayload.event="investigation_completed"'
+    )
+    total, token = 0.0, ""
+    for _ in range(_RESTORE_PAGES):
+        body: dict[str, Any] = {
+            "resourceNames": [f"projects/{project}"],
+            "filter": log_filter,
+            "pageSize": 1000,
+        }
+        if token:
+            body["pageToken"] = token
+        try:
+            data = checked_json(
+                google.post(f"{LOGGING}/entries:list", json_body=body, timeout=20), "logging"
+            )
+        except HttpError as exc:
+            event(log, "daily_spend_unreadable", logging.WARNING, error=str(exc))
+            return None
+        for entry in data.get("entries") or []:
+            usage = (entry.get("jsonPayload") or {}).get("usage") or {}
+            try:
+                total += float(usage.get("costUsd") or 0)
+            except (TypeError, ValueError):
+                continue
+        token = str(data.get("nextPageToken") or "")
+        if not token:
+            break
+    return total
 
 
 class NoCredentials:
@@ -93,7 +136,7 @@ def build(settings: Settings, overrides: Mapping[str, Any] | None = None) -> Age
     )
     exclusions = ExclusionHolder()
     tools = build_tools(
-        GoogleReads(google, project, timeout),
+        GoogleReads(google, project, timeout, settings.log_namespace_list),
         KubeReads(kube, settings.log_namespace_list, settings.hide_fault_labels),
         KnowledgeReads(knowledge, include_gamedays=settings.postmortems_gamedays == "include"),
         exclusions.get,

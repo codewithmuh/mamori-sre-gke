@@ -10,12 +10,13 @@ from prometheus_client import Counter, Gauge, Histogram
 INCIDENTS = Counter(
     "mamori_agent_incidents_total",
     "Incident notifications received, by what the agent did with them.",
-    ["source", "action"],  # investigate|duplicate|closed|ignored|invalid|queue_full|daily_budget
+    # investigate|merged|ticket|duplicate|closed|invalid|queue_full|daily_budget
+    ["source", "action"],
 )
 INVESTIGATIONS = Counter(
     "mamori_agent_investigations_total",
     "Investigations finished, by outcome.",
-    ["source", "outcome"],  # completed|failed
+    ["source", "outcome"],  # completed|failed|cancelled
 )
 DURATION = Histogram(
     "mamori_agent_investigation_duration_seconds",
@@ -34,6 +35,11 @@ MODEL_CALLS = Counter(
     "Model API calls, by stop reason.",
     ["model", "stop_reason"],
 )
+MODEL_ERRORS = Counter(
+    "mamori_agent_model_errors_total",
+    "Model API errors, retried or not.",
+    ["model", "error"],  # timeout|connection|http_<status>
+)
 TOOL_CALLS = Counter(
     "mamori_agent_tool_calls_total",
     "Read tool calls, by result.",
@@ -42,7 +48,7 @@ TOOL_CALLS = Counter(
 GUARDRAIL_STOPS = Counter(
     "mamori_agent_guardrail_stops_total",
     "Times a guardrail ended tool use early or stopped an investigation.",
-    ["guardrail"],  # tool_calls|model_calls|tokens|cost|deadline|daily_budget
+    ["guardrail"],  # tool_calls|model_calls|tokens|cost|deadline|daily_budget|max_tokens
 )
 REFUSALS = Counter("mamori_agent_refusals_total", "Model refusals.", ["model", "category"])
 PROPOSALS = Counter(
@@ -51,6 +57,10 @@ PROPOSALS = Counter(
     ["result"],  # accepted|rejected|error|skipped|invalid
 )
 SLACK_POSTS = Counter("mamori_agent_slack_posts_total", "Slack summaries.", ["result"])
+PUBSUB_UNACKED = Counter(
+    "mamori_agent_pubsub_unacked_total",
+    "Messages left unacknowledged for redelivery (the queue was full).",
+)
 QUEUE_DEPTH = Gauge("mamori_agent_queue_depth", "Incidents waiting for the worker.")
 IN_PROGRESS = Gauge("mamori_agent_investigations_in_progress", "Investigations running now.")
 DAILY_COST = Gauge("mamori_agent_daily_cost_usd", "Estimated model cost so far today (UTC).")

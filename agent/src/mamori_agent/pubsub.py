@@ -3,10 +3,13 @@
 Pull, not push: the agent needs no public or in-cluster endpoint for Google to call, and the
 pod's identity only needs roles/pubsub.subscriber on this one subscription.
 
-Every message is acknowledged once the handler has seen it, investigated or not: Cloud
-Monitoring publishes open and closed incidents and repeats (renotify) to the same topic, and a
-message the agent can't parse would otherwise come back forever. The trade-off: if the pod dies
-mid-investigation, that incident is not retried (the alert's own paging is unaffected).
+A message is acknowledged once the handler has seen it, investigated or not: Cloud Monitoring
+publishes open and closed incidents and repeats (renotify) to the same topic, and a message the
+agent can't parse would otherwise come back forever. The one exception: when the handler
+returns False (the agent's queue is full), the message is left unacknowledged, and Pub/Sub
+delivers it again after the ack deadline (60 s) and the subscription's retry backoff. The
+trade-off: if the pod dies mid-investigation, that incident is not retried (the alert's own
+paging is unaffected).
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
+from . import metrics
 from .http import Http, checked_json
 from .logs import event
 
@@ -34,7 +38,7 @@ class PubSubPuller:
         self,
         http: Http,
         subscription_path: str,
-        handle: Callable[[bytes, dict[str, Any]], None],
+        handle: Callable[[bytes, dict[str, Any]], bool | None],
     ) -> None:
         self._http = http
         self._path = subscription_path  # projects/<id>/subscriptions/<name>
@@ -65,10 +69,14 @@ class PubSubPuller:
                 "attributes": message.get("attributes") or {},
             }
             try:
-                self._handle(payload, meta)
+                ack = self._handle(payload, meta) is not False
             except Exception:
                 log.exception("incident handler failed", extra={"event": "handler_failed", **meta})
-            ack_ids.append(item.get("ackId"))
+                ack = True  # a message that breaks the handler would break it again
+            if ack:
+                ack_ids.append(item.get("ackId"))
+            else:
+                metrics.PUBSUB_UNACKED.inc()
         if ack_ids:
             checked_json(
                 self._http.post(

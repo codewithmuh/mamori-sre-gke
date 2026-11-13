@@ -60,25 +60,39 @@ def test_intake_rules(settings: Settings) -> None:
     first = svc.submit(parse_cloud_monitoring(cm_payload()))
     assert first.accepted and first.investigation_id
     assert svc.submit(parse_cloud_monitoring(cm_payload())).reason == "duplicate"
-    running = svc.store.get(first.investigation_id)
-    assert running is not None and running.status == "running" and running.severity == "SEV2"
+    queued = svc.store.get(first.investigation_id)
+    assert queued is not None and queued.status == "queued" and queued.severity == "SEV2"
+    assert queued.seq == 1 and queued.run_started_at is None
+    assert queued.agent_config["postmortemsGamedays"] == "exclude"
 
 
 def test_queue_full_and_daily_budget(make_settings: Callable[..., Settings]) -> None:
-    svc = service(make_settings(queue_size=1, daily_cost_limit_usd=1.0), FakeModel([]))
+    settings = make_settings(queue_size=1, daily_cost_limit_usd=1.0, max_cost_usd=0.5)
+    svc = service(settings, FakeModel([]))
     assert svc.submit(parse_manual({"incidentId": "a", "summary": "s"})).accepted
+    assert svc.spend.reserved == 0.5
+    full = svc.submit(parse_manual({"incidentId": "b", "summary": "s"}))
+    assert full.reason == "queue_full"
+    assert svc.spend.reserved == 0.5  # the refused one's reservation was released
+    # Not marked as seen: the redelivered message is handled normally.
     assert svc.submit(parse_manual({"incidentId": "b", "summary": "s"})).reason == "queue_full"
-    svc.spend.add(1.0)
+    svc.spend.settle(0.0, 0.6)
+    # 0.6 spent + 0.5 reserved + 0.5 for a new one is over 1.0.
     assert svc.submit(parse_manual({"incidentId": "c", "summary": "s"})).reason == "daily_budget"
 
 
-def test_daily_spend_rolls_over() -> None:
+def test_daily_spend_reserves_settles_restores_and_rolls_over() -> None:
     day = ["2026-12-10"]
     spend = DailySpend(1.0, lambda: day[0])
-    spend.add(2.0)
-    assert spend.exhausted()
+    assert spend.try_reserve(0.6)
+    assert not spend.try_reserve(0.6)
+    spend.settle(0.6, 0.2)
+    assert (spend.spent, spend.reserved) == (0.2, 0.0)
+    assert spend.allows(0.7) and not spend.allows(0.8)
+    spend.restore(0.95)
+    assert spend.spent == 0.95 and not spend.try_reserve(0.1)
     day[0] = "2026-12-11"
-    assert not spend.exhausted()
+    assert spend.spent == 0.0 and spend.try_reserve(1.0)
 
 
 def test_investigation_end_to_end(settings: Settings, caplog: pytest.LogCaptureFixture) -> None:
@@ -137,7 +151,11 @@ def test_investigation_end_to_end(settings: Settings, caplog: pytest.LogCaptureF
         "http://executor/v1/proposals",
         "https://slack.com/api/chat.postMessage",
     ]
-    assert svc.spend.exhausted() is False
+    assert svc.spend.spent == pytest.approx(record.usage.cost_usd)
+    assert svc.spend.reserved == 0.0
+    assert record.run_started_at and record.seq == 1
+    assert logged["agentConfig"] == settings.effective()
+    assert logged["mergedIncidentIds"] == []
 
 
 def test_failed_and_crashed_investigations_still_record(
@@ -157,7 +175,7 @@ def test_failed_and_crashed_investigations_still_record(
 
     crashing = service(settings, FakeModel([RuntimeError("SDK exploded")]))
     record = crashing.investigate(parse_manual({"incidentId": "y", "summary": "s"}))
-    assert record.status == "failed" and record.error == "RuntimeError: SDK exploded"
+    assert record.status == "failed" and record.error == "crash: RuntimeError: SDK exploded"
 
 
 def test_executor_rejection_is_recorded(settings: Settings) -> None:
@@ -247,7 +265,7 @@ def test_api(server: tuple[str, AgentService, list[bool]]) -> None:
     status, body = call(
         f"{base}/v1/investigations", {"incidentId": "eval-1", "summary": "CUJ browse down"}
     )
-    assert status == 202 and body["status"] == "running"
+    assert status == 202 and body["status"] == "queued"
     status, record = call(f"{base}/v1/investigations/{body['id']}")
     assert status == 200 and record["incidentId"] == "eval-1" and record["finishedAt"] is None
     status, listing = call(f"{base}/v1/investigations?limit=5&since=2000-01-01T00:00:00Z")
@@ -266,5 +284,9 @@ def test_api(server: tuple[str, AgentService, list[bool]]) -> None:
     assert call(f"{base}/nope")[0] == 404
     status, metrics_text = call(f"{base}/metrics")
     assert status == 200 and "mamori_agent_incidents_total" in metrics_text
-    svc.spend.add(1000)
+    status, summary = call(f"{base}/v1/status")
+    assert status == 200
+    assert (summary["queued"], summary["running"], summary["dailySpentUsd"]) == (1, 0, 0.0)
+    assert summary["dailyReservedUsd"] == 1.5 and summary["agentConfig"]["pageOnly"] is True
+    svc.spend.restore(1000)
     assert call(f"{base}/v1/investigations", {"incidentId": "eval-2", "summary": "s"})[0] == 429

@@ -87,12 +87,14 @@ the cluster values.
 | `AGENT_MAX_TOKENS_PER_CALL` | `16000` | thinking plus answer |
 | `AGENT_PUBSUB_ENABLED`, `AGENT_SUBSCRIPTION` | `true`, `mamori-agent-incidents` | the trigger |
 | `AGENT_DEDUPE_TTL_SECONDS`, `AGENT_QUEUE_SIZE` | `86400`, `10` | intake |
+| `AGENT_PAGE_ONLY` | `true` | only page-tier incidents (policy label `severity=page`) start an investigation |
+| `AGENT_COALESCE_WINDOW_SECONDS` | `1800` | an overlapping incident joins a queued or running investigation started this recently; 0 turns it off |
 | `AGENT_PROPOSE`, `AGENT_EXECUTOR_URL`, `AGENT_EXECUTOR_TOKEN_FILE` | `true`, `http://executor.mamori-agent.svc:8080`, `/var/run/secrets/executor/token` | the proposal |
 | `AGENT_SLACK`, `AGENT_SLACK_BOT_TOKEN`, `AGENT_SLACK_CHANNEL` | `true`, empty, empty | the summary; skipped while token or channel is empty |
 | `AGENT_K8S_API_URL`, `AGENT_K8S_TOKEN_FILE`, `AGENT_K8S_CA_FILE` | in-cluster values | the Kubernetes API |
-| `AGENT_LOG_NAMESPACES` | `boutique,istio-ingress` | where pod logs may be read |
+| `AGENT_LOG_NAMESPACES` | `boutique,istio-ingress` | where pod logs and Cloud Logging may be read (`mamori-agent` never) |
 | `AGENT_KNOWLEDGE_SOURCE`, `AGENT_REPO_DIR`, `AGENT_GITHUB_REPO`, `AGENT_GITHUB_REF` | `github`, `.`, `codewithmuh/mamori-sre-gke`, `main` | CUJ map, SLO spec, postmortems |
-| `AGENT_POSTMORTEMS_GAMEDAYS` | `include` | `exclude` hides postmortems that have a `faultId` (evaluation runs) |
+| `AGENT_POSTMORTEMS_GAMEDAYS` | `exclude` | hides postmortems that have a `faultId`; `include` shows them all |
 | `AGENT_HIDE_FAULT_LABELS` | `false` | strip `mamori.dev/*` labels from tool output (blind runs) |
 | `AGENT_CHAOS_TOOL` | `true` | the Chaos Mesh read tool |
 | `AGENT_HTTP_PORT`, `AGENT_STORE_SIZE`, `AGENT_LOG_LEVEL` | `8080`, `200`, `INFO` | service |

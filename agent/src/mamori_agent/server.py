@@ -2,7 +2,9 @@
 
 GET  /v1/investigations[?limit=50&since=RFC3339]  -> {"investigations": [...]}, newest first
 GET  /v1/investigations/{id}                      -> one record, or 404
-POST /v1/investigations                           -> 202 {"id", "status": "running"} (manual run)
+GET  /v1/status                                   -> {"queued", "running", "dailySpentUsd",
+                                                      "dailyReservedUsd", "agentConfig"}
+POST /v1/investigations                           -> 202 {"id", "status": "queued"} (manual run)
 GET  /healthz  /readyz  /metrics
 
 No authentication: the NetworkPolicy lets only Managed Prometheus (gmp-system) reach the port,
@@ -57,6 +59,8 @@ def make_handler(service: AgentService, ready: Callable[[], bool]) -> type[BaseH
             elif url.path == "/readyz":
                 ok = ready()
                 self._json(200 if ok else 503, {"status": "ready" if ok else "not ready"})
+            elif url.path == "/v1/status":
+                self._json(200, service.status())
             elif url.path == "/metrics":
                 self._send(200, generate_latest(), CONTENT_TYPE_LATEST)
             elif url.path == _PREFIX:
@@ -99,7 +103,8 @@ def make_handler(service: AgentService, ready: Callable[[], bool]) -> type[BaseH
                 return
             accepted = service.submit(incident)
             if accepted.accepted:
-                self._json(202, {"id": accepted.investigation_id, "status": "running"})
+                state = "merged" if accepted.reason == "merged" else "queued"
+                self._json(202, {"id": accepted.investigation_id, "status": state})
             else:
                 status = 429 if accepted.reason in ("queue_full", "daily_budget") else 409
                 self._json(status, {"error": "not started", "reason": accepted.reason})

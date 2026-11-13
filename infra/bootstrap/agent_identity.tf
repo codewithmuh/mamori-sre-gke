@@ -16,18 +16,22 @@
 #      (a later run with false removes the grants again). Whether the pool survives `make down`
 #      isn't documented; if a rebuilt lab's bootstrap apply fails on these grants, run `make up` first.
 
+# Read only once the grants are wanted: on the very first bootstrap the Resource Manager API may
+# not be enabled yet, and nothing else here needs the project number.
 data "google_project" "agent_identity" {
+  count = var.gke_workload_pool_exists ? 1 : 0
+
   project_id = var.project_id
 }
 
 locals {
   agent_namespace = "mamori-agent"
   agent_ksa       = "agent"
-  agent_ksa_principal = join("/", [
-    "principal://iam.googleapis.com/projects/${data.google_project.agent_identity.number}",
+  agent_ksa_principal = var.gke_workload_pool_exists ? join("/", [
+    "principal://iam.googleapis.com/projects/${data.google_project.agent_identity[0].number}",
     "locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog",
     "subject/ns/${local.agent_namespace}/sa/${local.agent_ksa}",
-  ])
+  ]) : null
 
   agent_model_role_id = "mamoriAgentModelCaller"
 

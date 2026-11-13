@@ -218,9 +218,15 @@ def test_cli_investigate(
 
 def test_on_message(monkeypatch: pytest.MonkeyPatch) -> None:
     submitted: list[Any] = []
-    agent = type(
-        "A", (), {"service": type("S", (), {"submit": staticmethod(submitted.append)})()}
-    )()
-    cli._on_message(agent, json.dumps(cm_payload()).encode(), {"messageId": "1"})
-    cli._on_message(agent, b"garbage", {"messageId": "2"})
-    assert len(submitted) == 1
+    reasons = ["investigate", "queue_full"]
+
+    def submit(incident: Any) -> Any:
+        submitted.append(incident)
+        return type("R", (), {"reason": reasons.pop(0)})()
+
+    agent = type("A", (), {"service": type("S", (), {"submit": staticmethod(submit)})()})()
+    assert cli._on_message(agent, json.dumps(cm_payload()).encode(), {"messageId": "1"}) is True
+    assert cli._on_message(agent, b"garbage", {"messageId": "2"}) is True  # acked, not retried
+    # A full queue leaves the message unacknowledged, for redelivery.
+    assert cli._on_message(agent, json.dumps(cm_payload()).encode(), {"messageId": "3"}) is False
+    assert len(submitted) == 2

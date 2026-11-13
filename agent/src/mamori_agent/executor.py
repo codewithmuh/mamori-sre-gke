@@ -62,10 +62,14 @@ class ExecutorClient:
 
     def _headers(self) -> dict[str, str]:
         # Projected token, audience "executor"; re-read every time because the kubelet rotates it.
-        if self._token_file and os.path.exists(self._token_file):
+        # Unreadable: send none and let the executor answer 401, rather than fail here.
+        if not self._token_file or not os.path.exists(self._token_file):
+            return {}
+        try:
             with open(self._token_file, encoding="utf-8") as fh:
                 return {"Authorization": f"Bearer {fh.read().strip()}"}
-        return {}
+        except OSError:
+            return {}
 
     def propose(
         self, incident_id: str, investigation_id: str, action: ProposedAction, rationale: str
@@ -97,10 +101,22 @@ class ExecutorClient:
                 last_error = exc.message
             else:
                 if response.status == 202:
-                    data = response.json() or {}
-                    return ProposalResult(
-                        str(data.get("proposalId") or "") or None, None, "accepted"
-                    )
+                    try:
+                        data = response.json() or {}
+                        proposal_id = str(data.get("proposalId") or "") or None
+                    except (ValueError, AttributeError):
+                        proposal_id = None
+                    if proposal_id is None:
+                        return ProposalResult(
+                            None,
+                            {
+                                "status": 202,
+                                "error": "accepted without a proposalId: " + response.text[:200],
+                                "reason": "bad-response",
+                            },
+                            "error",
+                        )
+                    return ProposalResult(proposal_id, None, "accepted")
                 if 400 <= response.status < 500:
                     try:
                         data = response.json() or {}
