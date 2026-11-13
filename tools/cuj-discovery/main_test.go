@@ -50,9 +50,14 @@ func TestRunEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generated map is invalid: %v", err)
 	}
+	if err := checkComplete(m); err != nil {
+		t.Errorf("a full run gave an incomplete map: %v", err)
+	}
 	for _, j := range m.Journeys {
-		if !slices.Equal(j.Critical, truth[j.ID]) {
-			t.Errorf("%s critical = %v, want %v", j.ID, j.Critical, truth[j.ID])
+		want := append([]string{"frontend"}, truth[j.ID]...)
+		slices.Sort(want)
+		if !slices.Equal(j.Critical, want) {
+			t.Errorf("%s critical = %v, want %v", j.ID, j.Critical, want)
 		}
 	}
 
@@ -107,11 +112,18 @@ func TestRunSubset(t *testing.T) {
 		t.Fatalf("journeys = %+v", m.Journeys)
 	}
 	co := m.Journeys[1]
-	if !slices.Equal(co.Critical, []string{"redis-cart"}) || !slices.Equal(co.NonCritical, []string{"emailservice"}) {
+	if !slices.Equal(co.Critical, []string{"frontend", "redis-cart"}) || !slices.Equal(co.NonCritical, []string{"emailservice"}) {
 		t.Errorf("checkout = %+v", co)
 	}
 	if m.Metadata.RunsPerCase != 5 {
 		t.Errorf("runsPerCase = %d", m.Metadata.RunsPerCase)
+	}
+	// A partial map is valid only when asked for.
+	if code, _, stderr := runCmd(context.Background(), testDeps(env, p), "validate", out); code != 1 || !strings.Contains(stderr, "incomplete map") {
+		t.Errorf("validate without --partial: exit %d: %s", code, stderr)
+	}
+	if code, _, stderr := runCmd(context.Background(), testDeps(env, p), "validate", "--partial", out); code != 0 {
+		t.Errorf("validate --partial: exit %d: %s", code, stderr)
 	}
 }
 
@@ -359,6 +371,7 @@ func TestDryRun(t *testing.T) {
 		"Dry run 20261120t010203z", "Preflight: passed", "port-forward to service prober/prober:8080",
 		"from 2 to 0 replicas", "grpcStatus: UNAVAILABLE", "host: currencyservice.boutique.svc.cluster.local",
 		"mamori.dev/fault: \"true\"", "replicas: \"2\"", "kind: ConfigMap",
+		"mamori.dev/expires-at: \"2026-11-20T02:32:03Z\"",
 	} {
 		if !strings.Contains(stdout, s) {
 			t.Errorf("plan lacks %q:\n%s", s, stdout)
@@ -465,6 +478,8 @@ func TestDispatch(t *testing.T) {
 		{[]string{"run", "--prober-url", "localhost:8080"}, 2, "must be an http(s) URL"},
 		{[]string{"run", "--cujs", "search"}, 2, `unknown journey "search"`},
 		{[]string{"run", "--services", "frontend"}, 2, `unknown service "frontend"`},
+		{[]string{"run", "--services", "adservice"}, 2, "pass -out with another path"},
+		{[]string{"run", "--cujs", "browse", "--out", "slo/../slo/cuj-map.yaml"}, 2, "pass -out with another path"},
 		{[]string{"run", "--bogus"}, 2, "flag provided but not defined"},
 		{[]string{"cleanup", "-h"}, 0, "-dry-run"},
 		{[]string{"cleanup", "--bogus"}, 2, "flag provided but not defined"},

@@ -80,9 +80,13 @@ How scale-to-zero is made safe: the tool first writes a marker `ConfigMap boutiq
 old replica count (labelled like every fault), then scales to 0 and waits until the pods are gone. Removing the fault
 scales back, then deletes the marker. If the tool dies in between, the marker is what `cleanup` uses to restore it.
 The Deployment itself is never labelled `mamori.dev/fault`, so the executor's `remove-fault` (#25) can never delete
-Redis. Side effects: every cart is lost (they live in an `emptyDir` anyway), and cartservice's health check pings
-Redis, so its liveness probe fails and Kubernetes restarts it, possibly into crash-loop back-off. That is why the
-recovery wait below can take minutes after this fault.
+Redis. Side effects: every cart is lost (they live in an `emptyDir` anyway). cartservice itself stays up and Ready:
+in v0.10.7 its health check never touches Redis (`RedisCartStore.Ping()` always returns `true`), so it keeps
+answering, with `FailedPrecondition` ("Can't access cart storage"), and recovers as soon as the new redis-cart pod is
+Ready, which should take seconds (estimate).
+
+The marker ConfigMap carries no `mamori.dev/expires-at` (see Safety): a reaper that deleted it would leave
+redis-cart at 0 and lose the replica count.
 
 Argo CD: the upstream redis-cart manifest sets no `replicas`, so Argo CD's diff has nothing to compare and self-heal
 does not undo the scale (rendered manifests checked 2026-11-13; only the load generator sets `replicas`). If that
@@ -96,14 +100,20 @@ journey 20 times.
 
 After the runs it checks that the fault is still there. If the executor, a person, Argo CD or an autoscaler removed
 it during the measurement, the numbers mean nothing, so the run stops. Then it removes the fault and runs every
-journey twice, every 10 s, until all pass (up to 6 minutes). Measuring the next service while the shop is still
+journey twice, every 10 s, until all pass (up to 3 minutes). Measuring the next service while the shop is still
 recovering from the last one would blame the wrong service.
 
 ### 5. Classify and write
 
 `failureRate = failed runs / runs` for every (journey, service) case. A service is **critical** for a journey when
 the rate is at least `--threshold` (0.5), else **non-critical**. The map lists every broken service in exactly one
-of the two lists, with its rate. Journeys and lists are sorted, so the same results always give the same file.
+of the two lists, with its rate. `frontend` is also in every journey's `critical` list, without a `results` entry:
+every prober step is a request to it, so it is critical by construction and is never broken on purpose. Journeys and
+lists are sorted, so the same results always give the same file.
+
+Only a full run (all four journeys, all ten services) may write `slo/cuj-map.yaml`, the file slo-gen reads. A run
+with `--cujs` or `--services` must name another file with `--out`, and `cuj-discovery validate` rejects a map with
+journeys or services missing unless given `--partial`.
 
 ## Safety
 
@@ -111,14 +121,22 @@ of the two lists, with its rate. Journeys and lists are sorted, so the same resu
 - **Labels.** Everything it creates carries `mamori.dev/fault: "true"` (the lab-wide fault label the executor and
   the game-day CLI know), `app.kubernetes.io/managed-by: cuj-discovery`, `mamori.dev/discovery-run: <run id>` and
   `mamori.dev/discovery-target: <service>`, and an annotation saying how to remove it.
+- **Expiry.** Each VirtualService carries the lab-wide annotation `mamori.dev/expires-at` (RFC 3339, UTC: the run's
+  start plus `--timeout`), so #23's in-cluster reaper can delete it if this process dies. The redis-cart marker
+  ConfigMap deliberately has none: deleting it would not scale redis-cart back. A reaper must leave objects without
+  `expires-at` alone (and so never deletes ConfigMaps from this tool); `make discovery-cleanup` restores redis-cart.
 - **Refuses to start** when any object of any kind in `boutique` is labelled `mamori.dev/fault=true` (ours from a
   killed run, or a game-day fault: VirtualServices, Chaos Mesh objects, anything the API lists), when another
   VirtualService routes a target host, when a target port would be treated as TCP, or when redis-cart is already at
   0.
 - **Always cleans up.** Each fault is removed before the next one starts and on every way out: success, error,
-  Ctrl-C or SIGTERM, and `--timeout`. Removal gets its own 2-minute context, so it still runs when the run's context
-  has been cancelled. A final sweep then deletes anything still carrying this run's label. While it cleans up,
-  further Ctrl-Cs are ignored.
+  Ctrl-C, SIGTERM, SIGHUP (a closed terminal), and `--timeout`. Removal runs on its own context, so it still runs
+  when the run's context has been cancelled, and each step (delete the VirtualService, scale redis-cart back, delete
+  the marker) retries with backoff (1 s doubling to 15 s) for up to 5 minutes, logging every failure as an `ERROR`.
+  The API path can blip like the prober's port-forward can (a zonal control-plane upgrade, the laptop's network, an
+  expired token), and one failed delete must not leave a 100 % abort in place. A final sweep then deletes anything
+  still carrying this run's label, with the same retries. While it cleans up, further signals are ignored, and
+  SIGPIPE is ignored so that writing to a closed terminal or `| tee` can't kill it first.
 - **`cleanup` subcommand** (`make discovery-cleanup`) for the one case the tool can't handle itself: being killed
   (`kill -9`, a closed laptop, a lost network). It removes only objects with this tool's labels, restores redis-cart
   from the marker (only for the known redis-cart target, only with a replica count of 1-100, and only if it is still
@@ -133,7 +151,7 @@ of the two lists, with its rate. Journeys and lists are sorted, so the same resu
 
 **Time** (estimate, my math): the prober estimates 0.3-1 s per healthy run and runs 4 at a time. Per service: 15 s
 settle, 4 journeys × 20 runs (5 rounds of 4; failing runs fail fast at the first broken step), then recovery. About
-1-2 minutes per gRPC service and up to several minutes for redis-cart (cartservice back-off), so roughly
+1-2 minutes per gRPC service and a little longer for redis-cart, whose pod has to start again, so roughly
 **10-30 minutes** for the ten services. A slow shop is bounded by the prober's per-step timeouts; `--timeout` stops
 the whole run at 90 minutes.
 
@@ -156,7 +174,7 @@ metadata: {generatedAt: ..., generator: cuj-discovery/0.1.0, onlineBoutique: v0.
            failureThreshold: 0.5, fault: "one service at a time: Istio VirtualService abort ..."}
 journeys:
   - id: view-cart
-    critical: [cartservice, currencyservice, productcatalogservice, redis-cart, shippingservice]
+    critical: [cartservice, currencyservice, frontend, productcatalogservice, redis-cart, shippingservice]
     nonCritical: [adservice, checkoutservice, emailservice, paymentservice, recommendationservice]
     results:
       shippingservice: {failureRate: 1.0, runs: 20}
@@ -164,7 +182,8 @@ journeys:
 ```
 
 - **`critical`**: with this service down the journey fails. These are the services whose success rates the SLO
-  generator multiplies into the journey's availability, and whose latencies it watches.
+  generator multiplies into the journey's availability, and whose latencies it watches. `frontend` is listed without
+  a result (see above).
 - **`nonCritical`**: the journey kept working with the service down. That means *either* the frontend handles the
   error (ads and recommendations: Online Boutique logs and carries on) *or* the journey never calls the service
   (payment during browse). The map can't tell the two apart; the code can.
@@ -224,5 +243,5 @@ PLAN.md section 4 asks for the map never to go stale. A workflow that does this 
   generator's paths are not measured.
 - **Faults act in callers' sidecars.** Every pod in `boutique` has one, so this holds today.
 - **Behaviour of v0.10.7 and today's prober steps.** Re-run when either changes.
-- **Unverified so far:** everything that needs a cluster. In particular how long cartservice takes to recover from
-  redis-cart's absence, whether 15 s of settle time is enough for xDS to reach every sidecar, and the run time.
+- **Unverified so far:** everything that needs a cluster. In particular how quickly the journeys pass again once
+  redis-cart is back, whether 15 s of settle time is enough for xDS to reach every sidecar, and the run time.

@@ -61,6 +61,17 @@ type cluster struct {
 	// podsGoneTimeout bounds that wait.
 	poll            time.Duration
 	podsGoneTimeout time.Duration
+
+	// expiresAt, when set, is stamped on every VirtualService as
+	// mamori.dev/expires-at, for the in-cluster reaper.
+	expiresAt time.Time
+
+	// Removing a fault retries with backoff (retryMin doubling up to
+	// retryMax) for up to cleanupTimeout, so a short API outage can't leave
+	// a fault behind.
+	cleanupTimeout time.Duration
+	retryMin       time.Duration
+	retryMax       time.Duration
 }
 
 // preflight refuses to start when any fault is already in place (ours from a
@@ -255,7 +266,7 @@ func hostMatches(vsHost, ns, fqdn string) bool {
 func (c *cluster) inject(ctx context.Context, t target) (*activeFault, error) {
 	switch t.Method {
 	case methodGRPCAbort:
-		vs := abortVirtualService(t.Service, c.runID)
+		vs := abortVirtualService(t.Service, c.runID, c.expiresAt)
 		_, err := c.dyn.Resource(virtualServiceGVR).Namespace(shopNamespace).Create(ctx, vs, metav1.CreateOptions{FieldManager: managedByValue})
 		if err != nil {
 			// AlreadyExists is an error too: never adopt an object we didn't create.
@@ -349,20 +360,56 @@ func (c *cluster) verify(ctx context.Context, f *activeFault) error {
 	}
 }
 
-// remove repairs one dependency. Safe to repeat.
+// remove repairs one dependency, retrying each step until it works or
+// cleanupTimeout runs out. Safe to repeat.
 func (c *cluster) remove(ctx context.Context, f *activeFault) error {
 	switch f.target.Method {
 	case methodGRPCAbort:
-		return c.deleteObject(ctx, virtualServiceGVR, f.name)
+		return c.retry(ctx, "delete VirtualService "+f.name, func(ctx context.Context) error {
+			return c.deleteObject(ctx, virtualServiceGVR, f.name)
+		})
 	case methodScaleToZero:
 		// Restore first, then drop the marker: if this stops half way, the
 		// marker is still there for `cleanup`.
-		if err := c.setReplicas(ctx, f.target.Service, f.replicas); err != nil {
+		err := c.retry(ctx, fmt.Sprintf("scale Deployment %s back to %d", f.target.Service, f.replicas), func(ctx context.Context) error {
+			return c.setReplicas(ctx, f.target.Service, f.replicas)
+		})
+		if err != nil {
 			return err
 		}
-		return c.deleteObject(ctx, configMapGVR, f.name)
+		return c.retry(ctx, "delete marker ConfigMap "+f.name, func(ctx context.Context) error {
+			return c.deleteObject(ctx, configMapGVR, f.name)
+		})
 	default:
 		return fmt.Errorf("unknown fault method %q", f.target.Method)
+	}
+}
+
+// retry runs a clean-up step until it succeeds, backing off from retryMin to
+// retryMax, for at most cleanupTimeout (or until ctx ends). Every failure is
+// logged as an error: a fault that can't be removed is the worst outcome this
+// tool can have.
+func (c *cluster) retry(ctx context.Context, step string, fn func(context.Context) error) error {
+	if c.cleanupTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.cleanupTimeout)
+		defer cancel()
+	}
+	delay := c.retryMin
+	for attempt := 1; ; attempt++ {
+		err := fn(ctx)
+		if err == nil {
+			if attempt > 1 {
+				c.log.WarnContext(ctx, "clean-up step worked after retrying", "step", step, "attempts", attempt)
+			}
+			return nil
+		}
+		c.log.ErrorContext(ctx, "clean-up step failed; retrying", "step", step, "attempt", attempt,
+			"retry_in", delay.String(), "error", err.Error())
+		if serr := c.sleep(ctx, delay); serr != nil {
+			return fmt.Errorf("%s: still failing after %d attempts: %w", step, attempt, err)
+		}
+		delay = min(max(2*delay, c.retryMin), c.retryMax)
 	}
 }
 
@@ -397,7 +444,8 @@ func (c *cluster) sweep(ctx context.Context, selector string, dryRun bool) ([]st
 			}
 			desc := fmt.Sprintf("deployment/%s scaled to 0 (restore to %d replicas) + configmap/%s", f.target.Service, f.replicas, f.name)
 			if !dryRun {
-				if err := c.restoreFromMarker(ctx, f); err != nil {
+				err := c.retry(ctx, "restore "+desc, func(ctx context.Context) error { return c.restoreFromMarker(ctx, f) })
+				if err != nil {
 					errs = append(errs, err)
 					continue
 				}
@@ -412,7 +460,10 @@ func (c *cluster) sweep(ctx context.Context, selector string, dryRun bool) ([]st
 	} else {
 		for _, vs := range vss.Items {
 			if !dryRun {
-				if err := c.deleteObject(ctx, virtualServiceGVR, vs.GetName()); err != nil {
+				err := c.retry(ctx, "delete VirtualService "+vs.GetName(), func(ctx context.Context) error {
+					return c.deleteObject(ctx, virtualServiceGVR, vs.GetName())
+				})
+				if err != nil {
 					errs = append(errs, err)
 					continue
 				}
@@ -467,19 +518,25 @@ func replicasOf(r *int32) int32 {
 // UNAVAILABLE (Istio 1.31 HTTPFaultInjection.Abort.grpcStatus). The callers'
 // sidecars apply it before routing, so Istio's default retries don't hide it
 // (a VirtualService with a fault turns client-side retries off for its route).
-func abortVirtualService(service, runID string) *unstructured.Unstructured {
+// expiresAt, when set, becomes mamori.dev/expires-at, after which the
+// in-cluster reaper (#23) may delete it if this tool could not.
+func abortVirtualService(service, runID string, expiresAt time.Time) *unstructured.Unstructured {
 	host := serviceHost(service)
+	annotations := map[string]any{
+		annotationAbout: fmt.Sprintf("cuj-discovery run %s: every request to %s fails with gRPC UNAVAILABLE. "+
+			"Remove with: make discovery-cleanup", runID, service),
+	}
+	if !expiresAt.IsZero() {
+		annotations[annotationExpiresAt] = expiresAt.UTC().Format(time.RFC3339)
+	}
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "networking.istio.io/v1",
 		"kind":       "VirtualService",
 		"metadata": map[string]any{
-			"name":      objectName(service),
-			"namespace": shopNamespace,
-			"labels":    stringMap(faultLabels(runID, service)),
-			"annotations": map[string]any{
-				annotationAbout: fmt.Sprintf("cuj-discovery run %s: every request to %s fails with gRPC UNAVAILABLE. "+
-					"Remove with: make discovery-cleanup", runID, service),
-			},
+			"name":        objectName(service),
+			"namespace":   shopNamespace,
+			"labels":      stringMap(faultLabels(runID, service)),
+			"annotations": annotations,
 		},
 		"spec": map[string]any{
 			"hosts": []any{host},
@@ -495,7 +552,9 @@ func abortVirtualService(service, runID string) *unstructured.Unstructured {
 }
 
 // markerConfigMap records what scale-to-zero changed, so that `cleanup` can
-// undo it after a crash.
+// undo it after a crash. It gets no mamori.dev/expires-at on purpose: a reaper
+// that deleted it would not scale redis-cart back, and would remove the only
+// record of the replica count. Only `cleanup` (or this run) removes it.
 func markerConfigMap(deployment, runID string, replicas int32) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1",

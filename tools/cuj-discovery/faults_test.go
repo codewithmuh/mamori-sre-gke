@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -24,6 +25,9 @@ func newTestCluster(env *fakeEnv) *cluster {
 	c.sleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	c.poll = time.Millisecond
 	c.podsGoneTimeout = 50 * time.Millisecond
+	c.cleanupTimeout = 50 * time.Millisecond
+	c.retryMin, c.retryMax = time.Millisecond, 2*time.Millisecond
+	c.expiresAt = time.Date(2026, 11, 20, 2, 32, 3, 0, time.UTC)
 	return c
 }
 
@@ -164,6 +168,9 @@ func TestInjectAndRemoveVirtualService(t *testing.T) {
 	if abort["grpcStatus"] != "UNAVAILABLE" || fmt.Sprint(abort["percentage"].(map[string]any)["value"]) != "100" {
 		t.Errorf("abort = %v (%s)", abort, status)
 	}
+	if got := vs.GetAnnotations()[annotationExpiresAt]; got != "2026-11-20T02:32:03Z" {
+		t.Errorf("expires-at = %q", got)
+	}
 	if err := c.verify(context.Background(), f); err != nil {
 		t.Errorf("verify: %v", err)
 	}
@@ -208,6 +215,10 @@ func TestScaleToZero(t *testing.T) {
 	}
 	if data, _, _ := unstructured.NestedStringMap(cm.Object, "data"); data["replicas"] != "2" || data["deployment"] != "redis-cart" {
 		t.Errorf("marker data = %v", data)
+	}
+	// A reaper must never delete the marker: that would not restore redis-cart.
+	if _, ok := cm.GetAnnotations()[annotationExpiresAt]; ok {
+		t.Error("the marker must not carry an expiry")
 	}
 	if err := c.verify(context.Background(), f); err != nil {
 		t.Error(err)
@@ -275,6 +286,50 @@ func TestScaleToZeroFailures(t *testing.T) {
 		f, err := newTestCluster(env).inject(context.Background(), redis)
 		if f == nil || err == nil || !strings.Contains(err.Error(), "selector") {
 			t.Fatalf("%v, %v", f, err)
+		}
+	})
+}
+
+func TestRemoveRetries(t *testing.T) {
+	t.Run("API blip", func(t *testing.T) {
+		env := newFakeEnv(t, shopObjects(2))
+		var buf bytes.Buffer
+		c := newTestCluster(env)
+		c.log = newLogger(&buf)
+		f, err := c.inject(context.Background(), target{"redis-cart", methodScaleToZero})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fails := 3
+		blip := func(k8stesting.Action) (bool, runtime.Object, error) {
+			if fails > 0 {
+				fails--
+				return true, nil, errors.New("connection refused")
+			}
+			return false, nil, nil
+		}
+		env.kube.PrependReactor("patch", "deployments", blip)
+		if err := c.remove(context.Background(), f); err != nil {
+			t.Fatal(err)
+		}
+		if n := redisReplicas(t, env); n != 2 {
+			t.Errorf("replicas = %d", n)
+		}
+		log := buf.String()
+		if strings.Count(log, "clean-up step failed; retrying") != 3 || !strings.Contains(log, `"attempts":4`) ||
+			!strings.Contains(log, `"severity":"ERROR"`) {
+			t.Errorf("log:\n%s", log)
+		}
+	})
+	t.Run("API gone", func(t *testing.T) {
+		env := newFakeEnv(t, nil, virtualServiceObj(objectName("adservice"), shopNamespace, faultLabels("testrun", "adservice"), []string{"adservice"}, nil))
+		env.dyn.PrependReactor("delete", "virtualservices", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, errors.New("the server has asked for the client to provide credentials")
+		})
+		f := &activeFault{target: target{"adservice", methodGRPCAbort}, name: objectName("adservice")}
+		err := newTestCluster(env).remove(context.Background(), f)
+		if err == nil || !strings.Contains(err.Error(), "delete VirtualService cuj-discovery-adservice: still failing after") {
+			t.Fatalf("err = %v", err)
 		}
 	})
 }

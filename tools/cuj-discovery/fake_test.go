@@ -217,6 +217,8 @@ func testDeps(env *fakeEnv, p prober) deps {
 		now:   func() time.Time { return time.Date(2026, 11, 20, 1, 2, 3, 0, time.UTC) },
 		sleep: func(ctx context.Context, _ time.Duration) error { return ctx.Err() },
 		poll:  time.Millisecond,
+
+		cleanupTimeout: time.Second,
 	}
 }
 

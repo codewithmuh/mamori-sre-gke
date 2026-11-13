@@ -154,9 +154,11 @@ func (d *discoverer) measure(ctx context.Context, t target, res results, log *sl
 }
 
 // waitRecovered waits until every journey passes again after a fault is
-// removed. cartservice, for one, restarts while redis-cart is gone and can sit
-// in crash-loop back-off for a while; measuring the next service before then
-// would blame it for the previous one's damage.
+// removed: new routes take a moment to reach every sidecar, and a restored
+// redis-cart needs to start and pass its readiness probe. (cartservice itself
+// stays Ready throughout: in v0.10.7 its health check never touches Redis.)
+// Measuring the next service before then would blame it for the previous
+// one's damage.
 func (d *discoverer) waitRecovered(ctx context.Context, t target, log *slog.Logger) error {
 	rctx, cancel := context.WithTimeout(ctx, d.opts.RecoveryTimeout)
 	defer cancel()

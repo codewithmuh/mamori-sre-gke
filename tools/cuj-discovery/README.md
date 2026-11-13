@@ -24,7 +24,7 @@ Or directly, from the repo root: `go run -C tools/cuj-discovery . run --out "$PW
 | `run` | Preflight, baseline, one fault per service, write the map. Exit 0 only when the map was written |
 | `run --dry-run` | Preflight (read-only) and print the plan and the manifests; no writes, no prober calls, no map |
 | `cleanup [--dry-run]` | Remove every object this tool created in `boutique` and restore `redis-cart`'s replicas. Leaves game-day faults alone and lists them |
-| `validate [file]` | Strictly parse a CUJ map and check its rules (default `slo/cuj-map.yaml`) |
+| `validate [--partial] [file]` | Strictly parse a CUJ map and check its rules (default `slo/cuj-map.yaml`). Without `--partial` it also requires every journey and every service |
 | `version` | Print the version |
 
 `run` flags (defaults in brackets):
@@ -39,9 +39,9 @@ Or directly, from the repo root: `go run -C tools/cuj-discovery . run --out "$PW
 | `--recovery-runs` | Runs per journey per recovery check [2] |
 | `--threshold` | Failure rate at or above which a service is critical [0.5] |
 | `--settle` | Wait after a fault is in place, before measuring [15s] |
-| `--recovery-timeout` | How long the shop may take to pass again after each fault [6m] |
+| `--recovery-timeout` | How long the shop may take to pass again after each fault [3m] |
 | `--timeout` | Limit for the whole run; the fault in place is removed when it fires [90m] |
-| `--out` | Output path [`slo/cuj-map.yaml`] |
+| `--out` | Output path [`slo/cuj-map.yaml`]. Required with `--cujs` or `--services`: a partial run never replaces the map slo-gen reads |
 | `--online-boutique` | Version recorded in the map [`v0.10.7`] |
 
 Logs are JSON lines on stderr (`severity`, `message`, plus fields such as `service`, `cuj`, `failure_rate`,
@@ -57,7 +57,12 @@ The summary goes to stdout.
 
 Every object carries `mamori.dev/fault: "true"`, `app.kubernetes.io/managed-by: cuj-discovery`,
 `mamori.dev/discovery-run: <run id>` and `mamori.dev/discovery-target: <service>`, plus a
-`mamori.dev/description` annotation that says how to remove it.
+`mamori.dev/description` annotation that says how to remove it. VirtualServices also get `mamori.dev/expires-at`
+(RFC 3339, UTC: start of the run plus `--timeout`) for #23's in-cluster reaper. The marker ConfigMap gets none on
+purpose: deleting it would not scale redis-cart back, so only this tool removes it.
+
+In the map, `frontend` is in every journey's `critical` list without a `results` entry: every prober step is a
+request to it, so it is critical by construction and never broken on purpose.
 
 ## Safety
 
@@ -65,10 +70,13 @@ Every object carries `mamori.dev/fault: "true"`, `app.kubernetes.io/managed-by: 
 - Refuses to start if any object in `boutique`, of any kind, is labelled `mamori.dev/fault=true`, if another
   VirtualService already routes a target host, if a target's Service port isn't named `grpc*`/`http*` (Istio would
   treat it as TCP and the abort would silently not apply), or if `redis-cart` is already at 0.
-- One fault at a time. Each is removed before the next one, and on error, Ctrl-C (SIGINT/SIGTERM) and `--timeout`;
-  removal runs on its own 2-minute context even after the run's context is cancelled. A final sweep deletes anything
-  left with this run's label. Further Ctrl-Cs are ignored while it cleans up; only `kill -9` stops it, and then
-  `make discovery-cleanup` does the rest.
+- One fault at a time. Each is removed before the next one, and on error, Ctrl-C, SIGTERM, SIGHUP (a closed
+  terminal) and `--timeout`; removal runs on its own context even after the run's context is cancelled. Each removal
+  step retries with backoff (1 s doubling to 15 s) for up to 5 minutes and logs every failure as `ERROR`, so a short
+  API outage (a control-plane upgrade, the laptop's network, an expired token) can't leave a fault behind. A final
+  sweep deletes anything left with this run's label, with the same retries. Further signals are ignored while it
+  cleans up, and so is SIGPIPE, so a closed terminal or `| tee` can't kill it mid-clean-up; only `kill -9` stops it,
+  and then `make discovery-cleanup` does the rest.
 - Checks after each measurement that the fault was still in place (not removed by the executor, a person, Argo CD
   self-heal or an autoscaler), else the results are discarded and the run stops.
 - Waits until every journey passes again before the next fault, so one service isn't blamed for another's damage.
@@ -94,6 +102,7 @@ docker run --rm -v "$PWD":/repo -w /repo/tools/cuj-discovery $LINT_IMAGE golangc
 What the tests cover: the full run against a fake cluster and a fake prober that fails journeys according to a
 dependency table (map content byte for byte, faults removed, replicas restored, one fault at a time), a dirty baseline,
 existing faults of any kind, prober errors, Ctrl-C while `redis-cart` is down, the overall timeout, a fault removed by
-someone else mid-measurement, `redis-cart` scaled back mid-measurement, slow and failed recovery, dry run (only `get`
+someone else mid-measurement, `redis-cart` scaled back mid-measurement, slow and failed recovery, removal retried through API errors (and given up after the clean-up timeout), partial
+runs refused for the default output, dry run (only `get`
 and `list` calls), `cleanup` (dry run, real, nothing to do, bad markers, errors), preflight rules, the prober client
 (busy retries, error answers, inconsistent answers), map validation, and the port-forward up to a refused upgrade.

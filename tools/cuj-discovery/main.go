@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -37,21 +38,32 @@ type deps struct {
 	now           func() time.Time
 	sleep         func(context.Context, time.Duration) error
 	poll          time.Duration
+
+	// cleanupTimeout is how long removing faults keeps retrying. The API
+	// server can be briefly away (a zonal control-plane upgrade, the laptop's
+	// network, an expired token), and giving up early would leave a 100 %
+	// abort in place, or redis-cart at 0 replicas.
+	cleanupTimeout time.Duration
 }
 
 var defaultDeps = deps{
-	connectKube:   newKubeClients,
-	connectProber: connectProber,
-	now:           time.Now,
-	sleep:         sleepCtx,
-	poll:          2 * time.Second,
+	connectKube:    newKubeClients,
+	connectProber:  connectProber,
+	now:            time.Now,
+	sleep:          sleepCtx,
+	poll:           2 * time.Second,
+	cleanupTimeout: 5 * time.Minute,
 }
 
 func main() {
-	// The first Ctrl-C cancels the run, and the faults are removed before the
-	// program exits. Further Ctrl-Cs are ignored until then, so the clean-up
-	// can't be cut short by accident.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// The first Ctrl-C, SIGTERM or SIGHUP (a closed terminal) cancels the run,
+	// and the faults are removed before the program exits. Further signals are
+	// ignored until then, so the clean-up can't be cut short by accident.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	// With the terminal (or a `| tee`) gone, a write to stdout or stderr would
+	// otherwise kill the process with SIGPIPE before it could clean up. Ignored,
+	// the write just fails, and say() drops the error.
+	signal.Ignore(syscall.SIGPIPE)
 	code := dispatch(ctx, os.Args[1:], os.Stdout, os.Stderr, defaultDeps)
 	stop()
 	os.Exit(code)
@@ -115,7 +127,7 @@ func parseRunFlags(args []string, stderr io.Writer) (runConfig, error) {
 	fs.StringVar(&c.kubeconfig, "kubeconfig", "", "kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)")
 	fs.StringVar(&c.kubeContext, "context", "", "kubeconfig context (default: the current context)")
 	fs.StringVar(&c.proberURL, "prober-url", "", "prober base URL, e.g. http://127.0.0.1:8080 (default: a port-forward to service prober/prober:8080)")
-	fs.StringVar(&c.out, "out", "slo/cuj-map.yaml", "where to write the CUJ map")
+	fs.StringVar(&c.out, "out", defaultMapPath, "where to write the CUJ map (required with -cujs or -services)")
 	fs.StringVar(&c.onlineBoutique, "online-boutique", "v0.10.7", "Online Boutique version to record in the map")
 	fs.StringVar(&cujs, "cujs", "", "comma-separated journeys to measure (default: all four)")
 	fs.StringVar(&services, "services", "", "comma-separated services to break (default: all ten)")
@@ -124,7 +136,7 @@ func parseRunFlags(args []string, stderr io.Writer) (runConfig, error) {
 	fs.IntVar(&c.opts.RecoveryRuns, "recovery-runs", 2, "runs per journey per check while waiting for recovery (1-100)")
 	fs.Float64Var(&c.opts.Threshold, "threshold", 0.5, "failure rate at or above which a service is critical (above 0, at most 1)")
 	fs.DurationVar(&c.opts.Settle, "settle", 15*time.Second, "wait after a fault is in place before measuring")
-	fs.DurationVar(&c.opts.RecoveryTimeout, "recovery-timeout", 6*time.Minute, "how long the shop may take to recover after each fault")
+	fs.DurationVar(&c.opts.RecoveryTimeout, "recovery-timeout", 3*time.Minute, "how long the shop may take to pass again after each fault")
 	fs.DurationVar(&c.timeout, "timeout", 90*time.Minute, "stop the whole run (and remove the fault) after this long")
 	fs.BoolVar(&c.dryRun, "dry-run", false, "check the cluster and print the plan and objects; change nothing, call no prober")
 	if err := fs.Parse(args); err != nil {
@@ -134,7 +146,6 @@ func parseRunFlags(args []string, stderr io.Writer) (runConfig, error) {
 		return c, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
 	}
 	c.opts.RecoveryInterval = 10 * time.Second
-	c.opts.RemoveTimeout = 2 * time.Minute
 
 	var errs []error
 	var err error
@@ -143,6 +154,13 @@ func parseRunFlags(args []string, stderr io.Writer) (runConfig, error) {
 	}
 	if c.opts.Targets, err = selectTargets(services); err != nil {
 		errs = append(errs, err)
+	}
+	// slo-gen reads the default map, so it must never be overwritten by a
+	// map that covers only some journeys or services.
+	partial := len(c.opts.CUJs) < len(allCUJs) || len(c.opts.Targets) < len(allTargets)
+	if len(errs) == 0 && partial && samePath(c.out, defaultMapPath) {
+		errs = append(errs, fmt.Errorf("-cujs and -services measure only part of the map: pass -out with another path, "+
+			"so %s is not replaced by an incomplete one", defaultMapPath))
 	}
 	for _, n := range []struct {
 		name string
@@ -191,7 +209,11 @@ func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer, d deps
 	}
 	log.InfoContext(ctx, "starting", "run", runID, "context", kc.context, "server", kc.server, "namespace", shopNamespace,
 		"dry_run", c.dryRun, "cujs", c.opts.CUJs, "services", targetNames(c.opts.Targets))
-	cl := &cluster{kube: kc.kube, dyn: kc.dyn, runID: runID, log: log, sleep: d.sleep, poll: d.poll, podsGoneTimeout: 3 * time.Minute}
+	cl := newCluster(kc, runID, log, d)
+	// If this process dies without cleaning up, an in-cluster reaper (#23)
+	// deletes fault objects once this time has passed.
+	cl.expiresAt = d.now().Add(c.timeout).UTC()
+	c.opts.RemoveTimeout = d.cleanupTimeout
 
 	if c.dryRun {
 		perr := cl.preflight(ctx, c.opts.Targets)
@@ -204,7 +226,7 @@ func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer, d deps
 				}
 			}
 		}
-		if err := printPlan(stdout, c, runID, kc, replicas, perr); err != nil {
+		if err := printPlan(stdout, c, runID, kc, replicas, cl.expiresAt, perr); err != nil {
 			return fail(stderr, log, err)
 		}
 		if perr != nil {
@@ -227,7 +249,7 @@ func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer, d deps
 	// Whatever happened, nothing from this run may stay behind. Each fault was
 	// already removed on the way out; this catches the rest (say, a create
 	// that reached the API server although the client saw an error).
-	sctx, scancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	sctx, scancel := context.WithTimeout(context.WithoutCancel(ctx), d.cleanupTimeout)
 	left, serr := cl.sweep(sctx, ourSelector+","+labelRun+"="+runID, false)
 	scancel()
 	if len(left) > 0 {
@@ -294,7 +316,7 @@ func cmdCleanup(ctx context.Context, args []string, stdout, stderr io.Writer, d 
 	ctx, cancel := context.WithTimeout(ctx, *timeout)
 	defer cancel()
 	log.InfoContext(ctx, "cleanup", "context", kc.context, "server", kc.server, "namespace", shopNamespace, "dry_run", *dryRun)
-	cl := &cluster{kube: kc.kube, dyn: kc.dyn, log: log, sleep: d.sleep, poll: d.poll}
+	cl := newCluster(kc, "", log, d)
 
 	removed, err := cl.sweep(ctx, ourSelector, *dryRun)
 	verb := "removed"
@@ -323,13 +345,14 @@ func cmdCleanup(ctx context.Context, args []string, stdout, stderr io.Writer, d 
 func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("cuj-discovery validate", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	partial := fs.Bool("partial", false, "accept a map without every journey and service (from a run with -cujs or -services)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return 2
 	}
-	path := "slo/cuj-map.yaml"
+	path := defaultMapPath
 	switch fs.NArg() {
 	case 0:
 	case 1:
@@ -344,6 +367,9 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	m, err := parseCUJMap(data)
+	if err == nil && !*partial {
+		err = checkComplete(m)
+	}
 	if err != nil {
 		say(stderr, "%s is not a valid CUJ map:\n%v\n", path, err)
 		return 1
@@ -351,6 +377,26 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	say(stdout, "%s: valid (%d journeys, %d runs per case, threshold %g)\n",
 		path, len(m.Journeys), m.Metadata.RunsPerCase, m.Metadata.FailureThreshold)
 	return 0
+}
+
+// defaultMapPath is the map slo-gen reads.
+const defaultMapPath = "slo/cuj-map.yaml"
+
+// samePath reports whether two paths name the same file, relative ones being
+// relative to the working directory.
+func samePath(a, b string) bool {
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	return errA == nil && errB == nil && absA == absB
+}
+
+// newCluster is the fault injector with the timings for a real cluster.
+func newCluster(kc *kubeClients, runID string, log *slog.Logger, d deps) *cluster {
+	c := &cluster{kube: kc.kube, dyn: kc.dyn, runID: runID, log: log, sleep: d.sleep, poll: d.poll}
+	c.podsGoneTimeout = 3 * time.Minute
+	c.cleanupTimeout = d.cleanupTimeout
+	c.retryMin, c.retryMax = time.Second, 15*time.Second
+	return c
 }
 
 // say writes text for the person at the terminal. If stdout or stderr can't
@@ -375,7 +421,7 @@ func targetNames(ts []target) []string {
 
 // printPlan shows what a real run would do, including every object it would
 // create, so a reviewer can check them before anything changes.
-func printPlan(w io.Writer, c runConfig, runID string, kc *kubeClients, replicas map[string]int32, preflightErr error) error {
+func printPlan(w io.Writer, c runConfig, runID string, kc *kubeClients, replicas map[string]int32, expiresAt time.Time, preflightErr error) error {
 	var b strings.Builder
 	p := func(format string, a ...any) { say(&b, format+"\n", a...) }
 	p("Dry run %s: nothing is changed, the prober is not called, no map is written.", runID)
@@ -410,7 +456,7 @@ func printPlan(w io.Writer, c runConfig, runID string, kc *kubeClients, replicas
 	p("")
 	p("Objects it would create:")
 	for _, t := range c.opts.Targets {
-		obj := abortVirtualService(t.Service, runID)
+		obj := abortVirtualService(t.Service, runID, expiresAt)
 		if t.Method == methodScaleToZero {
 			obj = markerConfigMap(t.Service, runID, replicas[t.Service])
 		}

@@ -34,6 +34,10 @@ type target struct {
 	Method  faultMethod
 }
 
+// entryService is listed as critical for every journey without being broken:
+// every prober step is a request to it, so it is critical by construction.
+const entryService = "frontend"
+
 // allTargets are the upstream services from the contract, sorted. The
 // frontend and the load generator are not targets: breaking the frontend
 // breaks every journey by definition.
@@ -62,6 +66,10 @@ const (
 	labelTarget     = "mamori.dev/discovery-target"
 	annotationAbout = "mamori.dev/description"
 	managedByValue  = "cuj-discovery"
+
+	// annotationExpiresAt is the lab-wide expiry (RFC 3339, UTC) that #23's
+	// reaper and `gameday status` read.
+	annotationExpiresAt = "mamori.dev/expires-at"
 
 	// anyFaultSelector matches every fault in the lab, ours or not.
 	anyFaultSelector = labelFault + "=true"

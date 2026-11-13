@@ -11,7 +11,7 @@ metadata:
   fault: 'one service at a time: Istio VirtualService abort of 100 % of requests with gRPC status UNAVAILABLE (redis-cart, plain TCP: Deployment scaled to 0 replicas); measured 15s after the fault was in place'
 journeys:
   - id: add-to-cart
-    critical: [cartservice, currencyservice, productcatalogservice, redis-cart]
+    critical: [cartservice, currencyservice, frontend, productcatalogservice, redis-cart]
     nonCritical: [adservice, checkoutservice, emailservice, paymentservice, recommendationservice, shippingservice]
     results:
       adservice: {failureRate: 0.0, runs: 20}
@@ -25,7 +25,7 @@ journeys:
       redis-cart: {failureRate: 1.0, runs: 20}
       shippingservice: {failureRate: 0.0, runs: 20}
   - id: browse
-    critical: [cartservice, currencyservice, productcatalogservice, redis-cart]
+    critical: [cartservice, currencyservice, frontend, productcatalogservice, redis-cart]
     nonCritical: [adservice, checkoutservice, emailservice, paymentservice, recommendationservice, shippingservice]
     results:
       adservice: {failureRate: 0.15, runs: 20}
@@ -39,7 +39,7 @@ journeys:
       redis-cart: {failureRate: 1.0, runs: 20}
       shippingservice: {failureRate: 0.0, runs: 20}
   - id: checkout
-    critical: [cartservice, checkoutservice, currencyservice, paymentservice, productcatalogservice, redis-cart, shippingservice]
+    critical: [cartservice, checkoutservice, currencyservice, frontend, paymentservice, productcatalogservice, redis-cart, shippingservice]
     nonCritical: [adservice, emailservice, recommendationservice]
     results:
       adservice: {failureRate: 0.0, runs: 20}
@@ -53,7 +53,7 @@ journeys:
       redis-cart: {failureRate: 1.0, runs: 20}
       shippingservice: {failureRate: 1.0, runs: 20}
   - id: view-cart
-    critical: [cartservice, currencyservice, productcatalogservice, redis-cart, shippingservice]
+    critical: [cartservice, currencyservice, frontend, productcatalogservice, redis-cart, shippingservice]
     nonCritical: [adservice, checkoutservice, emailservice, paymentservice, recommendationservice]
     results:
       adservice: {failureRate: 0.0, runs: 20}

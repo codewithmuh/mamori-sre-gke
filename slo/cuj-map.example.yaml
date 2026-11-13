@@ -12,8 +12,13 @@
 # - The prober starts every run on the home page (GET /), so the home page's fatal calls are in
 #   every journey. In src/frontend/handlers.go, homeHandler returns HTTP 500 when any of these
 #   fail: currency (GetSupportedCurrencies, Convert per product), productcatalog (ListProducts),
-#   cart (GetCart). cartservice answers FailedPrecondition when it can't reach redis-cart, and its
-#   health check pings Redis, so redis-cart counts as critical wherever cartservice does.
+#   cart (GetCart). cartservice answers FailedPrecondition ("Can't access cart storage") when it
+#   can't reach redis-cart, so redis-cart counts as critical wherever cartservice does. (Its health
+#   check never touches Redis: RedisCartStore.Ping() always returns true, so cartservice stays
+#   Ready while Redis is gone.)
+# - frontend is in every journey's critical list without a results entry: every prober step is a
+#   request to it, so it is critical by construction and is never broken on purpose. The real
+#   map from cuj-discovery lists it the same way.
 # - Errors ignored on purpose, so not critical: ads (chooseAd logs "failed to retrieve ads" and
 #   renders without one) and recommendations (product, cart and order pages log a warning, or
 #   drop the error with `_`).
@@ -44,7 +49,7 @@ metadata:
   fault: "EXAMPLE, NOT MEASURED: expected outcome of breaking one service at a time (Istio abort with gRPC UNAVAILABLE; redis-cart scaled to 0), guessed from the v0.10.7 source"
 journeys:
   - id: add-to-cart
-    critical: [cartservice, currencyservice, productcatalogservice, redis-cart]
+    critical: [cartservice, currencyservice, frontend, productcatalogservice, redis-cart]
     nonCritical: [adservice, checkoutservice, emailservice, paymentservice, recommendationservice, shippingservice]
     results:
       adservice: {failureRate: 0.0, runs: 20}
@@ -58,7 +63,7 @@ journeys:
       redis-cart: {failureRate: 1.0, runs: 20}
       shippingservice: {failureRate: 0.0, runs: 20}
   - id: browse
-    critical: [cartservice, currencyservice, productcatalogservice, redis-cart]
+    critical: [cartservice, currencyservice, frontend, productcatalogservice, redis-cart]
     nonCritical: [adservice, checkoutservice, emailservice, paymentservice, recommendationservice, shippingservice]
     results:
       adservice: {failureRate: 0.0, runs: 20}
@@ -72,7 +77,7 @@ journeys:
       redis-cart: {failureRate: 1.0, runs: 20}
       shippingservice: {failureRate: 0.0, runs: 20}
   - id: checkout
-    critical: [cartservice, checkoutservice, currencyservice, paymentservice, productcatalogservice, redis-cart, shippingservice]
+    critical: [cartservice, checkoutservice, currencyservice, frontend, paymentservice, productcatalogservice, redis-cart, shippingservice]
     nonCritical: [adservice, emailservice, recommendationservice]
     results:
       adservice: {failureRate: 0.0, runs: 20}
@@ -86,7 +91,7 @@ journeys:
       redis-cart: {failureRate: 1.0, runs: 20}
       shippingservice: {failureRate: 1.0, runs: 20}
   - id: view-cart
-    critical: [cartservice, currencyservice, productcatalogservice, redis-cart, shippingservice]
+    critical: [cartservice, currencyservice, frontend, productcatalogservice, redis-cart, shippingservice]
     nonCritical: [adservice, checkoutservice, emailservice, paymentservice, recommendationservice]
     results:
       adservice: {failureRate: 0.0, runs: 20}

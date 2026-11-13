@@ -84,7 +84,7 @@ func buildMap(res results, opts options, meta mapMetadata) cujMap {
 	cujs := slices.Clone(opts.CUJs)
 	slices.Sort(cujs)
 	for _, cuj := range cujs {
-		j := journey{ID: cuj, Critical: []string{}, NonCritical: []string{}, Results: map[string]serviceResult{}}
+		j := journey{ID: cuj, Critical: []string{entryService}, NonCritical: []string{}, Results: map[string]serviceResult{}}
 		for _, t := range opts.Targets {
 			c := res[cuj][t.Service]
 			j.Results[t.Service] = serviceResult{FailureRate: c.rate(), Runs: c.Runs}
@@ -156,8 +156,8 @@ func parseCUJMap(data []byte) (cujMap, error) {
 }
 
 // validateMap checks the rules readers rely on: known ids, sorted and
-// disjoint lists that cover exactly the measured services, and lists that
-// agree with the failure rates and the threshold.
+// disjoint lists that cover exactly the measured services plus the frontend,
+// and lists that agree with the failure rates and the threshold.
 func validateMap(m cujMap) error {
 	var errs []error
 	bad := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
@@ -199,6 +199,28 @@ func validateMap(m cujMap) error {
 	return errors.Join(errs...)
 }
 
+// checkComplete reports journeys or services a map is missing. slo-gen's map
+// must be complete; maps from runs with -cujs or -services are not.
+func checkComplete(m cujMap) error {
+	var errs []error
+	for _, id := range allCUJs {
+		i := slices.IndexFunc(m.Journeys, func(j journey) bool { return j.ID == id })
+		if i < 0 {
+			errs = append(errs, fmt.Errorf("journey %s is missing", id))
+			continue
+		}
+		for _, t := range allTargets {
+			if _, ok := m.Journeys[i].Results[t.Service]; !ok {
+				errs = append(errs, fmt.Errorf("journey %s: %s was not measured", id, t.Service))
+			}
+		}
+	}
+	if len(errs) > 0 {
+		errs = append(errs, errors.New("incomplete map: it comes from a run with -cujs or -services (validate --partial accepts it)"))
+	}
+	return errors.Join(errs...)
+}
+
 func validateJourney(j journey, md mapMetadata) []error {
 	var errs []error
 	bad := func(format string, a ...any) {
@@ -223,11 +245,14 @@ func validateJourney(j journey, md mapMetadata) []error {
 		}
 		listed[s] = "nonCritical"
 	}
+	if !slices.Contains(j.Critical, entryService) {
+		bad("%s must be in critical: every step of every journey is a request to it", entryService)
+	}
 	if len(j.Results) == 0 {
 		bad("no results")
 	}
-	for s := range listed {
-		if _, ok := j.Results[s]; !ok {
+	for _, s := range append(slices.Clone(j.Critical), j.NonCritical...) {
+		if _, ok := j.Results[s]; !ok && s != entryService {
 			bad("%s is listed but has no result", s)
 		}
 	}
