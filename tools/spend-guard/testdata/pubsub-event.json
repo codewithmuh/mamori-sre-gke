@@ -1,0 +1,13 @@
+{
+  "message": {
+    "attributes": {
+      "billingAccountId": "01D4EE-079462-DFD6EC",
+      "budgetId": "de72f49d-779b-4945-a127-4d6ce8def0bb",
+      "schemaVersion": "1.0"
+    },
+    "data": "ewogICJidWRnZXREaXNwbGF5TmFtZSI6ICJtYW1vcmktbGFiIiwKICAiYWxlcnRUaHJlc2hvbGRFeGNlZWRlZCI6IDEuMCwKICAiY29zdEFtb3VudCI6IDIwMS4zNywKICAiY29zdEludGVydmFsU3RhcnQiOiAiMjAyNi0xMi0wMVQwODowMDowMFoiLAogICJidWRnZXRBbW91bnQiOiAyMDAuMCwKICAiYnVkZ2V0QW1vdW50VHlwZSI6ICJTUEVDSUZJRURfQU1PVU5UIiwKICAiY3VycmVuY3lDb2RlIjogIlVTRCIKfQo=",
+    "messageId": "17393460588213456",
+    "publishTime": "2026-12-28T04:12:31.417Z"
+  },
+  "subscription": "projects/mamori-lab-123456/subscriptions/eventarc-asia-northeast1-spend-guard-123456-sub-123"
+}
