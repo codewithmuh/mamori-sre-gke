@@ -20,20 +20,22 @@ pain, a practiced incident response, and an incident agent that helps without be
 
 ## Critical user journeys (CUJs)
 
-The first three are fixed by [PLAN.md](../PLAN.md) section 4; the fourth is optional. The frontend paths are
-Online Boutique's own.
+[PLAN.md](../PLAN.md) section 4 fixes the first three and allows a fourth; the prober (#16) runs all four. The
+frontend paths are Online Boutique's own.
 
 | CUJ | What the shopper does | Frontend requests |
 |---|---|---|
 | **CUJ-1 Browse** | Opens the home page, then a product page | `GET /`, `GET /product/{id}` |
 | **CUJ-2 Add to cart** | Adds a product to the cart | `POST /cart` (redirects to the cart page) |
 | **CUJ-3 Checkout** | Places an order with the demo's pre-filled fake card | `POST /cart/checkout` |
-| **CUJ-4 View cart** (maybe) | Looks at the cart, with shipping cost and recommendations | `GET /cart` |
+| **CUJ-4 View cart** | Looks at the cart, with shipping cost and recommendations | `GET /cart` |
 
-Which backend services each journey truly depends on is **not** written down by hand. The M2 discovery run (D4)
-breaks one upstream gRPC service at a time with Istio while journey tests run; the services whose failure breaks a
-journey are its *critical* dependencies. The result is a generated `cuj-map.yaml`. A dependency that turns out to be
-critical but shouldn't be becomes hardening work in M4.
+Which backend services each journey truly depends on is **not** written down by hand. The M2 discovery run (D4,
+`tools/cuj-discovery`) breaks one upstream service at a time (an Istio abort; `redis-cart`, which is plain TCP, is
+scaled to zero) and runs every journey through the prober's on-demand API; the services whose failure breaks a
+journey are its *critical* dependencies. The result is a generated `slo/cuj-map.yaml`
+([method](slo/cuj-discovery.md)). A dependency that turns out to be critical but shouldn't be becomes hardening work
+in M4.
 
 ### Starting SLO targets (provisional)
 
@@ -81,9 +83,10 @@ During the 14-day Datadog window (M3), Datadog synthetics add a third view from 
 M2 writes the full policy. The outline:
 
 - **Budget:** 1 − target, per journey, over the rolling 28 days.
-- **Alerts:** burn-rate alerts on each journey's budget. A fast burn pages the on-call phone; a slow burn notifies
-  without paging. Google's suggested starting points are about 10× burn over 1–2 hours (fast) and about 2× over
-  24 hours (slow) ([research](cost-and-tooling-research.md)); M2 sets the exact windows.
+- **Alerts:** burn-rate alerts on each journey's budget. A fast burn of a prober SLO pages the on-call phone; mesh
+  SLOs and slow burns notify without paging, so junk public traffic can't page anyone. Google's suggested starting
+  points are about 10× burn over 1–2 hours (fast) and about 2× over 24 hours (slow)
+  ([research](cost-and-tooling-research.md)); M2 sets the exact windows.
 - **Budget left:** normal work. Changes and game days go ahead.
 - **Budget spent for a journey:** no game days and no risky changes that touch that journey until its budget is back
   above zero. Postmortem follow-ups come first. Exceptions: security fixes, cost fixes, and changes that stop the

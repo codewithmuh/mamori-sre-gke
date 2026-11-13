@@ -17,7 +17,10 @@ Every change, including the maintainer's own, follows the same path.
    `feat/6-terraform-foundation` or `docs/4-project-plan`. Never commit to `main` directly.
 4. **Conventional Commits that reference the issue**, for example `feat: add the spend-guard function (#7)`. Types:
    `feat`, `fix`, `docs`, `ci`, `refactor`, `test`, `chore`, `ops`.
-5. **Run `make check` before pushing.** It runs the same lint and tests as CI.
+5. **Run `make check` before pushing.** It runs the same lint and tests as the required `CI result` check. The
+   agent, its evaluation harness and the generated SLO files have their own workflows outside `CI result`
+   (`agent.yml`, `evals.yml`, `slo.yml`); if you touch them, also run `make agent-check`, `make evals-check` or
+   `make slo-check`.
 6. **Open a pull request** that closes the issue (`Closes #7`) and says:
    - **What changed**, and why.
    - **How it was tested**: commands and results. For anything that touches Google Cloud, include the `terraform

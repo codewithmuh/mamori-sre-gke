@@ -12,11 +12,11 @@ milestone that adds it (plan, not fact).
 | Component | What it does | Where it runs | Arrives |
 |---|---|---|---|
 | GitHub monorepo | `infra/`, `deploy/`, `tools/` (Go), later `agent/` and `services/` (the fork) | GitHub | M0 |
-| CI (GitHub Actions) | Checks every PR (one required check, `CI result`); Terraform plan on PR posted as a sticky comment; apply by hand behind the protected `lab` environment; keyless via Workload Identity Federation | GitHub | M1 |
+| CI (GitHub Actions) | Checks every PR (one required check, `CI result`); `agent.yml`, `evals.yml` and `slo.yml` run as separate workflows outside `CI result`; Terraform plan on PR posted as a sticky comment; apply by hand behind the protected `lab` environment; keyless via Workload Identity Federation | GitHub | M1 |
 | Network | VPC `mamori-vpc`, subnet `mamori-tokyo`, Cloud NAT `mamori-nat`; nodes have no public IPs | Google Cloud | M1 |
 | GKE Standard cluster `mamori` | Zonal (`asia-northeast1-a`), REGULAR channel, Workload Identity, Gateway API, Managed Service for Prometheus | Google Cloud | M1 |
 | Node pool `spot-pool` | 3 × e2-standard-2 Spot, fixed size in M1 | Google Cloud | M1 |
-| Artifact Registry `mamori` | Images for our own tools and the forked services, with a cleanup policy | Google Cloud | M1 |
+| Artifact Registry `mamori` | Images for our own tools and the forked services, with a cleanup policy and immutable tags; created in `infra/bootstrap`, so it survives `make down` | Google Cloud | M1 |
 | Edge | GKE Gateway → global external Application Load Balancer, Cloud Armor rate limits, Certificate Manager certificate | Google Cloud | M1 |
 | Argo CD | GitOps: app-of-apps `root` syncs `deploy/apps` from `main` | `argocd` | M1 |
 | Istio | Sidecars, ingress gateway, traffic control, fault injection, request metrics | `istio-system`, `istio-ingress` | M1 |
@@ -57,7 +57,8 @@ global external Application Load Balancer, created by the GKE Gateway mamori-fro
   · Cloud Armor mamori-frontend-armor: per-client-IP rate limit, 429 above it, otherwise allow
   ▼  container-native load balancing (NEGs) straight to pods; health check from a HealthCheckPolicy
 Istio ingress gateway pods (namespace istio-ingress)
-  ▼  Istio Gateway + VirtualService from Online Boutique's Istio component
+  ▼  Istio Gateway frontend-public + VirtualService (deploy/online-boutique/public-*.yaml;
+     the Istio component's own Gateway is deleted)
 frontend (Go, HTTP)  ◀── Locust load generator calls frontend:80 directly, skipping the edge
   ▼  gRPC through Envoy sidecars
 product catalog · currency · cart (→ redis-cart) · recommendation · ad · shipping
@@ -75,13 +76,14 @@ checkout (→ cart, product catalog, currency, shipping, payment, email)
 Envoy sidecars, app metrics ─┐
 CUJ prober (M2) ─────────────┴─▶ Managed Service for Prometheus ─▶ Cloud Monitoring
                                                                    ├─ recording rules, dashboards
-                                                                   └─ SLOs, burn-rate alerts ─┐
-services (OpenTelemetry) ─▶ OTel Collector ─▶ Cloud Trace                                     │
-container stdout ─▶ GKE logging agent ─▶ Cloud Logging                                        │
-Datadog Agent (M3 window) ─▶ Datadog SLOs, monitors, synthetics ──────────────────────────────┤
-                                                                                              ▼
-                                                                                     PagerDuty ─▶ phone
-                                                                                     (from M5, also the agent's webhook)
+                                                                   └─ SLOs, burn-rate alerts
+                                                                      ├─ page tier ─▶ PagerDuty ─▶ phone
+                                                                      ├─ every alert ─▶ email
+                                                                      └─ every alert ─▶ Pub/Sub incident-alerts
+                                                                         └▶ agent pulls mamori-agent-incidents (M5)
+services (OpenTelemetry) ─▶ OTel Collector (traces only) ─▶ Cloud Trace
+container stdout ─▶ GKE logging agent ─▶ Cloud Logging
+Datadog Agent (M3 window) ─▶ Datadog monitors, SLOs, synthetics ─▶ Slack or email, never pages
 ```
 
 - **SLIs** come from sidecar metrics (`istio_requests_total`, `istio_request_duration_milliseconds`) and the prober;
@@ -100,7 +102,7 @@ Datadog Agent (M3 window) ─▶ Datadog SLOs, monitors, synthetics ────
 
 | What changes | Path | Rollback |
 |---|---|---|
-| Kubernetes config and app versions (`deploy/`) | PR → CI renders and validates manifests → review → squash merge to `main` → Argo CD `root` syncs the child apps in sync-wave order: Istio base, istiod, Istio ingress gateway, Online Boutique, edge | Revert the commit; Argo CD syncs the revert |
+| Kubernetes config and app versions (`deploy/`) | PR → CI renders and validates manifests → review → squash merge to `main` → Argo CD `root` syncs the child apps in sync-wave order: Istio base (0), istiod (1), Istio ingress gateway (2), Online Boutique (3), edge (4); `prober`, `observability`, `chaos-mesh`, `gatekeeper` (5); `slo`, `policy`, `resilience` (6); `agent`, `executor` (7) | Revert the commit; Argo CD syncs the revert |
 | Our images (`tools/`, later `services/`) | PR → CI tests → image built and pushed to Artifact Registry `mamori` → a version bump in `deploy/` → Argo CD | Revert the version bump |
 | Infrastructure (`infra/envs/lab`) | PR → CI authenticates through Workload Identity Federation as `tf-plan` (read-only; plans run without taking the state lock) → `terraform plan` posted as one sticky PR comment (fork and Dependabot PRs skip this job) → review → merge → `terraform-apply.yml`, started by hand (`workflow_dispatch`) from `main`: a preview plan as `tf-plan` in the job summary, then approval on the protected GitHub environment `lab`, the only place that can impersonate `tf-apply`, which plans again and applies that plan | Revert and apply again |
 | Bootstrap (`infra/bootstrap`) | Applied once by hand with the maintainer's own credentials and local state; it creates the state bucket and the CI identity | By hand |
@@ -132,8 +134,9 @@ Open points, decided before the milestone that needs them:
 
 - **No keys anywhere.** CI reaches Google Cloud only through Workload Identity Federation: pool `github`, provider
   `github-actions`, accepting tokens only for the repository `codewithmuh/mamori-sre-gke`. Any branch or PR may use
-  `tf-plan` (read-only, plus what state locking needs); fork and Dependabot PRs skip the plan job. Only the protected GitHub environment `lab` may use
-  `tf-apply`, which holds the narrowest set of roles that can apply the lab, each one explained in `infra/`.
+  `tf-plan` (read-only, plus what state locking needs); fork and Dependabot PRs skip the plan job. Only the
+  protected GitHub environment `lab` may use `tf-apply`, which holds the narrowest set of roles that can apply the
+  lab, each one explained in `infra/`.
 - **Workloads use Workload Identity for GKE.** Each Kubernetes service account that needs Google Cloud access maps to
   its own IAM identity. Nodes run as `gke-nodes`, with minimal roles.
 - **Private nodes.** No public IPs on nodes; outbound traffic goes through Cloud NAT. Whether the control-plane
@@ -143,8 +146,9 @@ Open points, decided before the milestone that needs them:
 - **The demo can't take money.** A banner on every page; checkout keeps the demo's pre-filled fake card; no accounts.
 - **The agent cannot write (D9).** The agent's identity has read-only Kubernetes RBAC and read-only Google Cloud
   roles, plus the right to call Claude on Vertex AI. It can only propose. The executor is a separate Go program with
-  its own identity and narrow RBAC. It runs one allow-listed action per incident (rollback, scale within bounds,
-  restart, remove a fault rule) after a human approves in Slack, writes an audit log, and has a kill switch. The
+  its own identity and narrow RBAC. It runs one allow-listed action per incident (restart, scale within bounds,
+  remove a fault object) after a human approves in Slack, writes an audit log, and has a kill switch. A rollback is
+  not one of them: it is a Git revert done by a person, since Argo CD's self-heal undoes rollbacks on the cluster. The
   guardrails sit in RBAC and code, not in the prompt.
 - **The spend guard can only shrink.** Its service account `spend-guard` has a custom role that reads the cluster and
   node pool and changes the pool's size and autoscaling, nothing else.
@@ -158,13 +162,16 @@ Estimates and the full table are in [PLAN.md](../PLAN.md) section 6: about $150�
 - **Cheap by design:** a zonal cluster (its fee is covered by the free tier), Spot nodes only, e2-standard-2,
   30 GB pd-standard disks, a fixed-size pool, an Artifact Registry cleanup policy, and a small metric volume.
 - **Budget:** `mamori-lab`, default $200 a month (`monthly_budget_usd`), alerts at 50/90/100 % of actual spend.
-  Credits are excluded, so it tracks gross cost. Until the account is upgraded at the start of M5, the budget stays
-  below the trial credit (D12).
+  It subtracts free-tier credits (so the free cluster fee doesn't count) but not the trial credit, so it tracks real
+  spend. Until the account is upgraded at the start of M5, the budget stays below the trial credit (D12).
 - **Spend guard:** at 100 % the `spend-guard` function turns node autoscaling off if it is on and sets `spot-pool` to
   zero nodes. It deletes nothing; `make resume` brings the nodes back, but only after the budget is raised or the
   next month starts, or the guard fires again within hours. It has a dry-run mode. Billing data arrives
   with a delay, so the guard limits spend; it does not stop it instantly. Runbook:
   [runbooks/spend-guard.md](runbooks/spend-guard.md).
+- **Edge cost:** Cloud Armor and load-balancer logging bill every request, denied ones included, and the spend guard
+  can't stop them. Denied requests are mostly excluded from logging, a request-count alert fires early, and
+  `make edge-off` removes the public entry ([PLAN.md](../PLAN.md) section 6).
 - **Teardown:** `make down` removes the Gateway first, because the Gateway controller would otherwise leave billable
   load-balancer pieces behind, then destroys everything and fails if anything billable is left.
 - **Measure, then replace estimates:** cost per day measured in M1 (#15); Infracost replaces the list-price estimates.
@@ -190,7 +197,7 @@ Fixed names, so the branches built in parallel fit together.
 | Public hostname | Variable `frontend_hostname`, default `mamori.codewithmuh.com` |
 | Budget | `mamori-lab`, variable `monthly_budget_usd` (default 200); Pub/Sub topic `budget-alerts` |
 | Spend guard | Cloud Run function `spend-guard`, entry point `ScaleToZero`, service account `spend-guard`; variable `spend_guard_dry_run` |
-| Namespaces | `argocd`, `istio-system`, `istio-ingress`, `boutique` |
+| Namespaces | `argocd`, `istio-system`, `istio-ingress`, `boutique`, `prober`, `observability`, `chaos-mesh`, `mamori-agent`, `gatekeeper-system`, `loadtest` (capacity tests only), `datadog` (14-day window only) |
 | Argo CD | Root Application `root` → `deploy/apps` on `main` |
 | Gateway | `mamori-frontend`, class `gke-l7-global-external-managed` |
 | Local config for `make` | `PROJECT_ID`, `ZONE`, `TF_STATE_BUCKET`, `FRONTEND_HOSTNAME`, `BILLING_ACCOUNT_ID` (environment or a gitignored `.env`) |

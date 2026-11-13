@@ -46,21 +46,26 @@ GCP project (asia-northeast1)                           ▼
           │           ▲ faults: Istio aborts/delays · Chaos Mesh · Spot preemption
           │           ▲ users: mamori.codewithmuh.com ─ load balancer + Cloud Armor rate limits
           │
-          ├─ OTel Collector ─▶ Managed Prometheus · Cloud Trace · Cloud Logging
-          │                     └▶ Cloud Monitoring SLOs + burn-rate alerts ─┐
-          ├─ Datadog Agent (14-day window) ─▶ Datadog SLOs, monitors, synth ─┤
-          │                                                                  ▼
-          ├─ Gatekeeper (readiness policies) ─▶ weekly evidence bundle   PagerDuty ─▶ phone
-          │                                                                  │
-          └─ AI incident agent (Python) ◀── alert webhook ───────────────────┘
+          ├─ OTel Collector (traces only) ─▶ Cloud Trace
+          ├─ container logs ─▶ Cloud Logging
+          ├─ Managed Prometheus ─▶ Cloud Monitoring SLOs + burn-rate alerts
+          │                        ├─ page tier ─▶ PagerDuty ─▶ phone
+          │                        ├─ every alert ─▶ email
+          │                        └─ every alert ─▶ Pub/Sub incident-alerts ─┐
+          ├─ Datadog Agent (14-day window) ─▶ monitors, SLOs, synthetics      │
+          │      └▶ Slack or email, never pages                               │
+          ├─ Gatekeeper (readiness policies) ─▶ weekly evidence bundle        │
+          │                                                                   │
+          └─ AI incident agent (Python) ◀── pulls mamori-agent-incidents ─────┘
                │ read-only tools: PromQL, Logging, Trace, kubectl get/describe/logs,
                │ Argo CD history, Istio config, past postmortems
                │ model: Claude on Vertex AI (Workload Identity)
                ▼
              Slack: impact summary, ranked RCA, proposed action ─▶ human approves
                ▼
-             Executor (Go, narrow RBAC): rollback · scale within bounds · restart ·
-             remove a fault rule. One action per incident, audit-logged, kill switch.
+             Executor (Go, narrow RBAC): restart · scale within bounds · remove a fault
+             object. A rollback is a Git revert done by a person. One action per
+             incident, audit-logged, kill switch.
 ```
 
 ## Repository layout
