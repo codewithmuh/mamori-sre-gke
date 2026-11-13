@@ -8,6 +8,12 @@
 #   frontend DestinationRule (destination-rules.yaml) requests in flight to the frontend: concurrency
 # The in-cluster load generator calls the frontend Service directly, so it is never limited here.
 #
+# Only the public listener is limited. Both patches below match port 80 only: the gateway listener
+# the GKE load balancer sends traffic to, and its route table (`http.80`). The cluster-internal
+# port 8080 that #8 adds for the prober and load tests is a separate Envoy listener with its own
+# route table (`http.8080`), so in-cluster probes and load tests are never throttled. Keep it that
+# way: never widen the match to all ports.
+#
 # Istio 1.31 has no first-class API for local rate limits; its own docs use an EnvoyFilter, as here.
 # EnvoyFilter is low-level: re-check this file on every Istio upgrade (`istioctl analyze`, and the
 # stats below).
@@ -23,8 +29,9 @@
 # skip is keyed to the route name `static` in deploy/online-boutique/public-virtualservice.yaml. If
 # that route is missing or renamed, static files simply count against the limit (safe, not open).
 #
-# Turn enforcement off for a test without touching Git or Argo CD (Envoy runtime, reset when the pod
-# restarts), e.g. while the capacity test looks for the knee:
+# The capacity test finds the knee on port 8080, outside this limit. To compare port 80 with and
+# without shedding (docs/resilience/experiments.md, E7), turn enforcement off without touching Git or
+# Argo CD (Envoy runtime, reset when the pod restarts):
 #   kubectl -n istio-ingress exec deploy/istio-ingressgateway -c istio-proxy -- \
 #     pilot-agent request POST 'runtime_modify?ingress_local_rate_limit_enforced=0'
 # Back on with `=100`. While enforcement is off, the filter still counts the requests it would have
@@ -43,8 +50,8 @@ spec:
     labels:
       istio: ingressgateway
   configPatches:
-    # 1. Add the filter to the gateway's plain-HTTP listener (port 80, where the GKE load balancer
-    #    sends traffic), just before the router.
+    # 1. Add the filter to the gateway's public plain-HTTP listener (port 80, where the GKE load
+    #    balancer sends traffic), just before the router. Port 80 only: see the header.
     - applyTo: HTTP_FILTER
       match:
         context: GATEWAY

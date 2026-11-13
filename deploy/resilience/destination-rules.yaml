@@ -9,39 +9,49 @@
 # ISTIO_MUTUAL here would change nothing today, and would break calls to any pod that one day runs
 # without a sidecar.
 #
-# The common profile for the nine gRPC services (all values are starting estimates):
+# The common profile (all values are starting estimates):
 #   connectTimeout 1s          Istio's default is 10 s. In-cluster connects take milliseconds; a pod IP
 #                              that has gone away should fail fast and be retried on another pod.
+#   tcpKeepalive 30s/10s x 3   TCP keepalive on idle connections, so one to a pod that vanished (node
+#                              lost, network cut) is found dead in about a minute, not the kernel's two
+#                              hours. Kernel-level: the apps never see it. (Not HTTP/2 PINGs: Istio
+#                              applies a DestinationRule's connectionPool to the server's own sidecar
+#                              too, which would then ping its gRPC app; gRPC servers allow one ping per
+#                              5 minutes without data and answer more with GOAWAY "too_many_pings".)
 #   http2MaxRequests 100       At most 100 calls in flight from one client pod to this service, and
 #   http1MaxPendingRequests 50 50 waiting for a connection. Beyond that the call fails at once (503,
 #                              flag UO) instead of piling up behind a slow service. About 10x the
 #                              in-flight calls expected at the capacity limit (estimate, #29 measures it).
-#   http2KeepAlive 10s / 3s    An HTTP/2 PING every 10 s, so a connection to a pod that vanished (node
-#                              lost, network cut) is closed in about 13 s, not hours.
+#                              Istio applies the same caps on the server's own sidecar (inbound), there
+#                              for all callers together.
 #   retryBudget 10 % / min 3   Retries in flight may be at most 10 % of active requests (never fewer
 #                              than 3), so retries cannot multiply load during a broad failure. Without
 #                              it Istio allows 2^32-1 concurrent retries. Envoy uses the budget instead
 #                              of the fixed `maxRetries` circuit breaker, so `maxRetries` is not set.
-#   outlierDetection           Eject a pod after 3 gateway errors in a row (connect failure, reset,
-#                              timeout, 502/503/504; gRPC UNAVAILABLE and DEADLINE_EXCEEDED map to 503
-#                              and 504), the signs of a sick pod. Leaf services are also ejected after
-#                              5 errors of any 5xx kind in a row. Services that call others (frontend,
-#                              checkoutservice, recommendationservice) are not (consecutive5xxErrors: 0;
-#                              leaving it out would keep Envoy's default of 5): their 500s usually mean
-#                              a dependency failed, and ejecting a healthy pod for that only moves load.
+#   outlierDetection           Leaf services: eject a pod after 3 gateway errors in a row (connect
+#                              failure, reset, timeout, 502/503/504; gRPC UNAVAILABLE and
+#                              DEADLINE_EXCEEDED map to 503 and 504) or 5 errors of any 5xx kind.
 #                              gRPC errors count when the server sends them trailers-only, the normal
-#                              case for these unary calls. Ejection lasts 30 s, longer each time it
-#                              repeats, and never covers more than half of the pods. minHealthPercent
-#                              50: below half healthy, Envoy ignores ejections (panic mode), so a
-#                              single-replica service is never ejected into a total outage.
-#                              Istio-injected aborts happen before routing and never count.
+#                              case for these unary calls.
+#                              Services that call others (frontend, checkoutservice,
+#                              recommendationservice): only failures to reach the pod itself count
+#                              (splitExternalLocalOriginErrors, 3 connect failures or timeouts in a
+#                              row). Their error responses, UNAVAILABLE included, usually mean a
+#                              dependency failed: checkoutservice answers UNAVAILABLE when shipping
+#                              fails. Ejecting a healthy pod for that only moves its load.
+#                              Ejection lasts 30 s, longer each time it repeats, and never covers more
+#                              than half of the pods. minHealthPercent 50: below half healthy, Envoy
+#                              ignores ejections (panic mode), so a single-replica service is never
+#                              ejected into a total outage. Istio-injected aborts happen before
+#                              routing and never count.
 ---
-# The frontend, as seen by the ingress gateway (public traffic and the prober) and the load generator.
-# It speaks HTTP/1.1 (Service port "http"), one request per connection at a time, so maxConnections
-# caps the requests in flight from one client pod. Past 100 in flight and 50 queued, the gateway
-# answers 503 at once instead of queueing more work for a frontend that is already behind: a second
-# load-shedding layer, by concurrency, behind the rate limit in ingress-rate-limit.yaml. The retry
-# budget caps the edge retries set in deploy/online-boutique/public-virtualservice.yaml.
+# The frontend, as seen by the ingress gateway (public traffic, the prober, load tests) and the load
+# generator. It speaks HTTP/1.1 (Service port "http"), one request per connection at a time, so
+# maxConnections caps the requests in flight from one client pod. Past 100 in flight and 50 queued,
+# the gateway answers 503 at once instead of queueing more work for a frontend that is already behind:
+# a second load-shedding layer, by concurrency, behind the rate limit in ingress-rate-limit.yaml. The
+# frontend's own sidecar applies the same caps to all callers together. The retry budget caps the
+# edge retries set in deploy/online-boutique/public-virtualservice.yaml.
 apiVersion: networking.istio.io/v1
 kind: DestinationRule
 metadata:
@@ -55,6 +65,10 @@ spec:
     connectionPool:
       tcp:
         connectTimeout: 1s
+        tcpKeepalive:
+          time: 30s
+          interval: 10s
+          probes: 3
         maxConnections: 100
       http:
         http2MaxRequests: 100
@@ -64,7 +78,9 @@ spec:
       minRetryConcurrency: 3
     outlierDetection:
       consecutive5xxErrors: 0
-      consecutiveGatewayErrors: 3
+      consecutiveGatewayErrors: 0
+      splitExternalLocalOriginErrors: true
+      consecutiveLocalOriginFailures: 3
       interval: 10s
       baseEjectionTime: 30s
       maxEjectionPercent: 50
@@ -84,12 +100,13 @@ spec:
     connectionPool:
       tcp:
         connectTimeout: 1s
+        tcpKeepalive:
+          time: 30s
+          interval: 10s
+          probes: 3
       http:
         http2MaxRequests: 100
         http1MaxPendingRequests: 50
-        http2KeepAlive:
-          interval: 10s
-          timeout: 3s
     retryBudget:
       percent: 10
       minRetryConcurrency: 3
@@ -115,12 +132,13 @@ spec:
     connectionPool:
       tcp:
         connectTimeout: 1s
+        tcpKeepalive:
+          time: 30s
+          interval: 10s
+          probes: 3
       http:
         http2MaxRequests: 100
         http1MaxPendingRequests: 50
-        http2KeepAlive:
-          interval: 10s
-          timeout: 3s
     retryBudget:
       percent: 10
       minRetryConcurrency: 3
@@ -146,18 +164,21 @@ spec:
     connectionPool:
       tcp:
         connectTimeout: 1s
+        tcpKeepalive:
+          time: 30s
+          interval: 10s
+          probes: 3
       http:
         http2MaxRequests: 100
         http1MaxPendingRequests: 50
-        http2KeepAlive:
-          interval: 10s
-          timeout: 3s
     retryBudget:
       percent: 10
       minRetryConcurrency: 3
     outlierDetection:
       consecutive5xxErrors: 0
-      consecutiveGatewayErrors: 3
+      consecutiveGatewayErrors: 0
+      splitExternalLocalOriginErrors: true
+      consecutiveLocalOriginFailures: 3
       interval: 10s
       baseEjectionTime: 30s
       maxEjectionPercent: 50
@@ -177,12 +198,13 @@ spec:
     connectionPool:
       tcp:
         connectTimeout: 1s
+        tcpKeepalive:
+          time: 30s
+          interval: 10s
+          probes: 3
       http:
         http2MaxRequests: 100
         http1MaxPendingRequests: 50
-        http2KeepAlive:
-          interval: 10s
-          timeout: 3s
     retryBudget:
       percent: 10
       minRetryConcurrency: 3
@@ -208,12 +230,13 @@ spec:
     connectionPool:
       tcp:
         connectTimeout: 1s
+        tcpKeepalive:
+          time: 30s
+          interval: 10s
+          probes: 3
       http:
         http2MaxRequests: 100
         http1MaxPendingRequests: 50
-        http2KeepAlive:
-          interval: 10s
-          timeout: 3s
     retryBudget:
       percent: 10
       minRetryConcurrency: 3
@@ -239,12 +262,13 @@ spec:
     connectionPool:
       tcp:
         connectTimeout: 1s
+        tcpKeepalive:
+          time: 30s
+          interval: 10s
+          probes: 3
       http:
         http2MaxRequests: 100
         http1MaxPendingRequests: 50
-        http2KeepAlive:
-          interval: 10s
-          timeout: 3s
     retryBudget:
       percent: 10
       minRetryConcurrency: 3
@@ -270,12 +294,13 @@ spec:
     connectionPool:
       tcp:
         connectTimeout: 1s
+        tcpKeepalive:
+          time: 30s
+          interval: 10s
+          probes: 3
       http:
         http2MaxRequests: 100
         http1MaxPendingRequests: 50
-        http2KeepAlive:
-          interval: 10s
-          timeout: 3s
     retryBudget:
       percent: 10
       minRetryConcurrency: 3
@@ -301,18 +326,21 @@ spec:
     connectionPool:
       tcp:
         connectTimeout: 1s
+        tcpKeepalive:
+          time: 30s
+          interval: 10s
+          probes: 3
       http:
         http2MaxRequests: 100
         http1MaxPendingRequests: 50
-        http2KeepAlive:
-          interval: 10s
-          timeout: 3s
     retryBudget:
       percent: 10
       minRetryConcurrency: 3
     outlierDetection:
       consecutive5xxErrors: 0
-      consecutiveGatewayErrors: 3
+      consecutiveGatewayErrors: 0
+      splitExternalLocalOriginErrors: true
+      consecutiveLocalOriginFailures: 3
       interval: 10s
       baseEjectionTime: 30s
       maxEjectionPercent: 50
@@ -332,12 +360,13 @@ spec:
     connectionPool:
       tcp:
         connectTimeout: 1s
+        tcpKeepalive:
+          time: 30s
+          interval: 10s
+          probes: 3
       http:
         http2MaxRequests: 100
         http1MaxPendingRequests: 50
-        http2KeepAlive:
-          interval: 10s
-          timeout: 3s
     retryBudget:
       percent: 10
       minRetryConcurrency: 3

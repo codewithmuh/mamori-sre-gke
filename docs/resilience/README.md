@@ -6,8 +6,8 @@ faults in the game-day library. Numbers move from "estimate" to "measured" only 
 
 What this adds to the shop (Online Boutique v0.10.7 with Istio 1.31.4):
 
-- **DestinationRules** for every boutique host: retry budgets, connection-pool limits, connect timeouts, HTTP/2 and
-  TCP keepalive, outlier detection.
+- **DestinationRules** for every boutique host: retry budgets, connection-pool limits, connect timeouts, TCP
+  keepalive, outlier detection.
 - **Edge timeouts and retries** on the public route (gateway → frontend), split into static files, page reads and
   writes.
 - **A safe mesh-wide default retry policy**: retry a call only when it cannot have reached the service.
@@ -25,7 +25,7 @@ What this adds to the shop (Online Boutique v0.10.7 with Istio 1.31.4):
 | `deploy/resilience/horizontal-pod-autoscalers.yaml` | 4 HPAs: frontend, currencyservice, productcatalogservice, recommendationservice |
 | `deploy/resilience/ingress-rate-limit.yaml` | EnvoyFilter `ingress-local-rate-limit` in `istio-ingress` |
 | `deploy/online-boutique/public-virtualservice.yaml` | Edge timeouts and retries. **Requested change** to a base file; #32 applies it |
-| `deploy/istio/istiod-values.yaml` | `meshConfig.defaultHttpRetryPolicy`, and `proxyStatsMatcher` for the counters that show these settings at work. **Requested change** to a base file |
+| `deploy/istio/istiod-values.yaml` | `meshConfig.defaultHttpRetryPolicy` (already in #32's integration tree), and `proxyStatsMatcher` for the counters that show these settings at work. **Requested change** to a base file |
 | `deploy/apps/online-boutique.yaml` | `ignoreDifferences` on Deployment replicas, so Argo CD leaves them to the HPAs. **Requested change** |
 
 The exact diffs for these three base files, plus small index and runbook edits, are in the #27 pull request; #32
@@ -106,9 +106,9 @@ added fault `F28-shipping-shiporder-abort` for it).
 | S2 | Edge retries | reads and static: 2 retries on `5xx` (includes connect failures, resets, per-try timeouts); writes: 2 retries on `connect-failure,refused-stream,reset-before-request` only | public route | E1, E3 |
 | S3 | Mesh default retry | 2 retries on `connect-failure,refused-stream,reset-before-request` | `meshConfig` | E3 |
 | S4 | Retry budget | retries in flight ≤ 10 % of active requests, never fewer than 3 | every HTTP and gRPC DestinationRule | E1 |
-| S5 | Connection pools | connect timeout 1 s; ≤ 100 calls in flight and ≤ 50 queued per client pod; frontend: ≤ 100 connections | every DestinationRule | E4, E5 |
-| S6 | HTTP/2 and TCP keepalive | gRPC: PING every 10 s, close after 3 s without an answer; redis-cart: TCP keepalive 30 s + 3 × 10 s | DestinationRules | E4, E9 |
-| S7 | Outlier detection | eject after 3 gateway errors in a row (leaf services also after 5 errors of any 5xx kind); 30 s, growing; ≤ 50 % of pods; off below 50 % healthy | DestinationRules except redis-cart | E4 |
+| S5 | Connection pools | connect timeout 1 s; ≤ 100 calls in flight and ≤ 50 queued per client pod, and again on the server's own sidecar for all callers together; frontend: ≤ 100 connections | every DestinationRule | E5 |
+| S6 | TCP keepalive | 30 s idle, then 3 probes 10 s apart: an idle connection to a vanished peer is closed in about a minute | every DestinationRule | E9 |
+| S7 | Outlier detection | leaf services: eject after 3 gateway errors or 5 errors of any 5xx kind in a row; services that call others: only after 3 failures to reach the pod in a row; 30 s, growing; ≤ 50 % of pods; off below 50 % healthy | DestinationRules except redis-cart | E4 |
 | S8 | PodDisruptionBudgets | `maxUnavailable: 1`, `unhealthyPodEvictionPolicy: AlwaysAllow` | 11 PDBs | E8 |
 | S9 | HPAs | app container CPU at 80 % of its request; frontend and currency 1–3, productcatalog and recommendation 1–2 | 4 HPAs | E6 |
 | S10 | Load shedding | 40 requests/s, bursts to 80, per gateway pod; static files exempt; 429 | EnvoyFilter | E7 |
@@ -146,25 +146,38 @@ In each DestinationRule. The file header in `destination-rules.yaml` explains ea
   Past that, the call fails at once (503, Envoy flag `UO`). The caps sit far above expected use (about 10× the
   calls in flight at the capacity limit, estimate), so they only trip when a service is badly behind. Then they
   keep a slow service from holding every goroutine and socket of its callers. For the frontend (HTTP/1.1), the same
-  caps bound the requests the gateway sends to it: a second, concurrency-based layer of load shedding.
+  caps bound the requests the gateway sends to it: a second, concurrency-based layer of load shedding. Istio also
+  applies a DestinationRule's `connectionPool` to the receiving pod's own sidecar (its inbound cluster; istiod
+  1.31.4 `cluster_builder.go`), so the same caps hold there for all callers together.
 - **Connect timeout 1 s** instead of Istio's 10 s: a pod IP that has gone away fails fast and the call is retried
   on another pod (`connect-failure` is always retried).
-- **HTTP/2 keepalive** (gRPC services) and **TCP keepalive** (redis-cart) find a connection to a vanished peer in
-  about 13 s and about 60 s. Without them, such a connection can hang until the kernel gives up, after hours.
-- **Outlier detection.** A pod is ejected after 3 gateway errors in a row: connect failure, reset, timeout, or
-  502/503/504. Those are the signs of a sick pod. Leaf services are also ejected after 5 errors of any 5xx kind
-  in a row. The three services that call others (frontend, checkoutservice, recommendationservice) are not
-  (`consecutive5xxErrors: 0`; leaving the field out would keep Envoy's default of 5). Their 500s usually mean a
-  dependency failed, and every pod fails the same way, so ejecting one only moves its load to the others. For gRPC,
+- **TCP keepalive** (30 s idle, then 3 probes 10 s apart) closes an idle connection to a vanished peer in about a
+  minute instead of the kernel's two hours. It is handled by the kernel, so the apps never see it. It does not
+  help a connection with calls in flight: those wait until the edge gives up on the page (6 s), and the connection
+  until TCP's retransmission timeout (up to about 15 minutes on Linux, estimate). A per-call deadline would fix
+  that, and it needs a VirtualService for the host, which is reserved for faults.
+  **Why not HTTP/2 PINGs** (`http2KeepAlive`): the inbound rule above means the server's own sidecar would also
+  ping its gRPC app. gRPC servers allow one ping per 5 minutes without data and answer more with GOAWAY
+  `too_many_pings`: connection churn, and noise in what the agent reads. Under CPU stress the ping timeout would
+  also turn slowness into resets.
+- **Outlier detection.** For the leaf services, a pod is ejected after 3 gateway errors in a row (connect failure,
+  reset, timeout, or 502/503/504: the signs of a sick pod), or after 5 errors of any 5xx kind in a row. For gRPC,
   Envoy turns a `grpc-status` in the response headers (a trailers-only error, what these unary services send) into
-  an HTTP code for this purpose (Envoy `router.cc`): UNAVAILABLE becomes 503, DEADLINE_EXCEEDED 504. Ejection lasts
+  an HTTP code for this purpose (Envoy `router.cc`): UNAVAILABLE becomes 503, DEADLINE_EXCEEDED 504.
+  The three services that call others (frontend, checkoutservice, recommendationservice) count only failures to
+  reach the pod itself: `splitExternalLocalOriginErrors: true` with `consecutiveLocalOriginFailures: 3`, and both
+  response-based counters at 0 (leaving a field out would keep an Envoy default). In split mode, Envoy counts
+  connect failures and timeouts as local-origin failures and every response as external (Envoy
+  `outlier_detection_impl.cc`). Their error responses usually mean a dependency failed. checkoutservice even
+  answers UNAVAILABLE (a gateway error) when shipping fails, so counting responses would eject healthy checkout
+  pods during a shipping fault, and every pod fails the same way. Ejection lasts
   30 s and grows each time. At most half of the pods are ejected, and with fewer than half healthy Envoy ignores
   ejections (`minHealthPercent: 50`, Envoy's panic threshold). So with one replica, outlier detection never acts:
   ejecting the only pod would turn some errors into all errors. It starts to matter when an HPA has scaled a
   service out, or in the HA option (E10). redis-cart has none: TCP, one stateful pod. One known weak spot: the
-  gateway's per-try timeout (3 s) counts as a gateway error against the frontend pod, even when a slow dependency
-  is to blame. With two or more frontend pods, a uniformly slow dependency can get one of them ejected for 30 s.
-  E2 watches for that.
+  gateway's per-try timeout (3 s) is a timeout, so it still counts as a local-origin failure against the frontend
+  pod, even when a slow dependency is to blame. With two or more frontend pods, a uniformly slow dependency can get
+  one of them ejected for 30 s. E2 watches for that.
 - **What Istio-injected faults cannot test.** Istio aborts and delays run in the calling sidecar's fault filter,
   before routing. They never reach the retry policy, the pools or outlier detection at that hop. Istio's docs say
   so for retries and timeouts ("timeouts or retries will not be enabled when faults are enabled on the client
@@ -220,18 +233,29 @@ An Envoy local rate limit (token bucket) on the ingress gateway's port-80 listen
 bursts to 80. Above that the gateway answers **429** at once, with header `x-local-rate-limit: true`, and the
 requests it lets through keep their latency.
 
+- **Public traffic only.** Port 80 is what the GKE load balancer sends to. Both EnvoyFilter patches match
+  `portNumber: 80` only: the HTTP filter on that listener, and the static-file exemption in its route table
+  (`http.80`). The cluster-internal port 8080 that #8 adds on the gateway, for the prober and load tests, is a
+  separate Envoy listener with its own route table (`http.8080`). So in-cluster probes and load tests are never
+  throttled, and they measure the shop rather than the limit. Never widen the match to all ports. Port 8080 is a
+  second server in the same Istio Gateway, and the public VirtualService binds that Gateway with no port match, so
+  the edge timeouts and retries (S1, S2) apply on 8080 too (confirmed with #8): probes get the same route policy
+  as users, only without the rate limit.
+
 - **Layers:** Cloud Armor limits each client IP at Google's edge (fairness). This filter limits the total entering
   the cluster (capacity). The frontend DestinationRule caps requests in flight (concurrency).
 - **Static files are exempt.** A browser fetches many per page and they cost the frontend almost nothing, so
   counting them would make the number mean nothing about load. The exemption follows the route name `static` on
   the public route. If that route is missing, static files count against the limit (safe, not open).
 - **The number is a placeholder.** It should be about 90 % of the highest rate that still meets the latency SLO
-  with the HPAs at their maximum. The capacity test (#29) finds that rate, with enforcement switched off (Envoy
-  runtime, no Git change; see the file header).
+  with the HPAs at their maximum. The capacity test (#29) finds that rate on port 8080, outside the limit. For a
+  with-and-without comparison on port 80 (E7), enforcement can be switched off through the Envoy runtime, with no
+  Git change (see the file header).
 - **One gateway replica** (`deploy/istio/gateway-values.yaml`), so this is the shop's total. With N replicas it
   would be N × 40/s.
-- **429 counts as a failure** in the CUJ SLIs. The prober records it as one, labelled "(gateway rate limit)"
-  (#16). Shedding does not make overload free. It turns a slow collapse for everyone into fast refusals for some.
+- **429 counts as a failure** for the users who get it, and in the Cloud Monitoring view of the edge. The prober
+  labels a 429 "(gateway rate limit)" (#16), but on port 8080 it never gets one. Shedding does not make overload
+  free. It turns a slow collapse for everyone into fast refusals for some.
 - **The in-cluster load generator** calls the frontend Service directly and is never limited here.
 - **EnvoyFilter** is Istio's documented way to do this in 1.31 (no first-class API). It exposes Envoy internals:
   re-check it on every Istio upgrade. `istioctl validate` warns about exactly that.
@@ -264,7 +288,7 @@ kubectl -n istio-ingress get envoyfilters.networking.istio.io
 # The policy Envoy actually got, as seen from the frontend's sidecar (cluster for productcatalogservice):
 kubectl -n boutique exec deploy/frontend -c istio-proxy -- \
   pilot-agent request GET 'config_dump?resource=dynamic_active_clusters&name_regex=.*productcatalogservice.*' \
-  | grep -E -A3 '"(circuit_breakers|retry_budget|outlier_detection|connect_timeout|connection_keepalive)"'
+  | grep -E -A3 '"(circuit_breakers|retry_budget|outlier_detection|connect_timeout|tcp_keepalive)"'
 
 # Counters: retries, retries refused by the budget, queue overflows, connect timeouts, ejections.
 # Istio creates these only with the requested proxyStatsMatcher (and after the proxy restarts).
@@ -298,7 +322,8 @@ and checked with `istioctl validate` 1.31.4. Still to confirm on the cluster:
 
 - that the gateway route names `static`, `reads`, `writes` reach Envoy as written (istiod 1.31.4 names a route after
   the VirtualService route's `name`, `route.go`), so the rate-limit exemption matches;
-- that `http2KeepAlive` lands on the gRPC clusters (istiod sets it only on clusters it already treats as HTTP/2);
+- that #8's internal port 8080 shows up as its own listener (`0.0.0.0_8080`, route table `http.8080`) without the
+  rate-limit filter, and with the three edge routes;
 - that `pilot-agent request POST runtime_modify` switches enforcement (Istio's bootstrap has an admin runtime layer);
 - that gRPC errors from these services arrive trailers-only, so outlier detection counts them;
 - that `istio_requests_total` at the gateway shows the 429s (response flag `RL`);

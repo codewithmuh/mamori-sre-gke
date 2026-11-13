@@ -11,7 +11,7 @@ predicted numbers in the hypotheses are estimates or my math.
 | E1 | S2 edge retries, S4 retry budget | F01-currency-abort; a 10 % variant (needed) | browse availability; frontend requests per gateway request |
 | E2 | S1 edge timeouts | F02-productcatalog-latency, F24-productcatalog-bad-canary | browse p95 and max; browse availability |
 | E3 | S3 mesh default retry, S2 for writes | F28-shipping-shiporder-abort; a currencyservice pod kill | Charge calls per order; browse availability |
-| E4 | S5 connect timeout, S6 keepalive, S7 outlier detection | one of two productcatalogservice pods cut off (needed) | browse availability and p95, minute by minute |
+| E4 | S7 outlier detection | the app in one of two productcatalogservice pods killed again and again (needed) | browse availability and p95, minute by minute |
 | E5 | S5 connection-pool limits | F06-recommendation-cpu-stress under load | browse and view-cart p95; pool overflows |
 | E6 | S9 HPAs | F06-recommendation-cpu-stress; a load ramp | p95; replicas; highest rate that holds the SLO |
 | E7 | S10 load shedding | overload at 1.5× and 3× capacity | p95 of admitted requests; 429 and 5xx shares |
@@ -38,11 +38,15 @@ predicted numbers in the hypotheses are estimates or my math.
 
 - The in-cluster load generator (10 users) runs as always. It calls the frontend directly, so it never meets the
   edge route or the rate limit.
-- **Measured traffic** comes from the prober's on-demand API (#16) through the public path, as a user's would.
-  This is the loop below. A minute-by-minute scheduled probe gives only 10 samples in a 10-minute fault, too few.
-- E5, E6 and E7 also need the capacity load test (#29) through the gateway, at multiples of the highest rate that
-  holds the SLO ("capacity" below; #29 measures it). The load test runs in the cluster and calls the gateway
+- **Measured traffic** comes from the prober's on-demand API (#16), sent through the Istio ingress gateway with the
+  public Host header, so it gets the same routes, timeouts and retries as a user's. This is the loop below. A
+  minute-by-minute scheduled probe gives only 10 samples in a 10-minute fault, too few.
+- E1, E5, E6 and E7 also need the capacity load test (#29) through the gateway, at multiples of the highest rate
+  that holds the SLO ("capacity" below; #29 measures it). The load test runs in the cluster and calls the gateway
   Service directly, so Cloud Armor's per-client limit does not cut it off.
+- **Which gateway port.** The rate limit (S10) covers only port 80, the public listener. The prober and the load
+  test use the cluster-internal port 8080 (#8) and are never limited, so in E1–E6 they measure the shop, not the
+  limit. Only E7 sends load to port 80 on purpose.
 
 ```bash
 # Drive on-demand probes for 20 minutes and keep every result. Run from a machine with kubectl access.
@@ -233,29 +237,40 @@ sum(increase(istio_requests_total{reporter="destination",destination_workload="p
 | currencyservice pod kill | browse availability | TBD (measured) | TBD (measured) | |
 | | browse p95 | TBD (measured) | TBD (measured) | |
 
-## E4. One bad pod out of two (S5 connect timeout, S6 keepalive, S7 outlier detection)
+## E4. One bad pod out of two (S7 outlier detection)
 
-**Hypothesis.** When one of two productcatalogservice pods stops answering the frontend while its readiness probe
-stays green, the DestinationRule gets it out of the way within about 30 s. Without it, about half of the pages hang
-or fail for the whole fault.
+**Hypothesis.** When the app in one of two productcatalogservice pods dies, its pod stays in the Service for up to
+about 30 s: the readiness probe (upstream defaults: every 10 s, 3 failures) has to notice first. During that
+window, the pod's own sidecar answers every call with UNAVAILABLE, because it cannot reach the app. With the
+DestinationRule, the calling sidecars eject that pod after 3 such errors in a row, well under a second at the
+lab's load, and send everything to the healthy pod. Without it, about half of the calls fail until readiness
+catches up.
 
-- Before (no DestinationRule): connects to the bad pod wait 10 s (Istio's default), the open HTTP/2 connection to it
-  hangs until the edge gives up, nothing is ejected.
-- After: the open connection is closed within about 13 s (PING every 10 s, 3 s to answer), new connects fail after
-  1 s and are retried on the other pod (`connect-failure` is always retried), and after 3 gateway errors in a row
-  the bad pod is ejected for 30 s, longer each time. Expect browse back above 99 % and p95 back under 500 ms within
-  about 30 s of the fault start (estimate).
+- Before (no DestinationRule): roughly half of the productcatalog calls fail for up to 30 s after each kill. Every
+  page makes one or more such calls, so most pages fail and are retried whole at the edge. With the safe mesh
+  default (S3), UNAVAILABLE from the pod is not retried at the call level.
+- After: the dead pod is ejected after 3 errors and stays out for 30 s, longer each time. Expect browse
+  availability during the fault close to its normal level, and p95 back under 500 ms (estimate).
 
 **Fault needed** (not in the library yet; requested from #23 through #32, since it needs two replicas): set the
-productcatalogservice HPA's minimum to 2 for the test, then a Chaos Mesh NetworkChaos `partition` between the
-frontend pods and one productcatalogservice pod. The kubelet still reaches the pod, so readiness stays green and
-Kubernetes keeps it in the Service. That is the case only outlier detection can handle.
+productcatalogservice HPA's minimum to 2 for the test, then kill the `server` container of one of the two pods
+again and again, for example once a minute for 10 minutes. The sidecar keeps running, so the pod stays Ready
+until the probe fails. Two ways to build it, per #23. One is several one-shot PodChaos `container-kill` objects,
+which add no new kind. The other is a Chaos Mesh `Schedule`, which is a new kind and must then be added in four
+places: gameday's allow-list (`faultKinds`), the executor's remove-fault RBAC (#25), the agent's read RBAC (#24),
+and the fault-reaper's Role and ValidatingAdmissionPolicy.
+
+A pod that is cut off from the network, rather than one whose app died, is a different case. Open HTTP/2
+connections to it hang with calls in flight, which counts as neither an error nor an idle connection. Only a
+per-call deadline (a VirtualService on the host, reserved for faults) or the edge giving up on the page ends them.
+These settings do not cover that case. Run it once as a control if the library gets a NetworkChaos `partition`
+fault.
 
 **Switch.** Delete the `productcatalogservice` DestinationRule.
 
 **Signals.** Browse availability and p95 per minute. On the frontend's sidecar, for
-`outbound|3550||productcatalogservice.boutique.svc.cluster.local`: `outlier_detection.ejections_enforced_total`,
-`upstream_cx_connect_timeout`, `upstream_cx_destroy_local_with_active_rq`.
+`outbound|3550||productcatalogservice.boutique.svc.cluster.local`: `outlier_detection.ejections_enforced_total`.
+Response code 200 with `grpc_response_status="14"` towards productcatalogservice in `istio_requests_total`.
 
 | Metric | Before | After | n, run ids |
 |---|---|---|---|
@@ -321,32 +336,40 @@ new pod Ready, CPU per container.
 
 ## E7. Load shedding (S10)
 
-**Hypothesis.** Above capacity, without shedding, everyone's requests slow down, timeouts and 5xx rise, and every
-journey fails. With shedding, the excess gets 429 within milliseconds, and the admitted requests keep their p95
-under 500 ms. At 1.5× capacity, with the limit at 90 % of capacity, about 40 % of requests are shed (1 − 0.9/1.5, my math). Journeys still fail when one of
-their requests draws a 429; that is the price, and it counts against the SLO.
+**Hypothesis.** Above capacity, without shedding, every request slows down, timeouts and 5xx rise, and the shop
+fails for everyone. With shedding, the excess gets 429 within milliseconds, the admitted requests keep their p95
+under 500 ms, and the shop behind the gateway stays healthy. At 1.5× capacity, with the limit at 90 % of capacity,
+about 40 % of requests are shed (1 − 0.9/1.5, my math). The users who draw a 429 still fail; that is the price.
 
-**Fault.** Not in the library: overload from the load test (#29) through the gateway at 1.5× and 3× capacity, with
-the limit first set from #29's result (README, S10).
+**Fault.** Not in the library: overload from the load test (#29) at 1.5× and 3× capacity, sent to the gateway's
+**port 80** (the public listener, the only one the limit covers). Set the limit from #29's result first (README,
+S10).
 
 **Switch.** Enforcement off through the Envoy runtime (table above). No Git change.
 
-**Signals.** Response-code mix at the gateway, p95 of the 200s:
+**Signals.**
 
-```promql
-histogram_quantile(0.95, sum by (le) (rate(istio_request_duration_milliseconds_bucket{reporter="source",source_workload="istio-ingressgateway",response_code="200"}[1m])))
-```
+- The overload's own view, at port 80: response-code mix and p95 of the 200s at the gateway. Port 8080 traffic
+  (the prober) is mixed into these metrics too, but it is small next to the overload.
 
-Plus `ingress_local_rate_limit.http_local_rate_limit.rate_limited` on the gateway. It also counts while enforcement
-is off, so the "before" run shows what would have been shed.
+  ```promql
+  histogram_quantile(0.95, sum by (le) (rate(istio_request_duration_milliseconds_bucket{reporter="source",source_workload="istio-ingressgateway",response_code="200"}[1m])))
+  ```
+
+- The shop behind the gateway: the prober on port 8080 is never shed. Its journeys show whether the shop stays
+  healthy (shedding on) or collapses (shedding off).
+- `ingress_local_rate_limit.http_local_rate_limit.rate_limited` on the gateway. It counts even while enforcement is
+  off, so the "before" run shows what would have been shed.
 
 | Run | Metric | Before | After | n, run ids |
 |---|---|---|---|---|
 | 1.5× capacity | p95 of admitted (200) requests | TBD (measured) | TBD (measured) | |
 | | share 429 / share 5xx | TBD (measured) | TBD (measured) | |
-| | browse and checkout availability (prober) | TBD (measured) | TBD (measured) | |
+| | browse and checkout availability (prober, port 8080) | TBD (measured) | TBD (measured) | |
+| | browse p95 (prober, port 8080) | TBD (measured) | TBD (measured) | |
 | 3× capacity | p95 of admitted (200) requests | TBD (measured) | TBD (measured) | |
 | | share 429 / share 5xx | TBD (measured) | TBD (measured) | |
+| | browse availability (prober, port 8080) | TBD (measured) | TBD (measured) | |
 
 ## E8. Disruption budgets (S8)
 
