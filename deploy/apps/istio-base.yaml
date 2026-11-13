@@ -1,0 +1,49 @@
+# Wave 0: Istio CRDs and the default-revision validating webhook.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: istio-base
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    - repoURL: https://blob.istio.io/istio-release/charts
+      chart: base
+      targetRevision: 1.31.4
+      helm:
+        releaseName: istio-base
+        valueFiles:
+          - $values/deploy/istio/base-values.yaml
+    - repoURL: https://github.com/codewithmuh/mamori-sre-gke.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: istio-system
+  # istiod switches the webhook to Fail and injects its CA once it is ready; that is not drift.
+  ignoreDifferences:
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.failurePolicy
+        - .webhooks[]?.clientConfig.caBundle
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    # Keep retrying a failed sync (see deploy/bootstrap/root-app.yaml for why).
+    retry:
+      limit: -1
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      # Some Istio CRDs are too large for the last-applied annotation of a client-side apply.
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true

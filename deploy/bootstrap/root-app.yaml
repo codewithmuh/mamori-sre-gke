@@ -1,0 +1,33 @@
+# The app of apps. `make up` applies this once after installing Argo CD; from then on Argo CD
+# syncs every Application in deploy/apps from main.
+# The finalizer makes `kubectl delete application root` cascade: the child Applications, and
+# through their own finalizers everything they deployed, are deleted too (used by `make down`).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/codewithmuh/mamori-sre-gke.git
+    targetRevision: main
+    path: deploy/apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    # Argo CD's automated sync does not run again for a commit whose sync failed. A child that is
+    # Degraded for a while (a Spot preemption, a slow init) would fail root's sync and leave it
+    # stuck, so the later waves would never be created. Retry forever instead, at most every 3 min.
+    retry:
+      limit: -1
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

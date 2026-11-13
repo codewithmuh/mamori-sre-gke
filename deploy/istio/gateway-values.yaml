@@ -1,0 +1,53 @@
+# Values for the Istio gateway chart (the mesh's ingress gateway), pinned in
+# deploy/apps/istio-ingressgateway.yaml.
+
+# This name gives the pods the labels app=istio-ingressgateway and istio=ingressgateway.
+# The Istio Gateway in deploy/online-boutique selects istio=ingressgateway, and the GKE HTTPRoute,
+# GCPBackendPolicy and HealthCheckPolicy in deploy/edge target the Service of the same name.
+name: istio-ingressgateway
+
+service:
+  # Never LoadBalancer: the GKE Gateway (deploy/edge) is the only public entry and reaches these
+  # pods through NEGs, which work with a ClusterIP Service.
+  type: ClusterIP
+  # The chart's three ports plus http-internal. Setting the list replaces the chart's, so all four
+  # are listed.
+  ports:
+    - name: status-port
+      port: 15021
+      protocol: TCP
+      targetPort: 15021
+    # Public traffic from the load balancer (the HTTPRoute in deploy/edge points here).
+    - name: http2
+      port: 80
+      protocol: TCP
+      targetPort: 80
+    - name: https
+      port: 443
+      protocol: TCP
+      targetPort: 443
+    # Cluster-internal entry for the prober and load tests. No HTTPRoute references it, so the GKE
+    # Gateway never builds a NEG for it and it is not reachable from outside. It skips the local
+    # rate limit that protects port 80, so synthetic traffic and the public cannot starve each other.
+    - name: http-internal
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+
+# deploy/platform/priorityclass.yaml: scheduled before (and may preempt) shop pods when nodes are
+# short of room.
+priorityClassName: mamori-platform
+
+# One replica for now. It is a single point of failure on Spot nodes; raising it (and adding a
+# PodDisruptionBudget) is a hardening task with a measured before/after, not a default.
+autoscaling:
+  enabled: false
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi

@@ -1,0 +1,32 @@
+# Wave 4: the public entry (deploy/edge). A GKE Gateway creates the global external Application
+# Load Balancer on the Terraform-made static IP, certificate map and Cloud Armor policy.
+# Last, so the load balancer only goes live once the shop behind it is healthy.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: edge
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/codewithmuh/mamori-sre-gke.git
+    targetRevision: main
+    path: deploy/edge
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: istio-ingress
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    # Keep retrying a failed sync (see deploy/bootstrap/root-app.yaml for why).
+    retry:
+      limit: -1
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

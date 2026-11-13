@@ -1,0 +1,31 @@
+# Mesh side of the public entry, part 1. The GKE load balancer (deploy/edge) sends plain HTTP to
+# the Istio ingress gateway pods on port 80. Port 8080 is the cluster-internal entry for the prober
+# and load tests (Service port http-internal, deploy/istio/gateway-values.yaml); it is never exposed
+# outside the cluster and is not rate limited. Both accept one host only, and the VirtualService
+# frontend-public routes both; requests for any other host get a 404 from Envoy.
+# If the hostname changes, change it here, in public-virtualservice.yaml and in
+# deploy/edge/httproute.yaml.
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: frontend-public
+spec:
+  # Labels the gateway chart puts on its pods (deploy/istio/gateway-values.yaml), in namespace
+  # istio-ingress. Istio matches Gateway selectors across namespaces by default.
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - mamori.codewithmuh.com
+    # Callers inside the cluster send Host: mamori.codewithmuh.com to
+    # http://istio-ingressgateway.istio-ingress.svc.cluster.local:8080
+    - port:
+        number: 8080
+        name: http-internal
+        protocol: HTTP
+      hosts:
+        - mamori.codewithmuh.com

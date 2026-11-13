@@ -1,0 +1,30 @@
+# The only public entry: a global external Application Load Balancer made by the GKE Gateway
+# controller. Terraform (infra/envs/lab) creates the static IP, the certificate map and the Cloud
+# Armor policy referenced here; this Gateway stays unready until they exist.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: mamori-frontend
+  annotations:
+    # TLS comes from the Certificate Manager map, so the HTTPS listener has no tls section
+    # (the two cannot be combined on one Gateway).
+    networking.gke.io/certmap: mamori-cert-map
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  addresses:
+    - type: NamedAddress
+      value: mamori-frontend-ip
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      allowedRoutes:
+        namespaces:
+          from: Same
+    # Plain HTTP only redirects to HTTPS (httproute-redirect.yaml).
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
