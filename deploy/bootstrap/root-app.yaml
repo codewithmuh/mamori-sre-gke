@@ -22,3 +22,12 @@ spec:
     automated:
       prune: true
       selfHeal: true
+    # Argo CD's automated sync does not run again for a commit whose sync failed. A child that is
+    # Degraded for a while (a Spot preemption, a slow init) would fail root's sync and leave it
+    # stuck, so the later waves would never be created. Retry forever instead, at most every 3 min.
+    retry:
+      limit: -1
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

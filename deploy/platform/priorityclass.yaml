@@ -1,0 +1,13 @@
+# Priority for the pods every other pod depends on: istiod (its injection webhook has
+# failurePolicy Fail, so while no istiod runs, no pod can be created in boutique or istio-ingress)
+# and the Istio ingress gateway (the only way in). When a Spot node is preempted or drained and the
+# other two nodes are short of room, these are scheduled first and may preempt shop pods, which
+# then wait Pending instead. Far below GKE's system-cluster-critical (2000000000).
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: mamori-platform
+value: 100000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: Lab platform pods (istiod, Istio ingress gateway) that other pods depend on.

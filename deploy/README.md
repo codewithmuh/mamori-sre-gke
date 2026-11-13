@@ -12,11 +12,13 @@ deploy/
 │   ├── argocd-values.yaml      Helm values for Argo CD (installed by `make up`, not by Argo CD)
 │   └── root-app.yaml           Application "root": syncs deploy/apps from main
 ├── apps/                       one Argo CD Application per component, ordered by sync wave
+│   ├── platform.yaml           wave -1 cluster-wide objects (deploy/platform)
 │   ├── istio-base.yaml         wave 0  Istio CRDs                     -> istio-system
 │   ├── istiod.yaml             wave 1  Istio control plane            -> istio-system
 │   ├── istio-ingressgateway.yaml wave 2 Istio ingress gateway         -> istio-ingress
 │   ├── online-boutique.yaml    wave 3  the shop (deploy/online-boutique) -> boutique
 │   └── edge.yaml               wave 4  public load balancer (deploy/edge) -> istio-ingress
+├── platform/                   PriorityClass mamori-platform (istiod, ingress gateway)
 ├── istio/                      Helm values for the three Istio charts (multi-source Applications)
 ├── online-boutique/            kustomize: pinned upstream v0.10.7 + Istio component + our patches
 ├── edge/                       GKE Gateway, HTTPRoutes, GCPBackendPolicy, HealthCheckPolicy
@@ -37,11 +39,34 @@ user ─HTTPS─▶ mamori-frontend-ip (global external Application Load Balance
                │  Istio Gateway + VirtualService "frontend-public" accept only mamori.codewithmuh.com
                ▼
              frontend (ns boutique) ─gRPC─▶ the other services and redis-cart, all with Envoy sidecars
+
+prober, k6 (in cluster) ─HTTP─▶ istio-ingressgateway.istio-ingress.svc.cluster.local:8080
+               same pods, same Istio Gateway and VirtualService, no load balancer, no rate limit
 ```
 
 There is no Service of type `LoadBalancer`. The upstream `frontend-external` Service is deleted by the
 `service-mesh-istio` component, and istiod is told not to create gateways of its own
 (`PILOT_ENABLE_GATEWAY_API_DEPLOYMENT_CONTROLLER=false`). `validate.sh` fails if one appears.
+
+## Internal entry (port 8080)
+
+Synthetic traffic from inside the cluster (the CUJ prober, k6 load tests) uses its own port on the
+ingress gateway:
+
+```
+http://istio-ingressgateway.istio-ingress.svc.cluster.local:8080   with   Host: mamori.codewithmuh.com
+```
+
+- Same gateway pods and the same `frontend-public` VirtualService as public traffic, so it tests the
+  same route (timeouts, retries, faults) to the frontend. Any other Host gets a 404.
+- Not public: no HTTPRoute references port 8080, so the GKE Gateway builds no NEG for it, and the
+  firewall only lets the load balancer reach ports 80 and 15021.
+- Not rate limited: the gateway's local rate limit (an EnvoyFilter on the port-80 listener) and
+  Cloud Armor only see public traffic. So a few clients at the public limit cannot starve the
+  prober (and page on-call), and a load test does not use up the public's budget.
+- Service port and target port are both 8080 (`http-internal` in `istio/gateway-values.yaml`); a
+  NetworkPolicy for a caller must allow egress to TCP 8080 on pods labelled `istio: ingressgateway`
+  in `istio-ingress`.
 
 ## Online Boutique changes
 
@@ -98,6 +123,29 @@ After Terraform has made the cluster, static IP, certificate map and Cloud Armor
 Argo CD follows `main`. A change merged to `deploy/` reaches the cluster within about three minutes
 (reconcile every 120 s plus jitter).
 
+## When a sync is stuck
+
+Argo CD's automated sync does not run again for a commit whose sync failed. So every Application
+here, root included, has `syncPolicy.retry` with no limit (10 s, doubling, at most every 3 min): a
+child that is Degraded for a while (a preempted node, a slow start) is picked up again on its own,
+and the later waves still get created. To look, and to push by hand once the cause is fixed:
+
+```sh
+kubectl -n argocd get applications.argoproj.io     # sync status and health per component
+kubectl -n argocd get applications.argoproj.io root -o jsonpath='{.status.operationState.message}'
+
+# With the argocd CLI, through the port-forward in "Argo CD access":
+argocd login localhost:8080 --username admin --insecure
+argocd app terminate-op root   # only if a sync is still running, waiting on something broken
+argocd app sync root           # fresh sync from main; the children follow wave by wave
+
+# Without the CLI, start a sync of root:
+kubectl -n argocd patch applications.argoproj.io root --type merge \
+  -p '{"operation":{"initiatedBy":{"username":"admin"},"sync":{"revision":"main","prune":true}}}'
+```
+
+The same works for one child (for example `online-boutique`) when only it is stuck.
+
 ## Tear down (`make down`)
 
 The GKE Gateway controller owns load-balancer pieces that Terraform does not know about. If the cluster
@@ -144,19 +192,33 @@ that is 1.4 GiB, so about 0.4 GiB more per node after that upgrade. Source: GKE 
 |---|---|---|---|
 | GKE system pods | ~1350m | ~1.5 GiB | **estimate**: kube-dns ×2, konnectivity, metrics-server, and per node fluentbit, anetd (Dataplane V2), metrics agent, PD CSI, Managed Prometheus collector |
 | Argo CD (5 pods) | 195m | 624 MiB | controller 100m/320Mi, repo-server 50m/128Mi, server 25m/96Mi, appset 10m/48Mi, redis 10m/32Mi; Dex and notifications off |
-| istiod | 100m | 256 MiB | chart default 500m / 2 GiB |
+| istiod (2 pods) | 200m | 512 MiB | 2 × 100m / 256 MiB; chart default 500m / 2 GiB each |
 | Istio ingress gateway (1 pod) | 50m | 128 MiB | chart default 100m / 128 MiB, autoscaling off |
 | Online Boutique (12 pods) | 1570m | 1368 MiB | upstream requests, unchanged; load generator 300m / 256 MiB |
 | Envoy sidecars (12 × 20m / 64 MiB) | 240m | 768 MiB | chart default 12 × 100m / 128 MiB = 1200m / 1.5 GiB |
-| **Total** | **~3505m** | **~4.6 GiB** | |
+| **Total** | **~3605m** | **~4.8 GiB** | |
 | Allocatable (3 nodes) | 5790m | ~17.4 GiB | |
-| **Share of allocatable** | **~61 %** | **~26 %** | |
-| 70 % line | 4053m | ~12.2 GiB | headroom ~550m CPU |
+| **Share of allocatable** | **~62 %** | **~28 %** | |
+| 70 % line | 4053m | ~12.2 GiB | headroom ~450m CPU |
 
-CPU is the limit. With Istio's default sizes the same stack would request about 4.9 vCPU (~85 %), which
+CPU is the limit. With Istio's default sizes the same stack would request about 5.4 vCPU (~94 %), which
 is why istiod and the sidecars are trimmed. Measure real use in M1 (`kubectl top`, Managed Prometheus)
 and adjust; the sidecar size is in `istio/istiod-values.yaml`. Surge upgrades add a fourth node for a
 while, which only adds room.
+
+**Priority and replicas.** istiod's injection webhook has `failurePolicy: Fail`, so while no istiod
+runs, no pod can be created in `boutique` or `istio-ingress`. That includes every pod being
+rescheduled off a preempted or drained node. Two measures:
+
+- istiod and the ingress gateway use PriorityClass `mamori-platform` (`platform/priorityclass.yaml`,
+  value 100000). When the two remaining nodes are short of room, they are scheduled first and may
+  preempt shop pods, which wait Pending instead.
+- istiod runs two replicas spread over nodes, with a PodDisruptionBudget (minAvailable 1) that the
+  chart adds. A single node loss then leaves the webhook up. The second replica costs 100m / 256 MiB,
+  which the budget above allows.
+
+The ingress gateway stays at one replica. A second replica for the front door is a hardening change
+to make with a measured before and after.
 
 ## Validate offline
 

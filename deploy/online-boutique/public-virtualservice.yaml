@@ -1,5 +1,7 @@
 # Mesh side of the public entry, part 2: route the public host from the ingress gateway to the
-# frontend Service. Fault-injection and retry rules for the public path go here later.
+# frontend Service. With no port match it serves both gateway ports, 80 (public) and 8080 (internal:
+# prober, load tests), so synthetic traffic takes the same route as users. Fault-injection and retry
+# rules for the public path go here later.
 apiVersion: networking.istio.io/v1
 kind: VirtualService
 metadata:

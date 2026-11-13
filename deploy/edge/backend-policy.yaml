@@ -9,11 +9,12 @@ spec:
     # Per-client rate limit (429) from Terraform, enforced before traffic reaches the cluster.
     securityPolicy: mamori-frontend-armor
     timeoutSec: 30
-    # Request logs show who hit the rate limit and feed outside-in SLO checks. Traffic is small
-    # (probes and a few visitors), so log every request.
+    # Request logs show who hit the rate limit and feed outside-in checks. Log 10 % (sampleRate is
+    # per million): logging every request would bill for every denied request during an attack.
+    # Load-balancer metrics (request counts, latency) are complete regardless of sampling.
     logging:
       enabled: true
-      sampleRate: 1000000
+      sampleRate: 100000
   targetRef:
     group: ""
     kind: Service

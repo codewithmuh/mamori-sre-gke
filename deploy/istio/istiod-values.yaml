@@ -2,10 +2,26 @@
 # Sized for the lab cluster (3 x e2-standard-2). The chart defaults (istiod 500m / 2 GiB, every sidecar
 # 100m / 128 MiB) would use most of the cluster before the shop starts.
 
-# One istiod is enough for 12 meshed pods. With one replica the chart creates no PodDisruptionBudget,
-# so node drains during GKE upgrades are not blocked; the data plane keeps working while istiod restarts.
+# Two istiods, on different nodes. Running Envoys keep working without istiod, but its injection
+# webhook has failurePolicy Fail: while no istiod runs, no pod can be created in boutique or
+# istio-ingress, so a preempted or drained node would also block every pod being rescheduled off it.
+# One replica would carry the mesh's load (12 pods), but the second costs only 100m / 256 MiB and the
+# budget allows it (deploy/README.md). With two replicas the chart adds a PodDisruptionBudget
+# (minAvailable 1), so a drain evicts them one at a time.
 autoscaleEnabled: false
-replicaCount: 1
+replicaCount: 2
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    # Still schedule both if only one node is left (preemption); the spread is a preference.
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app: istiod
+pdb:
+  minAvailable: 1
+  # A crash-looping istiod must not block a node drain.
+  unhealthyPodEvictionPolicy: AlwaysAllow
 
 resources:
   requests:
@@ -32,6 +48,9 @@ meshConfig:
     retryOn: connect-failure,refused-stream,reset-before-request
 
 global:
+  # deploy/platform/priorityclass.yaml: istiod is scheduled before (and may preempt) shop pods when
+  # nodes are short of room. Applies to istiod only, not to the sidecars.
+  priorityClassName: mamori-platform
   # Cloud Logging parses JSON lines into structured fields.
   logAsJson: true
   proxy:

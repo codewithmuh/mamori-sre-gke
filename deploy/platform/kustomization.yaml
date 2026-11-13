@@ -1,0 +1,6 @@
+# Cluster-wide objects the components in deploy/apps rely on. Synced first (wave -1).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - priorityclass.yaml
