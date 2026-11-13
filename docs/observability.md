@@ -32,7 +32,7 @@ Files:
 | `deploy/observability/online-boutique-tracing/` | kustomize Component that turns tracing on in the shop (included by `deploy/online-boutique`) |
 | `infra/bootstrap/observability_identity.tf` | the collector's IAM grant (Cloud Trace Agent, to its Kubernetes service account) |
 | `infra/envs/lab/dashboards.tf` | dashboards *Mamori mesh* and *Mamori platform* |
-| `infra/envs/lab/observability.tf` | log-based metric `spot_preemptions`, log exclusion `shop-info-logs-sampled` |
+| `infra/envs/lab/observability.tf` | log-based metric `spot_preemptions`; log exclusions `shop-info-logs-sampled` and `edge-denied-requests-sampled`; alert policy on the load balancer's request rate |
 
 ## Metrics: Managed Service for Prometheus
 
@@ -146,6 +146,56 @@ GKE's logging agent sends every container's stdout and stderr, plus system and a
   it next to GKE's `kubernetes.io/node/interruption_count`, because Compute Engine's docs say a
   preemption can also appear only as a `compute.instances.delete` by `system@google.com`.
 
+## Edge cost: what bills even when Cloud Armor says no
+
+The public entry (load balancer, Cloud Armor) sits outside the cluster. Requests it refuses still cost
+money, and the spend guard can't help: scaling the node pool to zero leaves the load balancer up.
+Budget alerts also arrive hours after the spending.
+
+What is billed for every request, allowed or not (list prices, 2026-11-13):
+
+| Item | Price | Billed for denied requests? |
+|---|---|---|
+| Cloud Armor requests (global policy) | $0.75 per million | yes: Cloud Armor meters requests evaluated, and a throttle (429) or deny is an evaluation |
+| Load-balancer request logs | Cloud Logging, $0.50 per GiB above the free 50 GiB a month | yes, at the backend's logging sample rate (set in `deploy/edge`) |
+| Load-balancer data processing | per GiB in and out | yes, though a 429 is small |
+| Policy, rules, forwarding rules | flat hourly | not per request |
+
+**One client at 1,000 requests/s** (my math): 86.4 million requests a day. Cloud Armor throttles it to 10
+requests/s and answers the rest with 429, but bills all of them, about **$65 a day**. At 100 % log
+sampling and 1–2 KiB per log entry, the logs add 80–165 GiB a day, about **$40–80 a day**. One day of
+this uses more than half of the $200 monthly budget.
+
+What this repository does about it (`infra/envs/lab/observability.tf`):
+
+- **Exclusion `edge-denied-requests-sampled`:** keeps 1 % of the load balancer's log entries for
+  requests Cloud Armor denied (`resource.type="http_load_balancer"` and
+  `jsonPayload.enforcedSecurityPolicy.outcome="DENY"`, which covers rate-limit throttles too). That is
+  enough evidence (client IPs, the rule that fired) and cuts the attack's log cost about 100×. Variable
+  `observability_edge_denied_log_keep_percent` (100 turns it off). Allowed requests are not affected.
+- **Alert "Edge: load balancer above 50 requests/s":** the load balancer's `https/request_count`,
+  every response including 429s, summed over the project, above
+  `observability_edge_request_rate_alert_rps` (default 50) for 5 minutes. It notifies email and Pub/Sub
+  (`local.incident_ticket_notification_channels`, #21), and so the incident agent, but doesn't page:
+  it is a cost problem first, and if shoppers feel it the journey SLO alerts page on their own. Normal
+  public traffic is the prober plus the odd visitor, well under 1 request/s (estimate); Cloud Armor
+  lets one client through at 10 requests/s. Load-balancer metrics arrive up to about 3.5 minutes late,
+  so expect the alert 5–10 minutes after the traffic starts.
+- **The switch: `make edge-off`** (#9), the only way to stop the per-request charges. It turns off
+  Argo CD auto-sync on `root` and `edge` (so self-heal can't bring the Gateway back), deletes Gateway
+  `mamori-frontend` and waits until the GKE Gateway controller has removed the load balancer. The static
+  IP, certificate and Cloud Armor policy stay (Terraform owns them), so DNS needs no change; what keeps
+  billing is flat: the policy and its rules, and the static IP while it is unused. `make edge-on`
+  restores auto-sync and the Gateway and waits until it is programmed; `make up` does too. While the
+  edge is off the shop is down for outside users and the prober, so log it in the
+  [error-budget policy](slo/error-budget-policy.md) as a cost decision, like the spend guard.
+- **Backend log sampling:** lowering the load balancer's logging sample rate for allowed requests is a
+  separate change in `deploy/edge` (#8).
+
+When the alert fires: check *Mamori mesh* → "Public path" (429s or real traffic?), then find the
+clients in Logs Explorer (`resource.type="http_load_balancer"`, summarize by `httpRequest.remoteIp`;
+denied requests show at 1 %, so multiply by 100). If one client keeps at it, `make edge-off`.
+
 ## Dashboards (`infra/envs/lab/dashboards.tf`)
 
 **Mamori mesh**
@@ -239,8 +289,10 @@ for a successful fast request is normal. Reading traces needs `roles/cloudtrace.
 
 1. Bootstrap enables `cloudtrace.googleapis.com` and gives `tf-apply` `roles/monitoring.editor` and
    `roles/logging.configWriter` (requested in #19's report; `bootstrap/apis.tf` and `bootstrap/iam.tf`).
-2. `make up`: the lab root creates the cluster, the dashboards, the log-based metric and the
-   exclusion; Argo CD syncs `deploy/observability` (wave 5) and the shop with tracing on.
+2. `make up`: the lab root creates the cluster, the dashboards, the log-based metric, the two
+   exclusions and the edge alert; Argo CD syncs `deploy/observability` (wave 5) and the shop with
+   tracing on. The edge alert needs `local.incident_ticket_notification_channels` from #21's
+   `notifications.tf`, so #21 merges before #19.
 3. After the first `make up`: set `gke_workload_pool_exists = true` in
    `infra/bootstrap/terraform.tfvars` and apply bootstrap again. That grants the collector Cloud Trace
    Agent; the workload identity pool only exists once the cluster does. Until then the collector logs
@@ -257,6 +309,8 @@ for a successful fast request is normal. Reading traces needs `roles/cloudtrace.
 | Collector size | `kubectl -n observability top pod` | the 20m / 128 MiB requests |
 | Dashboards | open both, check every panel has data; run `terraform plan` after the first apply and check it shows no change to the dashboards | assumption that the JSON round-trips |
 | Spot metric | after the first preemption, check `spot_preemptions` counted it | the log filter |
+| Edge alert and exclusion | from outside, send about 60 requests/s for 6 minutes (Cloud Armor throttles them); the alert should notify, and Logs Explorer should show about 1 % of the 429s | the alert filter and the exclusion field path |
+| Load-balancer log entry size | Logs Explorer, a few entries' size, or Cloud Logging bytes for `http_load_balancer` | the 1–2 KiB per entry in "Edge cost" |
 
 ## Not verified yet
 
@@ -269,3 +323,7 @@ for a successful fast request is normal. Reading traces needs `roles/cloudtrace.
   has to be applied again after the next `make up`.
 - That `kubernetes.io/node/interruption_count` counts Spot preemptions (Google documents it for
   GPU/TPU disruption; its reasons include `Eviction` and `PreemptionEvent`).
+- The edge exclusion's field path is from Cloud Armor's request-logging docs and the resource type
+  from the load balancer's logging docs; neither has been checked against a real log entry.
+- That Cloud Armor bills throttled and denied requests: the pricing page meters requests evaluated,
+  and the security review assumed the same; not confirmed on a bill.
