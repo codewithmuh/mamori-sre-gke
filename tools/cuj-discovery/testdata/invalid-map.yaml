@@ -1,0 +1,17 @@
+# A broken CUJ map for the validate command's tests: browse lists adservice
+# as critical although its failure rate is 0.
+apiVersion: mamori/v1
+kind: CUJMap
+metadata:
+  generatedAt: "2026-11-20T01:02:03Z"
+  generator: cuj-discovery/0.1.0
+  onlineBoutique: v0.10.7
+  runsPerCase: 20
+  failureThreshold: 0.5
+  fault: test
+journeys:
+  - id: browse
+    critical: [adservice]
+    nonCritical: []
+    results:
+      adservice: {failureRate: 0.0, runs: 20}
