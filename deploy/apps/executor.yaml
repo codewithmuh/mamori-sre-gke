@@ -1,0 +1,47 @@
+# Wave 7: the action executor (deploy/executor) in mamori-agent, next to the agent (#24, also
+# wave 7). Both Applications create the namespace with the same labels; neither ships a
+# Namespace object, so pruning one app can never delete the other's pods.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: executor
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "7"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/codewithmuh/mamori-sre-gke.git
+    targetRevision: main
+    path: deploy/executor
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mamori-agent
+  # Two values are owned by the cluster, not by Git:
+  # - the kill switch: `make executor-kill` must stick, so self-heal may not put Git's value back;
+  # - the executor's state, which it writes itself.
+  ignoreDifferences:
+    - kind: ConfigMap
+      name: executor-config
+      namespace: mamori-agent
+      jsonPointers:
+        - /data/enabled
+    - kind: ConfigMap
+      name: executor-state
+      namespace: mamori-agent
+      jsonPointers:
+        - /data
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        app.kubernetes.io/part-of: mamori
+        pod-security.kubernetes.io/enforce: restricted
+    syncOptions:
+      - CreateNamespace=true
+      # Also applies the ignored fields during sync, so a sync keeps the live values.
+      - RespectIgnoreDifferences=true

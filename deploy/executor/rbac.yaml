@@ -1,0 +1,126 @@
+# Least privilege for the executor, one rule per need (table in docs/executor.md).
+# RBAC can narrow by verb, resource and name, but not by label or by value: the label check
+# for remove-fault and the replica bounds for scale are enforced in the executor's code and
+# again by the ValidatingAdmissionPolicies in admission-policy.yaml.
+---
+# In the shop's namespace: only the calls tools/executor/kube.go makes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: executor
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: executor
+    app.kubernetes.io/part-of: mamori
+rules:
+  # restart: read a Deployment, then patch the pod-template annotation (rollout restart).
+  # remove-fault: delete a Deployment that is itself an injected fault (F24's bad canary).
+  # The admission policy limits the patch to that annotation and the delete to labelled objects.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch", "delete"]
+  # scale: read and set replicas through the scale subresource only (bounded by admission policy).
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "update"]
+  # scale: refuse when a HorizontalPodAutoscaler owns the replicas.
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["list"]
+  # remove-fault: read the fault object (to check its labels), then delete exactly that object.
+  # These are the kinds the fault library (chaos/faults/, #23) creates.
+  - apiGroups: ["networking.istio.io"]
+    resources: ["virtualservices", "sidecars"]
+    verbs: ["get", "delete"]
+  - apiGroups: ["security.istio.io"]
+    resources: ["authorizationpolicies"]
+    verbs: ["get", "delete"]
+  - apiGroups: ["chaos-mesh.org"]
+    resources: ["podchaos", "networkchaos", "stresschaos"]
+    verbs: ["get", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: executor
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: executor
+    app.kubernetes.io/part-of: mamori
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: executor
+subjects:
+  - kind: ServiceAccount
+    name: executor
+    namespace: mamori-agent
+---
+# In its own namespace: read its configuration and keep its state, nothing else. resourceNames
+# limits it to these two ConfigMaps. It cannot create them (create cannot be limited by name),
+# so Argo CD creates both; it cannot change executor-config, so it cannot turn itself on.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: executor
+  namespace: mamori-agent
+  labels:
+    app.kubernetes.io/name: executor
+    app.kubernetes.io/part-of: mamori
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["executor-config"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["executor-state"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: executor
+  namespace: mamori-agent
+  labels:
+    app.kubernetes.io/name: executor
+    app.kubernetes.io/part-of: mamori
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: executor
+subjects:
+  - kind: ServiceAccount
+    name: executor
+    namespace: mamori-agent
+---
+# Caller authentication: the agent sends its projected service account token (audience
+# "executor") and the executor asks the API server whether it is genuine (TokenReview). This
+# right only verifies tokens; it reads and changes nothing.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mamori-executor-tokenreview
+  labels:
+    app.kubernetes.io/name: executor
+    app.kubernetes.io/part-of: mamori
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mamori-executor-tokenreview
+  labels:
+    app.kubernetes.io/name: executor
+    app.kubernetes.io/part-of: mamori
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mamori-executor-tokenreview
+subjects:
+  - kind: ServiceAccount
+    name: executor
+    namespace: mamori-agent
