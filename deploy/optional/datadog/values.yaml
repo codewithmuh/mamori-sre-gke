@@ -1,0 +1,110 @@
+# Values for the Datadog chart 3.264.0 (https://helm.datadoghq.com, Agent and Cluster Agent 7.84.6),
+# used by application.yaml next to this file. Only for the 14-day Datadog window: see
+# docs/datadog-window.md. `make datadog-on` creates the two Secrets named below first.
+#
+# Aim: Kubernetes metrics for the monitors (kubelet, kubernetes_state_core), and nothing that
+# costs CPU on our three e2-standard-2 nodes without being used. No logs, no APM, no process or
+# network monitoring, no security products.
+
+datadog:
+  # AP1 is Datadog's site in Japan. Keep in step with DD_SITE in mk/datadog.mk and
+  # datadog_site in infra/envs/datadog; `make datadog-on` refuses to run if they differ.
+  site: ap1.datadoghq.com
+  # Becomes the kube_cluster_name tag that infra/envs/datadog/monitors.tf filters on.
+  clusterName: mamori
+  # Secret datadog-secret, key api-key. No application key in the cluster: nothing here needs one.
+  apiKeyExistingSecret: datadog-secret
+  tags:
+    - app:mamori
+    - env:lab
+
+  # kubernetes_state_core runs in the Cluster Agent (the default); the monitors use its metrics.
+  # Without the secret and ConfigMap metrics its ClusterRole doesn't get list/watch on every Secret
+  # in the cluster (listing returns their contents).
+  kubeStateMetricsCore:
+    enabled: true
+    collectSecretMetrics: false
+    collectConfigMaps: false
+
+  # Kubernetes Explorer sends full object manifests to Datadog and needs wide read access. Alert
+  # design doesn't need it.
+  orchestratorExplorer:
+    enabled: false
+
+  logs:
+    enabled: false
+  apm:
+    socketEnabled: false
+    portEnabled: false
+    # The chart puts a random install id in a ConfigMap on every render. Argo CD can't use the
+    # chart's lookup() that normally keeps it stable, so the app would never be in sync.
+    instrumentation:
+      skipKPITelemetry: true
+  processAgent:
+    processCollection: false
+    processDiscovery: false
+  containerImageCollection:
+    enabled: false
+  # On by default from Agent 7.78; it adds a system-probe container (eBPF) to every Agent pod.
+  discovery:
+    enabled: false
+  # Host PID is for DogStatsD origin detection and process collection, neither of which is used.
+  useHostPID: false
+
+  # The chart installs the Datadog Operator and an instrumentation CRD by default; this lab uses
+  # plain Helm and no APM.
+  operator:
+    enabled: false
+  instrumentationCrd:
+    enabled: false
+
+clusterAgent:
+  enabled: true
+  replicas: 1
+  # Secret datadog-cluster-agent-token, key token. The chart would otherwise generate a new random
+  # token on every Argo CD render and restart the Agents each time.
+  tokenExistingSecret: datadog-cluster-agent-token
+  # The admission webhook only injects APM and DogStatsD settings, which are off. On a private
+  # cluster the control plane reaches nodes on 443 and 10250 only, so the webhook (port 8000)
+  # would slow every pod creation down to its timeout.
+  admissionController:
+    enabled: false
+  image:
+    tag: 7.84.6
+    digest: sha256:b0538b18ec71bab1d17bced0380008213d46ad70174cdeafdf3025d1865f67e2
+  resources:
+    requests:
+      cpu: 20m
+      memory: 96Mi
+    limits:
+      memory: 256Mi
+
+agents:
+  image:
+    tag: 7.84.6
+    digest: sha256:4aa71f1f624e36ed4d04568e4ad3f323af14426db07d2f9ed98869f6d0bdbbd3
+  containers:
+    agent:
+      resources:
+        requests:
+          cpu: 40m
+          memory: 192Mi
+        limits:
+          memory: 512Mi
+    initContainers:
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          memory: 128Mi
+
+# Nobody changes the Agents' configuration from the Datadog UI; Git is the only source.
+remoteConfiguration:
+  enabled: false
+
+# GKE Standard on Container-Optimized OS (the node pool's COS_CONTAINERD image), not Autopilot.
+providers:
+  gke:
+    cos: true
+    autopilot: false
