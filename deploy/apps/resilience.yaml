@@ -1,0 +1,28 @@
+# Wave 6: resilience settings for the shop (deploy/resilience): DestinationRules for every boutique
+# host, PodDisruptionBudgets, CPU HorizontalPodAutoscalers, and load shedding on the Istio ingress
+# gateway. It comes after the shop (wave 3) and the edge (wave 4) because it only tunes what they
+# run. Design and measurements: docs/resilience/.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: resilience
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "6"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/codewithmuh/mamori-sre-gke.git
+    targetRevision: main
+    path: deploy/resilience
+  # Most objects go to boutique. The EnvoyFilter sets its own namespace (istio-ingress), because an
+  # EnvoyFilter with a workloadSelector only applies to workloads in its own namespace.
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: boutique
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
