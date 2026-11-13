@@ -1,26 +1,24 @@
 # Weekly, grouped updates so dependency PRs stay reviewable. Pinned action SHAs are updated too.
+# cooldown: only propose releases at least 14 days old, the same rule as for hand-pinned versions.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
+    cooldown: { default-days: 14 }
     groups:
       actions: { patterns: ["*"] }
 
-  - package-ecosystem: uv
-    directory: /services/api-python
-    schedule: { interval: weekly }
-    groups:
-      python: { patterns: ["*"] }
-
   - package-ecosystem: gomod
-    directory: /services/api-go
+    directory: /tools/spend-guard
     schedule: { interval: weekly }
+    cooldown: { default-days: 14 }
     groups:
       go: { patterns: ["*"] }
 
-  - package-ecosystem: docker
-    directories: [/services/api-python, /services/api-go]
+  - package-ecosystem: terraform
+    directories: [/infra/bootstrap, /infra/envs/lab]
     schedule: { interval: weekly }
+    cooldown: { default-days: 14 }
     groups:
-      base-images: { patterns: ["*"] }
+      terraform: { patterns: ["*"] }

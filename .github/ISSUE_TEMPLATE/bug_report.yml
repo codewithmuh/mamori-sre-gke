@@ -1,45 +1,47 @@
-name: 🐛 Bug Report
-description: Create a report to help us improve the DevSecOps project
+name: 🐛 Bug report
+description: Something in the lab does not work as documented
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to report a bug! Please ensure sensitive credentials (passwords, tokens, AWS keys) are redacted.
+        Thanks for the report. Redact project IDs, billing account IDs, tokens and keys before you paste logs.
+        Security problems go through SECURITY.md, never a public issue.
   - type: input
     id: summary
     attributes:
       label: Summary
-      description: A concise summary of the bug
+      description: What went wrong, in one line
     validations:
       required: true
   - type: textarea
     id: reproduce
     attributes:
-      label: Steps to Reproduce
-      description: Detailed steps to reproduce the issue
+      label: Steps to reproduce
+      description: Commands you ran and what they printed
       placeholder: |
-        1. Run `terraform apply` in jenkins-server-terraform
-        2. Trigger Jenkins pipeline `app-code/Jenkinsfile`
+        1. `make up`
+        2. Open https://mamori.codewithmuh.com
         3. See error ...
     validations:
       required: true
   - type: textarea
     id: expected
     attributes:
-      label: Expected Behavior
+      label: Expected behavior
       description: What did you expect to happen?
     validations:
       required: true
   - type: textarea
     id: environment
     attributes:
-      label: Environment Details
-      description: Cloud provider, Kubernetes version, Terraform version, OS
+      label: Environment
+      description: Versions of the tools involved
       value: |
-        - Cloud / Local: AWS / Minikube
-        - Terraform Version:
-        - Kubernetes Version:
-        - OS: Ubuntu 22.04 / macOS / Windows
+        - Commit or release:
+        - Terraform:
+        - gcloud:
+        - kubectl / GKE version:
+        - OS:
     validations:
       required: false

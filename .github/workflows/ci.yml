@@ -13,6 +13,20 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+defaults:
+  run:
+    shell: bash # adds -o pipefail to GitHub's default
+
+# Tool versions, bumped by hand (Dependabot only sees actions, Go modules and Terraform providers).
+env:
+  TERRAFORM_VERSION: "1.17.1"
+  TFLINT_VERSION: v0.65.0
+  GOLANGCI_LINT_VERSION: v2.15.0
+  HELM_VERSION: v4.3.1
+  HELM_SHA256: 0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b # linux-amd64
+  KUBECTL_VERSION: v1.37.2
+  KUBECTL_SHA256: c04487523e7aa7d1493f7808174c899db93d7a9cf57531420cd76b9bd415f8f4 # linux/amd64
+
 jobs:
   repo-checks:
     name: Repo checks (workflows, secrets, misconfigurations)
@@ -36,108 +50,279 @@ jobs:
       - name: Scan files for vulnerabilities and misconfigurations
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          version: v0.76.1 # the action's default (v0.70.0) has a path-traversal advisory fixed in 0.71.1
           scan-type: fs
           scan-ref: .
           scanners: vuln,misconfig,secret
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: "1"
+      - name: Lint shell scripts
+        run: docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:v0.11.0 scripts/*.sh
 
-  python:
-    name: Python (lint, types, tests)
+  terraform:
+    name: Terraform (fmt, validate, tflint)
     runs-on: ubuntu-24.04 # pinned: upgrade deliberately, not when GitHub moves "latest"
-    defaults:
-      run:
-        working-directory: services/api-python
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Look for Terraform code
+        id: find
+        run: |
+          if [ -d infra ] && [ -n "$(find infra -name '*.tf' -print -quit)" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No Terraform code under infra/ yet; skipping."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        if: steps.find.outputs.present == 'true'
         with:
-          version: "0.13.0"
-          enable-cache: true
-          cache-dependency-glob: services/api-python/uv.lock
-      - run: uv sync --locked
-      - run: uv run ruff format --check .
-      - run: uv run ruff check --output-format=github .
-      - run: uv run mypy
-      - run: uv run pytest # fails below 80% coverage (see pyproject.toml)
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337 # v6.3.2
+        if: steps.find.outputs.present == 'true'
+        with:
+          tflint_version: ${{ env.TFLINT_VERSION }}
+      - name: Format, validate and lint each root (same as make lint)
+        if: steps.find.outputs.present == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }} # tflint --init downloads its plugins from GitHub releases
+        run: make lint-terraform
 
-  go:
-    name: Go (lint, tests)
+  terraform-plan:
+    name: Terraform plan (lab)
+    needs: terraform
+    # Runs once the repository variables exist (after `make bootstrap`), and only for branches of
+    # this repository: pull requests from forks get no OIDC token, and Dependabot runs are treated
+    # like forks (no Actions secrets). Their static checks above still run.
+    if: >-
+      github.event_name == 'pull_request'
+      && vars.GCP_WIF_PROVIDER != ''
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-24.04 # pinned: upgrade deliberately, not when GitHub moves "latest"
+    permissions:
+      contents: read
+      id-token: write # exchange the GitHub OIDC token for short-lived Google credentials (no keys)
+      pull-requests: write # post the plan as a comment
     defaults:
       run:
-        working-directory: services/api-go
+        working-directory: infra/envs/lab
+    env:
+      TF_IN_AUTOMATION: "1"
+      TF_INPUT: "0"
+      TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
+      TF_VAR_billing_account_id: ${{ secrets.GCP_BILLING_ACCOUNT_ID }} # a secret, so it is masked in public logs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_TF_PLAN_SA }}
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - name: Init (GCS backend)
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+        run: terraform init -backend-config="bucket=${TF_STATE_BUCKET}" -backend-config="prefix=lab"
+      - name: Plan
+        id: plan
+        # -lock=false: a plan only reads state, so a cancelled run never leaves a stale lock and a
+        # pull request never waits for an apply.
+        run: |
+          set +e
+          terraform plan -no-color -lock=false -detailed-exitcode > plan.txt 2>&1
+          code=$?
+          set -e
+          cat plan.txt # the job log masks the billing account secret
+          # The comment goes through the API, where GitHub masks nothing: redact it first.
+          "${GITHUB_WORKSPACE}/scripts/redact.sh" < plan.txt > plan-public.txt
+          echo "exitcode=${code}" >> "$GITHUB_OUTPUT"
+      - name: Post the plan as one comment on the pull request
+        if: always() && steps.plan.outputs.exitcode != ''
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PLAN_FILE: infra/envs/lab/plan-public.txt
+          EXIT_CODE: ${{ steps.plan.outputs.exitcode }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- terraform-plan: infra/envs/lab -->';
+            const limit = 60000; // GitHub rejects comments longer than 65,536 characters
+            const status = { '0': 'no changes', '1': 'failed', '2': 'changes to apply' }[process.env.EXIT_CODE];
+            let plan = fs.readFileSync(process.env.PLAN_FILE, 'utf8');
+            const summary = (plan.match(/^(Plan: .*|No changes\..*|Error: .*)$/m) || [''])[0];
+            if (plan.length > limit) {
+              plan = plan.slice(0, limit) + '\n... truncated: the full plan is in the job log.';
+            }
+            // A fence longer than any backtick run in the plan, so the plan cannot close it early.
+            const longest = Math.max(2, ...(plan.match(/`+/g) || []).map((run) => run.length));
+            const fence = '`'.repeat(longest + 1);
+            const { owner, repo } = context.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const sha = context.payload.pull_request.head.sha.slice(0, 7);
+            const body = [
+              marker,
+              `### Terraform plan for \`infra/envs/lab\`: ${status}`,
+              summary ? `\`${summary}\`` : '',
+              `Commit ${sha}. [Job log](${runUrl}).`,
+              '',
+              '<details><summary>Full plan</summary>',
+              '',
+              `${fence}text`,
+              plan,
+              fence,
+              '</details>',
+            ].join('\n');
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100,
+            });
+            const mine = comments.find((c) => c.user?.type === 'Bot' && c.body?.includes(marker));
+            if (mine) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+      - name: Fail if the plan failed
+        if: steps.plan.outputs.exitcode == '1'
+        run: |
+          echo "::error::terraform plan failed; see the plan step or the PR comment."
+          exit 1
+
+  manifests:
+    name: Kubernetes manifests (render, kubeconform)
+    runs-on: ubuntu-24.04 # pinned: upgrade deliberately, not when GitHub moves "latest"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Look for the manifest checks
+        id: find
+        run: |
+          if [ -f deploy/validate.sh ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No deploy/validate.sh yet; skipping."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+      # deploy/validate.sh renders with helm and kubectl kustomize, and runs kubeconform from a
+      # digest-pinned image (Docker is on the runner). The runner's own helm and kubectl move with
+      # the image, so pinned ones go first on PATH.
+      - name: Install helm and kubectl (checksums verified)
+        if: steps.find.outputs.present == 'true'
+        run: |
+          bin="${RUNNER_TEMP}/bin"
+          mkdir -p "$bin"
+          cd "$RUNNER_TEMP"
+          curl -fsSLo helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  helm.tgz" | sha256sum --check --strict
+          tar -xzf helm.tgz --strip-components=1 -C "$bin" linux-amd64/helm
+          curl -fsSLo "$bin/kubectl" "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          echo "${KUBECTL_SHA256}  ${bin}/kubectl" | sha256sum --check --strict
+          chmod +x "$bin/kubectl"
+          echo "$bin" >> "$GITHUB_PATH"
+      - name: Render and validate (same as make lint)
+        if: steps.find.outputs.present == 'true'
+        run: make lint-manifests
+
+  go-modules:
+    name: Find Go modules
+    runs-on: ubuntu-24.04 # pinned: upgrade deliberately, not when GitHub moves "latest"
+    outputs:
+      tools: ${{ steps.find.outputs.tools }}
+      services: ${{ steps.find.outputs.services }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: List tools/*/go.mod and services/*/go.mod
+        id: find
+        run: |
+          shopt -s nullglob
+          for kind in tools services; do
+            dirs=()
+            for mod in "$kind"/*/go.mod; do dirs+=("$(dirname "$mod")"); done
+            if [ "${#dirs[@]}" -eq 0 ]; then
+              echo "::notice::No Go modules under ${kind}/ yet; skipping."
+              echo "${kind}=[]" >> "$GITHUB_OUTPUT"
+            else
+              echo "${kind}=$(printf '%s\n' "${dirs[@]}" | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+  go:
+    name: Go ${{ matrix.module }} (lint, tests)
+    needs: go-modules
+    if: needs.go-modules.outputs.tools != '[]'
+    runs-on: ubuntu-24.04 # pinned: upgrade deliberately, not when GitHub moves "latest"
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.go-modules.outputs.tools) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27"
-          cache-dependency-path: services/api-go/go.sum
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: ${{ matrix.module }}/go.sum
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.14.0
-          working-directory: services/api-go
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          working-directory: ${{ matrix.module }}
       - name: Test (race detector, 80% coverage gate)
-        run: |
-          go test -race -covermode=atomic -coverprofile=coverage.out ./...
-          total=$(go tool cover -func=coverage.out | awk '/^total:/ {sub("%", "", $3); print $3}')
-          echo "Total coverage: ${total}%"
-          if awk -v t="$total" 'BEGIN { exit !(t + 0 < 80) }'; then
-            echo "::error::Go coverage ${total}% is below 80%"
-            exit 1
-          fi
+        env:
+          MODULE: ${{ matrix.module }}
+        run: scripts/go-test.sh "$MODULE"
 
-  images:
-    name: Image ${{ matrix.service }} (build, scan, smoke test)
-    needs: [python, go]
+  # The forked upstream services: our changes must keep their own tests green. No lint and no
+  # coverage gate, since most of the code is upstream's.
+  services:
+    name: Go service ${{ matrix.module }} (tests)
+    needs: go-modules
+    if: needs.go-modules.outputs.services != '[]'
     runs-on: ubuntu-24.04 # pinned: upgrade deliberately, not when GitHub moves "latest"
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - service: api-python
-            port: 8000
-          - service: api-go
-            port: 8080
+        module: ${{ fromJSON(needs.go-modules.outputs.services) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Build image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          context: services/${{ matrix.service }}
-          load: true
-          push: false
-          tags: ${{ matrix.service }}:ci
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
-      - name: Scan image for vulnerabilities
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          scan-type: image
-          image-ref: ${{ matrix.service }}:ci
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: "1"
-      - name: Smoke test (container starts, becomes ready, serves traffic)
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - name: Test (race detector)
+        working-directory: ${{ matrix.module }}
+        run: go test -race ./...
+
+  # One stable check to require in branch protection: the Go jobs' names change with their matrix,
+  # and skipped jobs (no modules yet, no plan on forks) must not block a merge.
+  ci-result:
+    name: CI result
+    if: always()
+    needs: [repo-checks, terraform, terraform-plan, manifests, go-modules, go, services]
+    runs-on: ubuntu-24.04 # pinned: upgrade deliberately, not when GitHub moves "latest"
+    steps:
+      - name: Fail if any job failed or was cancelled
         env:
-          IMAGE: ${{ matrix.service }}:ci
-          PORT: ${{ matrix.port }}
+          RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          docker run --detach --name smoke --read-only --tmpfs /tmp --cap-drop ALL \
-            --publish "127.0.0.1:9000:${PORT}" "$IMAGE"
-          for _ in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:9000/readyz; then break; fi
-            sleep 1
+          echo "Job results: ${RESULTS}"
+          for result in $RESULTS; do
+            case "$result" in
+              success | skipped) ;;
+              *) echo "::error::A required job ended with: ${result}"; exit 1 ;;
+            esac
           done
-          curl --fail --silent --show-error http://127.0.0.1:9000/readyz
-          curl --fail --silent --show-error "http://127.0.0.1:9000/v1/hello?name=ci"
-          docker stop --time 20 smoke # graceful shutdown must finish in time
-          docker logs smoke | tail -n 5
