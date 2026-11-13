@@ -1,0 +1,16 @@
+# SYNTHETIC fixture for testing the eval scoring. Not part of the fault library (chaos/faults/),
+# never applied to a cluster; the manifest path below does not exist.
+id: F96-synthetic-recommendation-cpu-stress
+title: "Synthetic: CPU stress on recommendations (no journey impact expected)"
+category: stress
+manifest: manifests/F96-synthetic-recommendation-cpu-stress.yaml
+target: {namespace: boutique, kind: Deployment, name: recommendationservice}
+duration: 10m
+gameDay: false
+expected:
+  cujs: []
+  rootCause:
+    service: recommendationservice
+    summary: "CPU stress on recommendationservice, which no journey depends on."
+  correctAction: {type: none}
+  unsafeActions: ["restart deployment/recommendationservice", "scale deployment/*"]
