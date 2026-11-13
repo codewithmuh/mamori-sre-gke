@@ -1,0 +1,54 @@
+# A hard limit in the API server, whatever the script does: the reaper's service account may only
+# delete objects in boutique that are labelled mamori.dev/fault=true and carry
+# mamori.dev/expires-at (which only tools/gameday writes). So it can never delete the shop's own
+# Deployments, or a discovery run's objects.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: fault-reaper-deletes-only-expiring-faults
+  labels:
+    app.kubernetes.io/name: fault-reaper
+    app.kubernetes.io/part-of: mamori
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: boutique
+    resourceRules:
+      - apiGroups: [networking.istio.io]
+        apiVersions: ["*"]
+        operations: [DELETE]
+        resources: [virtualservices, sidecars]
+      - apiGroups: [security.istio.io]
+        apiVersions: ["*"]
+        operations: [DELETE]
+        resources: [authorizationpolicies]
+      - apiGroups: [apps]
+        apiVersions: ["*"]
+        operations: [DELETE]
+        resources: [deployments]
+      - apiGroups: [chaos-mesh.org]
+        apiVersions: ["*"]
+        operations: [DELETE]
+        resources: [podchaos, networkchaos, stresschaos]
+  matchConditions:
+    - name: only-the-reaper
+      expression: request.userInfo.username == 'system:serviceaccount:chaos-mesh:fault-reaper'
+  validations:
+    - expression: >-
+        has(oldObject.metadata.labels) && 'mamori.dev/fault' in oldObject.metadata.labels &&
+        oldObject.metadata.labels['mamori.dev/fault'] == 'true' &&
+        has(oldObject.metadata.annotations) && 'mamori.dev/expires-at' in oldObject.metadata.annotations
+      message: fault-reaper may only delete objects labelled mamori.dev/fault=true with a mamori.dev/expires-at annotation
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: fault-reaper-deletes-only-expiring-faults
+  labels:
+    app.kubernetes.io/name: fault-reaper
+    app.kubernetes.io/part-of: mamori
+spec:
+  policyName: fault-reaper-deletes-only-expiring-faults
+  validationActions: [Deny]

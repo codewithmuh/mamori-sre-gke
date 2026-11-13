@@ -48,6 +48,14 @@ func kindMap(rows [][4]string) map[schema.GroupVersionKind]schema.GroupVersionRe
 	return m
 }
 
+// configMapsGVR is read only. cuj-discovery (#17) labels the marker ConfigMap it writes before
+// it scales redis-cart to zero as a fault; only `make discovery-cleanup` knows how to restore the
+// replicas, so gameday reports such markers and never deletes them.
+var configMapsGVR = schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}
+
+// discoveryHint is what gameday prints when it finds a discovery marker.
+const discoveryHint = "run make discovery-cleanup"
+
 // sortedFaultKinds returns the allow-list in a stable order, for listing.
 func sortedFaultKinds() []schema.GroupVersionKind {
 	return slices.SortedFunc(maps.Keys(faultKinds), func(a, b schema.GroupVersionKind) int {

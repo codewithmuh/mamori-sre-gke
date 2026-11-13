@@ -31,5 +31,7 @@ notes: >-
   v0.10.7 src/checkoutservice/main.go: PlaceOrder calls cart, productcatalog, currency and
   shipping (GetQuote) first, then Charge; a Charge error returns Internal. No card is charged and
   no retry happens (Istio's default retry does not cover INTERNAL). Other journeys never call
-  checkoutservice. Unverified detail: whether Envoy answers with 502 from its block-all route or
-  resets the connection; both reach the frontend as UNAVAILABLE.
+  checkoutservice. The egress list keeps the OpenTelemetry collector
+  (otel-collector.observability:4317, #19), so checkout's traces keep arriving and show the failed
+  Charge. Unverified detail: whether Envoy answers with 502 from its block-all route or resets the
+  connection; both reach the frontend as UNAVAILABLE.

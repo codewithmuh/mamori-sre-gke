@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -45,7 +46,10 @@ func newKubeClient(kubeconfig, kubeContext string) (dynamic.Interface, string, e
 
 // cluster wraps the dynamic client. Every call is pinned to namespace boutique.
 type cluster struct {
-	dc dynamic.Interface
+	dc      dynamic.Interface
+	log     *slog.Logger
+	timeout time.Duration // how long remove keeps trying, in all
+	poll    time.Duration // the first retry delay, and how often remove checks the objects are gone
 }
 
 func (c cluster) resource(o *unstructured.Unstructured) (dynamic.ResourceInterface, error) {
@@ -171,26 +175,43 @@ func (c cluster) exists(ctx context.Context, o *unstructured.Unstructured) (bool
 	return there, err
 }
 
-// remove deletes the objects, then waits until they are gone. Chaos Mesh objects carry a
-// finalizer that is only removed once the fault has been recovered in the pods, so "gone"
-// means "recovered".
-func (c cluster) remove(ctx context.Context, objs []*unstructured.Unstructured, timeout, poll time.Duration) error {
-	var errs []error
-	for _, o := range objs {
-		r, err := c.resource(o)
-		if err != nil {
-			errs = append(errs, err)
-			continue
+// maxRetryDelay caps the backoff between delete attempts.
+const maxRetryDelay = 30 * time.Second
+
+// remove deletes the objects and waits until they are gone, for up to c.timeout in all. A delete
+// that fails (the API server is unreachable during a control-plane upgrade, the laptop's network
+// drops, the auth plugin's token expired) is retried with backoff and logged each time: giving up
+// early would leave a fault running at full strength. Chaos Mesh objects carry a finalizer that is
+// only removed once Chaos Mesh has recovered the pods, so "gone" means "recovered".
+func (c cluster) remove(ctx context.Context, objs []*unstructured.Unstructured) error {
+	deadline := time.Now().Add(c.timeout)
+	pending := objs
+	delay := c.poll
+	for attempt := 1; len(pending) > 0; attempt++ {
+		var failed []*unstructured.Unstructured
+		var errs []error
+		for _, o := range pending {
+			if err := c.deleteOne(ctx, o); err != nil {
+				failed = append(failed, o)
+				errs = append(errs, err)
+			}
 		}
-		bg := metav1.DeletePropagationBackground
-		if err := r.Delete(ctx, o.GetName(), metav1.DeleteOptions{PropagationPolicy: &bg}); err != nil && !apierrors.IsNotFound(err) {
-			errs = append(errs, fmt.Errorf("delete %s: %w", objectRef(o), err))
+		if len(failed) == 0 {
+			break
 		}
+		err := errors.Join(errs...)
+		if time.Now().Add(delay).After(deadline) {
+			return fmt.Errorf("delete failed %d times over %s, so the fault may still be active (%s): %w",
+				attempt, c.timeout, strings.Join(refsOf(failed), ", "), err)
+		}
+		c.log.Warn("delete failed; retrying", "event", "delete_retry", "attempt", attempt,
+			"retry_in", delay.String(), "objects", refsOf(failed), "error", err.Error())
+		if err := sleepCtx(ctx, delay); err != nil {
+			return err
+		}
+		delay = min(2*delay, maxRetryDelay)
+		pending = failed
 	}
-	if err := errors.Join(errs...); err != nil {
-		return err
-	}
-	deadline := time.Now().Add(timeout)
 	for {
 		var left []string
 		for _, o := range objs {
@@ -205,12 +226,56 @@ func (c cluster) remove(ctx context.Context, objs []*unstructured.Unstructured, 
 		if time.Now().After(deadline) {
 			slices.Sort(left)
 			return fmt.Errorf("still present after %s: %s. A Chaos Mesh object waits for chaos-controller-manager "+
-				"to recover its pods; check `kubectl -n chaos-mesh get pods` and the object's status", timeout, strings.Join(left, ", "))
+				"to recover its pods; check `kubectl -n chaos-mesh get pods` and the object's status", c.timeout, strings.Join(left, ", "))
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(poll):
+		if err := sleepCtx(ctx, c.poll); err != nil {
+			return err
 		}
+	}
+}
+
+func (c cluster) deleteOne(ctx context.Context, o *unstructured.Unstructured) error {
+	r, err := c.resource(o)
+	if err != nil {
+		return err
+	}
+	bg := metav1.DeletePropagationBackground
+	err = r.Delete(ctx, o.GetName(), metav1.DeleteOptions{PropagationPolicy: &bg})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete %s: %w", objectRef(o), err)
+	}
+	return nil
+}
+
+// discoveryMarkers lists the ConfigMaps labelled as faults in boutique (see configMapsGVR).
+func (c cluster) discoveryMarkers(ctx context.Context) ([]string, error) {
+	list, err := c.dc.Resource(configMapsGVR).Namespace(faultNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelFault + "=true"})
+	if err != nil {
+		return nil, fmt.Errorf("list configmaps in %s: %w", faultNamespace, err)
+	}
+	out := []string{}
+	for i := range list.Items {
+		out = append(out, "configmap/"+list.Items[i].GetName())
+	}
+	return out, nil
+}
+
+func refsOf(objs []*unstructured.Unstructured) []string {
+	out := make([]string, 0, len(objs))
+	for _, o := range objs {
+		out = append(out, objectRef(o))
+	}
+	return out
+}
+
+// sleepCtx waits for d, or less if ctx ends first.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
 	}
 }

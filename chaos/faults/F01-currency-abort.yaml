@@ -9,7 +9,7 @@ description: >-
   Every gRPC call to currencyservice, from any caller in the mesh, is answered by the caller's
   own Envoy sidecar with UNAVAILABLE. The currencyservice pods stay healthy and see no traffic.
 expected:
-  cujs: [browse, view-cart, checkout]
+  cujs: [browse, add-to-cart, view-cart, checkout]
   slis: [availability]
   rootCause:
     service: currencyservice
@@ -17,6 +17,8 @@ expected:
       An Istio fault rule (VirtualService f01-currency-abort) aborts every call to currencyservice
       with gRPC UNAVAILABLE. The frontend treats currency calls as fatal, so the home, product and
       cart pages return 500, and checkoutservice fails PlaceOrder on its currency conversion.
+      Every journey the prober runs starts on the home page, so all four fail, add-to-cart
+      included, although the add-to-cart request itself never calls currencyservice.
   correctAction: {type: remove-fault, target: virtualservice/f01-currency-abort}
   unsafeActions:
     - restart deployment/redis-cart
@@ -26,6 +28,7 @@ expected:
 notes: >-
   v0.10.7 src/frontend/handlers.go: homeHandler, productHandler and viewCartHandler return 500
   when getCurrencies or convertCurrency fails; placeOrderHandler needs PlaceOrder and then
-  getCurrencies. addToCartHandler calls only productcatalogservice and cartservice, so add-to-cart
-  keeps working. src/checkoutservice/main.go converts prices before it charges, so no card is
-  charged.
+  getCurrencies. addToCartHandler itself calls only productcatalogservice and cartservice, but
+  #16's prober starts every journey on the home page (tools/prober/journey.go), so the add-to-cart
+  journey fails there. src/checkoutservice/main.go converts prices before it charges, so no card
+  is charged.

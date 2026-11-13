@@ -46,7 +46,7 @@ func TestLoadLibraryRejects(t *testing.T) {
 	}{
 		{name: "unknown field", fault: testFaultYAML + "colour: red\n", want: "does not match"},
 		{name: "bad category", fault: replace(testFaultYAML, "category: istio-abort", "category: magic"), want: "does not match"},
-		{name: "duration over cap", fault: replace(testFaultYAML, "duration: 1m", "duration: 45m"), want: "does not match"},
+		{name: "duration over cap", fault: replace(testFaultYAML, "duration: 1m", "duration: 90m"), want: "does not match"},
 		{name: "manifest and procedure", fault: testFaultYAML + "procedure: {reason: \"a reason long enough here\", inject: [steps], revert: [steps]}\n", want: "does not match"},
 		{name: "none with target", fault: replace(testFaultYAML, "{type: remove-fault, target: virtualservice/f90-test-abort}", "{type: none, target: deployment/x}"), want: "does not match"},
 		{name: "slis without cujs", fault: replace(testFaultYAML, "cujs: [browse]", "cujs: []"), want: "does not match"},

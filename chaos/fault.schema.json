@@ -53,9 +53,9 @@
       }
     },
     "duration": {
-      "description": "Default run length. tools/gameday caps every run at 30m.",
+      "description": "Default run length. tools/gameday caps every run at 60m.",
       "type": "string",
-      "pattern": "^([1-9]|[12][0-9]|30)m$"
+      "pattern": "^([1-9]|[1-5][0-9]|60)m$"
     },
     "description": {"description": "What the fault does to the system, in plain words.", "type": "string", "minLength": 20},
     "expected": {
@@ -68,7 +68,7 @@
       "else": {"properties": {"slis": {"minItems": 1}}},
       "properties": {
         "cujs": {
-          "description": "Journeys expected to burn error budget. Empty when no journey is affected.",
+          "description": "Journeys expected to burn error budget, as #16's prober measures them (every journey starts on the home page). Empty when no journey is affected.",
           "type": "array",
           "uniqueItems": true,
           "items": {"enum": ["browse", "add-to-cart", "view-cart", "checkout"]}

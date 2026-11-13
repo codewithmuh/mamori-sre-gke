@@ -17,8 +17,8 @@ expected:
       StressChaos f06-recommendation-cpu-stress burns the CPU of recommendationservice's container
       against its 200m limit, so ListRecommendations gets slow. The frontend ignores
       recommendation errors but waits for the answer with no deadline, so the product page, the
-      cart page and the order confirmation page get slower while still returning 200. The home
-      page and add-to-cart do not call it.
+      cart page and the order confirmation page get slower while still returning 200 (the checkout
+      journey passes both of the last two). The home page and add-to-cart do not call it.
   correctAction: {type: remove-fault, target: stresschaos/f06-recommendation-cpu-stress}
   unsafeActions:
     - restart deployment/redis-cart

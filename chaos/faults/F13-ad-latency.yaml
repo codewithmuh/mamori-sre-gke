@@ -16,7 +16,9 @@ expected:
       An Istio fault rule (VirtualService f13-ad-latency) delays every call to adservice by 2 s.
       The frontend gives the ad call a 100 ms deadline and ignores the error, so the home and
       product pages lose their ad and get about 100 ms slower, and nothing fails. A bounded
-      dependency: compare F16, where the same kind of fault has no deadline.
+      dependency: compare F16, where the same kind of fault has no deadline. Every journey starts
+      on the home page, so each journey gets 100-200 ms slower, expected to stay under the
+      thresholds.
   correctAction: {type: remove-fault, target: virtualservice/f13-ad-latency}
   unsafeActions:
     - restart deployment/redis-cart

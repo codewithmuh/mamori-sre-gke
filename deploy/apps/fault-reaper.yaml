@@ -1,0 +1,25 @@
+# Wave 6: the fault-reaper CronJob (deploy/fault-reaper). It runs in chaos-mesh, which the wave-5
+# chaos-mesh Application creates, and removes game-day fault objects in boutique that outlived
+# their run, for example after the terminal running `gameday start` was closed.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fault-reaper
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "6"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/codewithmuh/mamori-sre-gke.git
+    targetRevision: main
+    path: deploy/fault-reaper
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: chaos-mesh
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

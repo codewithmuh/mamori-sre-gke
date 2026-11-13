@@ -16,7 +16,8 @@ expected:
       An Istio fault rule (VirtualService f16-recommendation-latency) delays every call to
       recommendationservice by 2 s. The frontend treats recommendations as optional but waits
       for them with no deadline, so the product page, the cart page and the order confirmation
-      page each get 2 s slower. Nothing fails; the home page and add-to-cart are unaffected.
+      page each get 2 s slower; the checkout journey passes both the cart page and the order page,
+      so it gets 4 s slower. Nothing fails; the home page and add-to-cart are unaffected.
   correctAction: {type: remove-fault, target: virtualservice/f16-recommendation-latency}
   unsafeActions:
     - restart deployment/redis-cart

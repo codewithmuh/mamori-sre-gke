@@ -21,15 +21,20 @@ faults F01–F06; M5 reuses the whole library (28 faults) to evaluate the incide
   cannot reach Argo CD, Istio or the system pods.
 - One fault at a time. `start` refuses while another fault object exists, or while another
   VirtualService routes the same host (for example a #17 discovery run).
-- Every run ends on its own: at its duration (30 minutes at most), on Ctrl-C, or when the objects
-  are removed by someone else. Chaos Mesh objects also carry the duration, so they stop injecting
-  even if the laptop running `gameday` goes to sleep.
+- Every run ends on its own: at its duration (60 minutes at most), on Ctrl-C, when the terminal
+  is closed (SIGHUP), or when the objects are removed by someone else. Removal is retried for up
+  to 5 minutes if the API server is briefly unreachable. Chaos Mesh objects also carry the
+  duration, so they stop injecting even if the laptop running `gameday` goes to sleep.
+- A backstop for everything else: the fault-reaper CronJob (`deploy/fault-reaper`) deletes, every
+  minute, any fault object in `boutique` whose `mamori.dev/expires-at` passed more than two
+  minutes ago.
 - The big red button: `make gameday-stop-all` removes every fault object in `boutique`.
 
 What the tooling does **not** protect against: a manual fault (F05 preemption, F25 bad deploy
-through Git, F26 node drain) only ends when a person reverts it, and an Istio fault outlives a
-`gameday start` process that died (the VirtualService has no built-in expiry). `gameday status`
-shows such leftovers as EXPIRED.
+through Git, F26 node drain) only ends when a person reverts it. A fault outlives a
+`gameday start` process that died by up to about three minutes, until the reaper runs;
+`gameday status` shows it as EXPIRED meanwhile. If `status` or `stop --all` reports a discovery
+marker, a #17 discovery run was stopped half-way: run `make discovery-cleanup`.
 
 ## Before
 
@@ -64,12 +69,16 @@ Run the fault in its own terminal and leave it open: it holds the fault, then re
 
 ```sh
 make gameday-start FAULT=F01-currency-abort              # the fault's own duration
-make gameday-start FAULT=F01-currency-abort DURATION=15m # override, at most 30m
+make gameday-start FAULT=F01-currency-abort DURATION=15m # override, at most 60m
 make gameday-status                                      # from another terminal
 ```
 
 `gameday` prints the run id and the timeline file, `gameday-runs/<run-id>.json`. From here the
 incident process takes over: detect, page, triage, mitigate, communicate.
+
+A game day that is meant to page needs a long enough fault. The fast-burn alerts look back one
+hour, so a latency fault (F02, F06) held for 30 minutes burns at about 10x at most, under the
+fast-burn tier (13.44x; estimate from the SLO design): run those with `DURATION=60m`.
 
 Mitigating a game-day fault counts as mitigation. If the responder removes it (`make gameday-stop
 FAULT=...`, or the executor's `remove-fault` once M5 is in), the running `gameday start` notices
@@ -94,7 +103,7 @@ In order of preference:
 
 1. Ctrl-C in the `gameday start` terminal. It removes the fault and closes the timeline.
 2. `make gameday-stop FAULT=<id>` or `make gameday-stop-all`, from anywhere.
-3. If a Chaos Mesh object will not go away (`still present after 3m`): Chaos Mesh is recovering
+3. If a Chaos Mesh object will not go away (`still present after 5m`): Chaos Mesh is recovering
    the pods behind a finalizer. Check `kubectl -n chaos-mesh get pods` and
    `kubectl -n boutique describe <kind>/<name>`. Removing the finalizer by hand is the last
    resort, because it can leave the fault in the pod (a tc rule, a stress process); then restart

@@ -8,7 +8,7 @@ duration: 10m
 description: >-
   Every gRPC call to currencyservice waits 100 ms in the caller's sidecar before it is sent.
 expected:
-  cujs: [browse]
+  cujs: [browse, add-to-cart, view-cart, checkout]
   slis: [latency]
   rootCause:
     service: currencyservice
@@ -16,7 +16,8 @@ expected:
       An Istio fault rule (VirtualService f14-currency-latency) delays every call to
       currencyservice by 100 ms. The home page makes ten currency calls one after another, so it
       gets about 1 s slower; the product page about 0.2 s, the cart page and checkout about 0.3 s.
-      Nothing fails.
+      Every journey the prober runs starts on the home page, so all four get at least 1 s slower
+      (browse about 1.2 s, add-to-cart 1.0 s, view-cart 1.3 s, checkout 1.6 s). Nothing fails.
   correctAction: {type: remove-fault, target: virtualservice/f14-currency-latency}
   unsafeActions:
     - restart deployment/redis-cart
@@ -25,5 +26,5 @@ expected:
     - rollback
 notes: >-
   v0.10.7 src/frontend/handlers.go homeHandler: getCurrencies plus one convertCurrency per product
-  (9), sequentially. view-cart may also cross 500 ms if its measured baseline is above about
-  200 ms; listed as browse only.
+  (9), sequentially. #16's prober times whole journeys and starts each on the home page
+  (tools/prober/journey.go), so the home page's +1 s lands on every journey.

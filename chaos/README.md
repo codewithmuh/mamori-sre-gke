@@ -23,7 +23,9 @@ chaos/
 - **Never through Argo CD.** Nothing here is under `deploy/`, so no Application syncs it, prunes
   it or self-heals it away mid-experiment. Argo CD installs only the tool (Chaos Mesh,
   `deploy/apps/chaos-mesh.yaml`).
-- **`tools/gameday` applies it** for a bounded time (30 minutes at most) and removes it again;
+- **`tools/gameday` applies it** for a bounded time (60 minutes at most) and removes it again,
+  and stamps it with `mamori.dev/expires-at`. If gameday dies, the fault-reaper CronJob
+  (`deploy/fault-reaper`) deletes it about two minutes after it expires;
   see [tools/gameday/README.md](../tools/gameday/README.md). Three faults are not objects in the
   cluster and need a person (see "Manual faults").
 - **Only in namespace `boutique`.** Every object carries `mamori.dev/fault: "true"` and
@@ -57,7 +59,7 @@ load time and by the Go tests in CI. The contract's fields:
 | `category` | `istio-abort`, `istio-delay`, `pod-failure`, `network`, `stress`, `bad-deploy`, `config` or `node` |
 | `manifest` | `manifests/<id>.yaml`, relative to `chaos/faults/` |
 | `target` | The workload the fault is aimed at: `{namespace: boutique, kind: Deployment, name}`. For node faults, the workload whose node is hit |
-| `duration` | Default run length, 1–30 minutes (`10m`) |
+| `duration` | Default run length, 1–60 minutes (`10m`) |
 | `gameDay` | `true` for exactly F01–F06, the faults #20 plans the game days around |
 | `expected.cujs` | Journeys expected to burn budget: `browse`, `add-to-cart`, `view-cart`, `checkout`. Empty when users are not affected |
 | `expected.rootCause` | `{service, summary}`: the service at fault (or `node`) and what happened |
@@ -87,8 +89,18 @@ Every `expected` block was worked out from the Online Boutique v0.10.7 source (t
   F16), while a slow ad service cannot (F13).
 - `src/checkoutservice/main.go`: PlaceOrder's order (cart, catalog, currency, shipping quote,
   **charge**, ship, empty cart, email). Email errors are ignored (F11). A ShipOrder failure comes
-  after the charge and returns UNAVAILABLE, which Istio's default retry retries: duplicate charges
-  (F28, found with #27).
+  after the charge and returns UNAVAILABLE: the card is charged and there is no order (F28, found
+  with #27). Istio's built-in default retry would repeat it up to three times; the mesh's
+  `defaultHttpRetryPolicy` in `deploy/istio/istiod-values.yaml` no longer retries UNAVAILABLE.
+- #27's edge route retries a failed page read twice (writes are not retried on errors). That turns
+  partial faults into much smaller journey failure rates (F12: 40 % of home pages, about 6.5 % of
+  probes).
+- #16's prober (`tools/prober/journey.go`): every journey starts on the home page (browse =
+  home + product; add-to-cart = home + the add, stopping at the 302; view-cart adds the cart page;
+  checkout adds the order). So a fault that breaks the home page (currency, product catalog, cart,
+  frontend) fails all four journeys, and the latency SLIs see whole-journey sums. Once the forked
+  frontend (#28) is deployed, currency faults are expected to stop breaking browse and view-cart;
+  the fault files change then, not now.
 - `kustomize/base`: every service has one replica; `redis-cart` keeps carts in an `emptyDir`, so a
   new redis pod means every cart is lost (F03, F05, F26); cartservice's health check never looks
   at Redis.
@@ -100,8 +112,8 @@ the file updated in the same pull request as the postmortem.
 
 | Id | Category | How | Journeys expected to burn |
 |---|---|---|---|
-| F01-currency-abort | istio-abort | gameday | browse, view-cart, checkout |
-| F02-productcatalog-latency | istio-delay | gameday | browse, view-cart, checkout (latency) |
+| F01-currency-abort | istio-abort | gameday | all four (every journey starts on the home page) |
+| F02-productcatalog-latency | istio-delay | gameday | all four (latency) |
 | F03-redis-cart-pod-kill | pod-failure | gameday | all four, briefly; every cart lost |
 | F04-checkout-bad-config | config | gameday | checkout |
 | F05-node-preemption | node | manual | all four, briefly |
@@ -111,9 +123,9 @@ the file updated in the same pull request as the postmortem.
 | F09-shipping-abort | istio-abort | gameday | view-cart, checkout |
 | F10-payment-abort | istio-abort | gameday | checkout |
 | F11-email-abort | istio-abort | gameday | none (negative case) |
-| F12-currency-abort-partial | istio-abort | gameday | browse, view-cart, checkout (fan-out turns 5 % into ~40 %) |
+| F12-currency-abort-partial | istio-abort | gameday | all four (fan-out turns 5 % into 40 % of home pages; edge retries leave about 6.5-20 % per journey) |
 | F13-ad-latency | istio-delay | gameday | none (bounded by the frontend's 100 ms deadline) |
-| F14-currency-latency | istio-delay | gameday | browse (latency) |
+| F14-currency-latency | istio-delay | gameday | all four (latency) |
 | F15-cart-latency | istio-delay | gameday | all four (latency) |
 | F16-recommendation-latency | istio-delay | gameday | browse, view-cart, checkout (latency) |
 | F17-redis-cart-pod-failure | pod-failure | gameday | all four |
@@ -126,8 +138,8 @@ the file updated in the same pull request as the postmortem.
 | F24-productcatalog-bad-canary | bad-deploy | gameday | all four (latency) |
 | F25-checkout-bad-deploy-git | bad-deploy | manual | checkout |
 | F26-node-drain | node | manual | all four, briefly |
-| F27-currency-memory-stress | stress | gameday | browse, view-cart, checkout |
-| F28-shipping-shiporder-abort | istio-abort | gameday | checkout; duplicate charges |
+| F27-currency-memory-stress | stress | gameday | all four, briefly |
+| F28-shipping-shiporder-abort | istio-abort | gameday | checkout; the card is charged, no order |
 
 Correct actions: `remove-fault` on the fault's own object for everything gameday applies, except
 F03 (`none`: the pod is back on its own, the carts are not); `none` for F05 and F26; `rollback`
@@ -161,6 +173,7 @@ containerd socket for GKE's Container-Optimized OS nodes, no dashboard, no DNS s
 | chaos-controller-manager | 1 | 25m / 500m | 128Mi / 512Mi |
 | chaos-daemon (DaemonSet, privileged) | 1 per node (3) | 10m / 500m each | 64Mi / 256Mi each |
 | **Total** | 4 | **55m** | **320Mi** |
+| fault-reaper (CronJob, `deploy/fault-reaper`) | 1 for a few seconds a minute | 10m / 200m (+ init 5m / 50m) | 48Mi / 128Mi (+ init 8Mi / 16Mi) |
 
 Faults add their own load while they run: StressChaos workers run inside the target container
 and its limits; F24's canary pod requests 50m / 32Mi plus its sidecar (20m / 64Mi).

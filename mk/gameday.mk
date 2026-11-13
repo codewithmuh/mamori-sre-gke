@@ -5,7 +5,7 @@ GAMEDAY := bin/gameday
 GAMEDAY_GO_IMAGE := golang:1.27.3-trixie
 # Extra flags for every gameday command, e.g. GAMEDAY_ARGS="--context gke_mamori-lab-123456_asia-northeast1-a_mamori"
 GAMEDAY_ARGS ?=
-# Overrides the fault's own duration for gameday-start (max 30m), e.g. DURATION=15m.
+# Overrides the fault's own duration for gameday-start (max 60m), e.g. DURATION=60m.
 DURATION ?=
 
 .PHONY: gameday-build gameday-list gameday-start gameday-stop gameday-stop-all gameday-status \

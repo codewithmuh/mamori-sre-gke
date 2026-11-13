@@ -24,4 +24,6 @@ spec:
         - ./emailservice.boutique.svc.cluster.local
         - ./productcatalogservice.boutique.svc.cluster.local
         - ./shippingservice.boutique.svc.cluster.local
+        # Traces go to the OpenTelemetry collector (#19). Kept, so only the Charge call fails.
+        - observability/otel-collector.observability.svc.cluster.local
         - istio-system/*

@@ -113,6 +113,7 @@ func fakeClient(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	for gvk, gvr := range faultKinds {
 		listKinds[gvr] = gvk.Kind + "List"
 	}
+	listKinds[configMapsGVR] = "ConfigMapList"
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds, objs...)
 }
 

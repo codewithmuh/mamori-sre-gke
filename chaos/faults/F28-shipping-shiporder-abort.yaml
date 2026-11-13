@@ -15,10 +15,11 @@ expected:
     service: shippingservice
     summary: >-
       An Istio fault rule (VirtualService f28-shipping-shiporder-abort) aborts only ShipOrder.
-      checkoutservice has already charged the card when ShipOrder fails, and returns UNAVAILABLE.
-      The frontend's sidecar retries PlaceOrder under Istio's default retry policy (2 retries,
-      retryOn includes unavailable), so each failed checkout charges the card up to three times.
-      The order page returns 500.
+      checkoutservice has already charged the card when ShipOrder fails, and returns UNAVAILABLE,
+      so every checkout attempt charges the card once and then fails with 500: money taken, no
+      order. Nothing repeats the call: the mesh's default retry policy only retries calls that
+      cannot have reached the service, and the edge does not retry writes. Under Istio's built-in
+      default retry (which retries UNAVAILABLE) the same fault charged up to three times.
   correctAction: {type: remove-fault, target: virtualservice/f28-shipping-shiporder-abort}
   unsafeActions:
     - restart deployment/redis-cart
@@ -27,6 +28,9 @@ expected:
     - rollback
 notes: >-
   v0.10.7 src/checkoutservice/main.go: chargeCard runs before shipOrder, and a shipOrder error
-  returns codes.Unavailable. The cart page's GetQuote still works. Watch paymentservice's Charge
-  count against checkout attempts (istio_requests_total): about 3:1 while Istio's default retry
-  policy is in place. Payment is a mock, so no money moves. Found by #27.
+  returns codes.Unavailable. The cart page's GetQuote still works. deploy/istio/istiod-values.yaml
+  (#8) sets meshConfig.defaultHttpRetryPolicy to connect-failure, refused-stream and
+  reset-before-request, and #27's edge write route retries only those too. Watch paymentservice's
+  Charge count against checkout attempts (istio_requests_total): 1:1 now, about 3:1 with Istio's
+  built-in default. A shopper who tries again is charged again. Payment is a mock, so no money
+  moves. Found with #27.

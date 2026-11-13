@@ -28,5 +28,5 @@ expected:
 notes: >-
   v0.10.7 src/frontend/handlers.go: getProducts and getProduct errors are fatal in every handler
   that calls them. viewCartHandler and checkoutservice's prepOrderItems call GetProduct once per
-  cart item, so view-cart and checkout fail only with a non-empty cart (the journeys add an item
-  first; assumption about #16's prober).
+  cart item, so view-cart and checkout fail only with a non-empty cart; #16's view-cart and
+  checkout journeys add an item first. Every journey also starts on the home page.

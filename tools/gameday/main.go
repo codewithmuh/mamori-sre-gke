@@ -13,8 +13,9 @@ import (
 )
 
 func main() {
-	// Ctrl-C and SIGTERM end a running fault early; the cleanup still runs.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// Ctrl-C, SIGTERM and SIGHUP (the terminal was closed) end a running fault early; the
+	// cleanup still runs.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	code := newApp(os.Stdout, os.Stderr, os.Stdin).run(ctx, os.Args[1:])
 	stop()
 	os.Exit(code)

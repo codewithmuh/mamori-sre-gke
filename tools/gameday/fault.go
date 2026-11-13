@@ -16,8 +16,9 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// maxDuration caps every run, whatever the fault file or --duration says.
-const maxDuration = 30 * time.Minute
+// maxDuration caps every run, whatever the fault file or --duration says. An hour, because the
+// fast-burn alerts look back one hour: a shorter fault may never reach the paging rate.
+const maxDuration = 60 * time.Minute
 
 // Paths inside the repository.
 const (

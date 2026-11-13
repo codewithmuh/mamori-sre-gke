@@ -71,7 +71,7 @@ func newApp(stdout, stderr io.Writer, stdin io.Reader) *app {
 		newClient:      newKubeClient,
 		minDuration:    30 * time.Second,
 		pollInterval:   5 * time.Second,
-		cleanupTimeout: 3 * time.Minute,
+		cleanupTimeout: 5 * time.Minute,
 	}
 }
 
@@ -143,7 +143,7 @@ func (a *app) dispatch(ctx context.Context, args []string) error {
 	case "start":
 		var dur time.Duration
 		var manual bool
-		fs.DurationVar(&dur, "duration", 0, "how long to hold the fault (default: the fault's own; max 30m)")
+		fs.DurationVar(&dur, "duration", 0, "how long to hold the fault (default: the fault's own; max 60m)")
 		fs.BoolVar(&manual, "manual", false, "record a timeline while you follow a manual procedure")
 		pos, err := parseArgs(fs, rest, 1)
 		if err != nil {
@@ -277,7 +277,7 @@ func (a *app) cluster(opts options) (cluster, string, error) {
 	if err != nil {
 		return cluster{}, "", err
 	}
-	return cluster{dc: dc}, name, nil
+	return cluster{dc: dc, log: a.log, timeout: a.cleanupTimeout, poll: a.pollInterval}, name, nil
 }
 
 type faultSummary struct {

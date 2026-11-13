@@ -538,3 +538,90 @@ func TestStartRecordsDeletionStart(t *testing.T) {
 		t.Errorf("timeline %+v", tl)
 	}
 }
+
+const discoveryMarker = `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cuj-discovery-redis-cart
+  namespace: boutique
+  labels: {mamori.dev/fault: "true", app.kubernetes.io/managed-by: cuj-discovery}
+data: {replicas: "1"}
+`
+
+func TestDiscoveryMarkers(t *testing.T) {
+	repo := defaultRepo(t)
+	dc := fakeClient(liveObject(t, discoveryMarker))
+
+	a, _, errb := testApp(repo, dc, "")
+	if code := a.run(context.Background(), []string{"start", testFaultID}); code != exitRefused || !strings.Contains(errb.String(), "run make discovery-cleanup") {
+		t.Errorf("start with a marker: exit %d\n%s", code, errb)
+	}
+	a, out, _ := testApp(repo, dc, "")
+	if code := a.run(context.Background(), []string{"status"}); code != exitOK || !strings.Contains(out.String(), "configmap/cuj-discovery-redis-cart") || !strings.Contains(out.String(), "run make discovery-cleanup") {
+		t.Errorf("status: %d\n%s", code, out)
+	}
+	a, out, _ = testApp(repo, dc, "")
+	if code := a.run(context.Background(), []string{"status", "-o", "json"}); code != exitOK || !strings.Contains(out.String(), `"discoveryMarkers":["configmap/cuj-discovery-redis-cart"]`) {
+		t.Errorf("status json: %d\n%s", code, out)
+	}
+	a, out, _ = testApp(repo, dc, "")
+	if code := a.run(context.Background(), []string{"stop", "--all"}); code != exitOK || !strings.Contains(out.String(), "run make discovery-cleanup") || strings.Contains(out.String(), "nothing to stop") {
+		t.Errorf("stop --all: %d\n%s", code, out)
+	}
+	a, out, _ = testApp(repo, dc, "")
+	if code := a.run(context.Background(), []string{"stop", "--all", "-o", "json"}); code != exitOK || !strings.Contains(out.String(), `"discoveryMarkers":["configmap/cuj-discovery-redis-cart"]`) {
+		t.Errorf("stop --all json: %d\n%s", code, out)
+	}
+	cmGVR := schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}
+	if _, err := dc.Resource(cmGVR).Namespace(faultNamespace).Get(context.Background(), "cuj-discovery-redis-cart", metav1.GetOptions{}); err != nil {
+		t.Errorf("gameday must never delete a discovery marker: %v", err)
+	}
+}
+
+func TestRemoveRetriesDelete(t *testing.T) {
+	dc := fakeClient(liveObject(t, testManifestYAML))
+	var calls atomic.Int32
+	// The API server is unreachable for the first two attempts, as during a zonal
+	// control-plane upgrade.
+	dc.PrependReactor("delete", "virtualservices", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if calls.Add(1) <= 2 {
+			return true, nil, errors.New("dial tcp 10.0.0.2:443: connect: connection refused")
+		}
+		return false, nil, nil
+	})
+	a, out, errb := testApp(defaultRepo(t), dc, "")
+	if code := a.run(context.Background(), []string{"stop", testFaultID}); code != exitOK {
+		t.Fatalf("exit %d\n%s", code, errb)
+	}
+	if !strings.Contains(out.String(), "removed virtualservice/f90-test-abort") || strings.Count(errb.String(), `"event":"delete_retry"`) != 2 {
+		t.Errorf("stdout:\n%s\nstderr:\n%s", out, errb)
+	}
+
+	// It never comes back: give up loudly after the cleanup timeout.
+	dc = fakeClient(liveObject(t, testManifestYAML))
+	dc.PrependReactor("delete", "virtualservices", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("connection refused")
+	})
+	a, _, errb = testApp(defaultRepo(t), dc, "")
+	if code := a.run(context.Background(), []string{"stop", "--all"}); code != exitError || !strings.Contains(errb.String(), "the fault may still be active") {
+		t.Errorf("exit %d\n%s", code, errb)
+	}
+
+	// A cancelled context stops the retries.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cl := cluster{dc: dc, log: newLogger(&syncBuffer{}), timeout: time.Minute, poll: time.Second}
+	if err := cl.remove(ctx, []*unstructured.Unstructured{liveObject(t, testManifestYAML)}); !errors.Is(err, context.Canceled) {
+		t.Errorf("remove with a cancelled context: %v", err)
+	}
+}
+
+func TestStartStampsExpiry(t *testing.T) {
+	f := &fault{ID: testFaultID, objects: []*unstructured.Unstructured{liveObject(t, testManifestYAML)}}
+	end := time.Date(2026, 12, 5, 10, 10, 0, 0, time.UTC)
+	for _, o := range prepareObjects(f, "run-1", end, 10*time.Minute) {
+		if got := o.GetAnnotations()[annotationExpiresAt]; got != "2026-12-05T10:10:00Z" {
+			t.Errorf("%s: expires-at %q", objectRef(o), got)
+		}
+	}
+}

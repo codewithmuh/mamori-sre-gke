@@ -1,0 +1,97 @@
+# Every minute, delete game-day fault objects whose run ended more than two minutes ago (reap.sh).
+# A run that pages is up to an hour long, so a minute's delay in reaping is small. The pod runs for
+# a few seconds; its requests only count while it runs.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fault-reaper
+  namespace: chaos-mesh
+  labels:
+    app.kubernetes.io/name: fault-reaper
+    app.kubernetes.io/part-of: mamori
+spec:
+  schedule: "* * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 30
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 50
+      ttlSecondsAfterFinished: 600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: fault-reaper
+            app.kubernetes.io/part-of: mamori
+        spec:
+          serviceAccountName: fault-reaper
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            # registry.k8s.io/kubectl is distroless (no shell), so copy busybox's static binary in.
+            - name: busybox
+              image: docker.io/library/busybox:1.37.0-musl@sha256:f6a95d611e0a8780fabdb2aec43e31275b2720dfefa3e41b16835bfc42454478
+              command: ["/bin/busybox", "cp", "/bin/busybox", "/tools/busybox"]
+              resources:
+                requests:
+                  cpu: 5m
+                  memory: 8Mi
+                limits:
+                  cpu: 50m
+                  memory: 16Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              volumeMounts:
+                - name: tools
+                  mountPath: /tools
+          containers:
+            - name: reaper
+              image: registry.k8s.io/kubectl:v1.36.6@sha256:0650805141538d13ccbb6bb9e0dd647bc415bc002898357970211c4d47224396
+              command: ["/tools/busybox", "sh", "/scripts/reap.sh"]
+              env:
+                # kubectl keeps its discovery cache under $HOME; the root filesystem is read-only.
+                - name: HOME
+                  value: /tmp
+                - name: PATH
+                  value: /bin
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 48Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              volumeMounts:
+                - name: tools
+                  mountPath: /tools
+                  readOnly: true
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tools
+              emptyDir:
+                sizeLimit: 8Mi
+            - name: tmp
+              emptyDir:
+                sizeLimit: 32Mi
+            - name: scripts
+              configMap:
+                name: fault-reaper-script

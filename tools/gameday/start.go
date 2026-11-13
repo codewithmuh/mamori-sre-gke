@@ -88,6 +88,14 @@ func (a *app) start(ctx context.Context, opts options, f *fault, requested time.
 		}
 		return refused("another fault is active in %s: %s. One fault at a time: `gameday stop --all` first", faultNamespace, joinRefs(refs))
 	}
+	markers, err := cl.discoveryMarkers(ctx)
+	if err != nil {
+		return err
+	}
+	if len(markers) > 0 {
+		return refused("a stopped discovery run left %s in %s (redis-cart may still be scaled to zero): %s first",
+			joinRefs(markers), faultNamespace, discoveryHint)
+	}
 	clashes, err := cl.conflicts(ctx, f.objects)
 	if err != nil {
 		return err
@@ -110,7 +118,7 @@ func (a *app) start(ctx context.Context, opts options, f *fault, requested time.
 		if err := cl.create(ctx, o); err != nil {
 			log.Error("apply failed; removing what was applied", "event", "apply_failed", "object", objectRef(o), "error", err.Error())
 			_ = tl.add("apply_failed", objectRef(o), err.Error())
-			cleanupErr := cl.remove(cleanupContext(ctx), created, a.cleanupTimeout, a.pollInterval)
+			cleanupErr := cl.remove(cleanupContext(ctx), created)
 			_ = tl.finish(statusFailed, reasonApply)
 			return errors.Join(err, cleanupErr)
 		}
@@ -132,7 +140,7 @@ func (a *app) start(ctx context.Context, opts options, f *fault, requested time.
 	reason := a.hold(ctx, cl, tl, objs, dur)
 	if reason != reasonRemoved {
 		_ = tl.add("removing", "", reason)
-		if err := cl.remove(cleanupContext(ctx), objs, a.cleanupTimeout, a.pollInterval); err != nil {
+		if err := cl.remove(cleanupContext(ctx), objs); err != nil {
 			log.Error("cleanup failed", "event", "cleanup_failed", "error", err.Error())
 			_ = tl.add("cleanup_failed", "", err.Error())
 			_ = tl.finish(statusFailed, reasonCleanup)

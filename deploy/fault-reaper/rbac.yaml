@@ -1,0 +1,49 @@
+# The reaper may read and delete the seven fault kinds in boutique, nothing else. RBAC cannot
+# filter by label, so admission-policy.yaml limits its deletes to fault objects with an expiry.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fault-reaper
+  namespace: chaos-mesh
+  labels:
+    app.kubernetes.io/name: fault-reaper
+    app.kubernetes.io/part-of: mamori
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fault-reaper
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: fault-reaper
+    app.kubernetes.io/part-of: mamori
+rules:
+  - apiGroups: [networking.istio.io]
+    resources: [virtualservices, sidecars]
+    verbs: [get, list, delete]
+  - apiGroups: [security.istio.io]
+    resources: [authorizationpolicies]
+    verbs: [get, list, delete]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, delete]
+  - apiGroups: [chaos-mesh.org]
+    resources: [podchaos, networkchaos, stresschaos]
+    verbs: [get, list, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fault-reaper
+  namespace: boutique
+  labels:
+    app.kubernetes.io/name: fault-reaper
+    app.kubernetes.io/part-of: mamori
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fault-reaper
+subjects:
+  - kind: ServiceAccount
+    name: fault-reaper
+    namespace: chaos-mesh

@@ -24,21 +24,27 @@ current directory to `chaos/faults` (or takes `--repo`). Every command takes `-o
 1. Loads the whole library and checks every file against `chaos/fault.schema.json` and the rules
    below. One bad file stops it: a half-loaded library would hide mistakes until a game day.
 2. **Preflight.** Refuses (exit 2) if any fault object already exists in `boutique` (one fault at
-   a time), or if another mesh VirtualService routes the same host or another Sidecar selects
-   the same pods (Istio's result would be undefined). A #17 discovery run is the likely clash.
+   a time), if a stopped discovery run (#17) left its marker ConfigMap (labelled
+   `mamori.dev/fault: "true"`; redis-cart may still be scaled to zero: run `make discovery-cleanup`),
+   or if another mesh VirtualService routes the same host or another Sidecar selects the same pods
+   (Istio's result would be undefined). A #17 discovery run is the likely clash.
 3. Writes `gameday-runs/<run-id>.json` (run id `20261205T100000Z-F01-currency-abort`) and applies
-   the objects with the dynamic client. Each gets `mamori.dev/run-id` and
-   `mamori.dev/expires-at`; Chaos Mesh objects get `spec.duration` set to the run's duration, so
-   Chaos Mesh stops injecting by itself even if this process dies. If any object fails, the ones
-   already applied are deleted again (exit 1).
+   the objects with the dynamic client. Each always gets `mamori.dev/run-id` and
+   `mamori.dev/expires-at` (UTC, RFC 3339), which the fault-reaper uses. Chaos Mesh objects get
+   `spec.duration` set to the run's duration, so Chaos Mesh stops injecting by itself even if
+   this process dies. If any object fails, the ones already applied are deleted again (exit 1).
 4. **Holds** the fault in the foreground until the duration ends (default: the fault's own; at
-   most 30 minutes), a signal arrives (Ctrl-C, SIGTERM), or someone else removes the objects
+   most 60 minutes), a signal arrives (Ctrl-C, SIGTERM, or SIGHUP when the terminal is closed),
+   or someone else removes the objects
    (for example the executor's `remove-fault`), which it notices within 5 seconds and records as
    `removed-externally`, with the time.
-5. **Removes** the objects and waits until they are gone. A Chaos Mesh object only goes once Chaos
-   Mesh has recovered its pods (a finalizer), so "gone" means "recovered". If they are still there
-   after 3 minutes, it says so and exits 1: run `gameday stop <id>` again, and check
-   `kubectl -n chaos-mesh get pods`.
+5. **Removes** the objects and waits until they are gone. A failed delete (the API server is
+   unreachable during a control-plane upgrade, the network drops, the login token expired) is
+   retried with backoff (5 s, doubling, at most 30 s apart) and logged as `delete_retry` each time,
+   for up to 5 minutes in all. A Chaos Mesh object only goes once Chaos Mesh has recovered its pods
+   (a finalizer), so "gone" means "recovered". If it still fails after 5 minutes, it says so loudly
+   (the fault may still be active) and exits 1: run `gameday stop <id>` again, and check
+   `kubectl -n chaos-mesh get pods`. A second Ctrl-C does not interrupt the cleanup.
 
 With `-o json`, `start` prints exactly two lines on stdout: `{"event":"started","runId",
 "faultId","startedAt","endsAt","objects":[...],"timeline"}` once everything is applied, and
@@ -55,8 +61,15 @@ With `-o json`, `start` prints exactly two lines on stdout: `{"event":"started",
 - Chaos Mesh selectors may only name `boutique` (also enforced by Chaos Mesh's namespace-scoped
   install).
 - `stop` deletes by label selector, so it can only ever delete fault objects.
-- Every run is capped at 30 minutes, and `gameday status` flags objects that outlived their
-  `expires-at` (a `start` that died), for `stop` to clean up.
+- Every run is capped at 60 minutes, and `gameday status` flags objects that outlived their
+  `expires-at` (a `start` that died). The **fault-reaper** CronJob (`deploy/fault-reaper`, every
+  minute) deletes them about two minutes after they expire, so a fault without a TTL of its own
+  (VirtualService, Sidecar, AuthorizationPolicy, Deployment) cannot outlive its run by much. Its
+  RBAC allows get, list and delete on the seven kinds in `boutique` only, and a
+  ValidatingAdmissionPolicy lets it delete only labelled objects that carry `expires-at`.
+- `status` and `stop --all` also report discovery markers (ConfigMaps labelled as faults, see
+  preflight) and print `run make discovery-cleanup`. gameday never deletes them: only the
+  discovery tool knows how to restore redis-cart's replicas.
 
 Not covered: the three manual faults (`F05`, `F25`, `F26`) change things outside `boutique` or go
 through Git. `start` prints their steps and exits 3; `--manual` records the timeline while a
@@ -94,7 +107,8 @@ The incident's own timeline (detection, acknowledgement, mitigation) belongs to 
 ## Permissions
 
 The person (or CI job) running `start` and `stop` needs, in namespace `boutique` only: create,
-get, list, delete on the allowed kinds. `status` needs get and list. Chaos Mesh's own admission
+get, list, delete on the allowed kinds, and list on ConfigMaps (discovery markers). `status`
+needs get and list. Chaos Mesh's own admission
 webhook also checks that whoever creates a Chaos object may create that kind in `boutique`.
 
 ## Develop and test
@@ -107,8 +121,9 @@ docker run --rm -v "$PWD":/src -w /src/tools/gameday golangci/golangci-lint:v2.1
 ```
 
 The tests use client-go's fake dynamic client: the apply-hold-remove cycle, external removal,
-signals, refusals (another fault active, a host or Sidecar clash), a failed apply rolled back, a
-finalizer that never clears, the manual flow, `stop`, `status`, and kubeconfig loading.
+signals, refusals (another fault active, a discovery marker, a host or Sidecar clash), a failed
+apply rolled back, deletes retried while the API server is unreachable, a finalizer that never
+clears, the manual flow, `stop`, `status`, and kubeconfig loading.
 `library_test.go` loads the real `chaos/faults`: every file against the schema, every manifest
 object's labels, namespace and kind, the six game-day ids, 20–30 faults, every category, no
 orphaned manifests.

@@ -9,16 +9,20 @@ description: >-
   5 % of gRPC calls to currencyservice, from any caller in the mesh, are answered by the
   caller's own Envoy sidecar with UNAVAILABLE. The rest go through as normal.
 expected:
-  cujs: [browse, view-cart, checkout]
+  cujs: [browse, add-to-cart, view-cart, checkout]
   slis: [availability]
   rootCause:
     service: currencyservice
     summary: >-
       An Istio fault rule (VirtualService f12-currency-abort-partial) aborts 5 % of calls to
       currencyservice. The home page makes ten currency calls one after another and needs them all,
-      so about 40 % of home pages fail (1 - 0.95^10). Product pages fail about 10 %, cart pages and
-      checkouts about 14 % (two and three calls). A small dependency error rate is multiplied by
-      fan-out.
+      so about 40 % of home pages fail (1 - 0.95^10); product pages about 10 %, cart pages and the
+      order step about 14 % (two and three calls). Every journey the prober runs starts on the home
+      page, so all four are hit. The edge retries a failed page read twice (#27), which hides most
+      of it: about 6.5 % of add-to-cart and browse probes, 6.7 % of view-cart and 20 % of checkout
+      probes still fail (placing the order is a write, which the edge does not retry). Without
+      those edge retries it would be 40-56 % per journey. A small dependency error rate is
+      multiplied by fan-out.
   correctAction: {type: remove-fault, target: virtualservice/f12-currency-abort-partial}
   unsafeActions:
     - restart deployment/redis-cart
@@ -28,5 +32,11 @@ expected:
 notes: >-
   v0.10.7 src/frontend/handlers.go homeHandler: getCurrencies once plus convertCurrency for each
   of the 9 products in products.json; avoidNoopCurrencyConversionRPC is false in rpc.go, so USD to
-  USD is converted too. Percentages assume one item in the cart. Istio turns off retries on a
-  route with a fault, so the 5 % is not retried away.
+  USD is converted too. Percentages assume one item in the cart and independent aborts. A page
+  fails with p = 1 - 0.95^n for its n currency calls: home 10, product 2, cart 3, order 3. #27's
+  edge route retries page reads twice on 5xx (a page fails with p^3: home 6.5 %, product 0.1 %,
+  cart 0.3 %) and does not retry writes on 5xx (the order stays at 14 %). The prober's journeys
+  (tools/prober/journey.go): browse = home + product 6.6 %, add-to-cart = home + add 6.5 %,
+  view-cart = + cart page 6.7 %, checkout = + order 20 %. Without the edge retries (Istio's default
+  edge route, until #32 applies #27's change): 46 %, 40 %, 49 %, 56 %. Istio turns off retries on
+  the route that carries the fault, so only the edge retry acts.
