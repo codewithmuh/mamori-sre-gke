@@ -11,9 +11,10 @@ locals {
   # Any workflow run of the repository (any branch, any pull request from the repository itself).
   github_repo_principal = "principalSet://iam.googleapis.com/${local.pool}/attribute.repository/${var.github_repository}"
 
-  # Only jobs that declare `environment: lab`. GitHub puts the environment into the sub claim, after
-  # the repository's immutable subject prefix (see var.github_subject_prefix).
-  github_apply_principal = "principal://iam.googleapis.com/${local.pool}/subject/${var.github_subject_prefix}:environment:${var.github_apply_environment}"
+  # Only jobs that declare `environment: lab` and run on refs/heads/main (attribute.lab_main in
+  # wif.tf). A workflow on another branch or a pull request that names the environment gets
+  # "false" and can't impersonate tf-apply, even before the environment's own protection exists.
+  github_apply_principal = "principalSet://iam.googleapis.com/${local.pool}/attribute.lab_main/true"
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -29,7 +30,7 @@ resource "google_service_account" "tf_plan" {
 
 resource "google_service_account" "tf_apply" {
   account_id   = "tf-apply"
-  display_name = "Terraform apply (GitHub environment lab)"
+  display_name = "Terraform apply (GitHub environment lab, main only)"
 
   depends_on = [google_project_service.enabled]
 }
@@ -69,7 +70,7 @@ locals {
     "roles/compute.networkAdmin"              = "VPC, subnet, router, Cloud NAT, global static IP"
     "roles/compute.securityAdmin"             = "Cloud Armor security policy (networkAdmin can't create one)"
     "roles/container.clusterAdmin"            = "GKE cluster and node pool, without access to Kubernetes objects"
-    "roles/artifactregistry.admin"            = "create repositories, cleanup policies and repository-level IAM"
+    "roles/artifactregistry.admin"            = "the spend-guard image repository, its cleanup policy and its IAM (mamori lives in registry.tf here)"
     "roles/certificatemanager.editor"         = "DNS authorization, managed certificate, map and map entry (includes delete)"
     "roles/pubsub.admin"                      = "budget-alerts topic; connecting a budget to a topic needs topics.setIamPolicy"
     "roles/cloudfunctions.developer"          = "spend-guard function and its Eventarc trigger"
@@ -122,19 +123,45 @@ resource "google_billing_account_iam_member" "tf_plan_budgets" {
   depends_on = [google_project_service.enabled]
 }
 
-# State bucket. Apply reads and writes state. Plan reads state and may create and delete only the
-# lock file (<prefix>/<workspace>.tflock): any branch can run plan, so it must not be able to
-# overwrite the state object.
+# State bucket. Apply reads and writes state. Any branch can run plan, so tf-plan gets less:
+# - it reads only the state prefixes listed here (other roots' state, such as oncall/ with its
+#   PagerDuty keys, stays unreadable);
+# - it may create and delete only lock files (<prefix>/<workspace>.tflock) under them, so it can
+#   never overwrite state.
+locals {
+  tf_plan_state_prefixes = ["lab/"]
+
+  tf_plan_state_objects = join(" || ", [
+    for p in local.tf_plan_state_prefixes :
+    "resource.name.startsWith('projects/_/buckets/${local.state_bucket}/objects/${p}')"
+  ])
+}
+
 resource "google_storage_bucket_iam_member" "tf_apply_state" {
   bucket = google_storage_bucket.tfstate.name
   role   = "roles/storage.objectUser"
   member = google_service_account.tf_apply.member
 }
 
+# `terraform init` lists the prefix to find workspaces. Listing is checked on the bucket, where an
+# object-name condition can't match, so it gets its own grant. Legacy Bucket Reader allows listing
+# object names and metadata, never object content.
+resource "google_storage_bucket_iam_member" "tf_plan_state_list" {
+  bucket = google_storage_bucket.tfstate.name
+  role   = "roles/storage.legacyBucketReader"
+  member = google_service_account.tf_plan.member
+}
+
 resource "google_storage_bucket_iam_member" "tf_plan_state_read" {
   bucket = google_storage_bucket.tfstate.name
   role   = "roles/storage.objectViewer"
   member = google_service_account.tf_plan.member
+
+  condition {
+    title       = "plannable-state-only"
+    description = "Read state objects under ${join(", ", local.tf_plan_state_prefixes)} only."
+    expression  = local.tf_plan_state_objects
+  }
 }
 
 resource "google_storage_bucket_iam_member" "tf_plan_state_lock" {
@@ -144,8 +171,8 @@ resource "google_storage_bucket_iam_member" "tf_plan_state_lock" {
 
   condition {
     title       = "lock-files-only"
-    description = "Create and delete Terraform lock files, nothing else."
-    expression  = "resource.name.endsWith('.tflock')"
+    description = "Create and delete Terraform lock files under ${join(", ", local.tf_plan_state_prefixes)}, nothing else."
+    expression  = "(${local.tf_plan_state_objects}) && resource.name.endsWith('.tflock')"
   }
 }
 

@@ -22,9 +22,15 @@ resource "google_billing_budget" "lab" {
     projects        = ["projects/${data.google_project.this.number}"]
     calendar_period = "MONTH"
 
-    # Gross cost: the trial credit would otherwise hide the spend until the credit is gone, which
-    # is exactly when the trial would stop the cluster.
-    credit_types_treatment = "EXCLUDE_ALL_CREDITS"
+    # Count cost after free-tier credits but before the trial credit:
+    # - FREE_TIER credits are subtracted. They include the GKE free tier, which offsets the zonal
+    #   cluster fee (about $74 a month). Leaving them out would make an ordinary always-on month
+    #   reach $200 around the 27th, and the guard would stop the cluster for nothing.
+    # - The trial's $300 is a PROMOTION credit and is not subtracted. Otherwise it would hide the
+    #   spend until the credit is gone, which is exactly when the trial would stop the cluster.
+    # How to confirm the split in Billing reports: infra/README.md, "Budget and spend guard".
+    credit_types_treatment = "INCLUDE_SPECIFIED_CREDITS"
+    credit_types           = ["FREE_TIER"]
   }
 
   # Must match the billing account's currency; a non-USD account fails here instead of silently

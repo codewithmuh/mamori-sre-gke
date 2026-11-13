@@ -24,4 +24,7 @@ locals {
   spend_guard_build_sa      = "spend-guard-build@${var.project_id}.iam.gserviceaccount.com"
   spend_guard_role          = "projects/${var.project_id}/roles/spendGuardNodePoolScaler"
   spend_guard_source_bucket = "${var.project_id}-spend-guard-src"
+
+  # Image repository from infra/bootstrap/registry.tf; it outlives the lab.
+  artifact_registry_url = "${local.region}-docker.pkg.dev/${var.project_id}/mamori"
 }

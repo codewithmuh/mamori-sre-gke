@@ -8,14 +8,8 @@ resource "google_project_iam_member" "gke_nodes" {
   member  = "serviceAccount:${local.gke_nodes_sa}"
 }
 
-# Nodes pull the lab's own images, from this repository only.
-resource "google_artifact_registry_repository_iam_member" "gke_nodes_pull" {
-  project    = var.project_id
-  location   = google_artifact_registry_repository.mamori.location
-  repository = google_artifact_registry_repository.mamori.name
-  role       = "roles/artifactregistry.reader"
-  member     = "serviceAccount:${local.gke_nodes_sa}"
-}
+# Read access to the image repository mamori is granted in infra/bootstrap/registry.tf, next to
+# the repository.
 
 # Spend guard: the custom role from infra/bootstrap (get the cluster and node pool, set size and
 # autoscaling, read the operation). GKE has no per-cluster IAM, so it is granted on the project.

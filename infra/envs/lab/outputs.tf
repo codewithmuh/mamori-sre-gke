@@ -9,8 +9,13 @@ output "cluster_location" {
 }
 
 output "get_credentials_command" {
-  description = "Command that writes kubectl credentials for the cluster."
+  description = "Command that writes kubectl credentials for the IP endpoint (filtered by master_authorized_networks when set)."
   value       = "gcloud container clusters get-credentials ${google_container_cluster.mamori.name} --zone ${google_container_cluster.mamori.location} --project ${var.project_id}"
+}
+
+output "get_credentials_command_dns" {
+  description = "Command that writes kubectl credentials for the DNS-based endpoint (IAM only, not filtered by authorized networks); for CI runners and roaming laptops."
+  value       = "gcloud container clusters get-credentials ${google_container_cluster.mamori.name} --zone ${google_container_cluster.mamori.location} --project ${var.project_id} --dns-endpoint"
 }
 
 output "node_pool_name" {
@@ -19,8 +24,8 @@ output "node_pool_name" {
 }
 
 output "artifact_registry_url" {
-  description = "Docker repository URL for the lab's images."
-  value       = "${google_artifact_registry_repository.mamori.location}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.mamori.repository_id}"
+  description = "Docker repository URL for the lab's images (the repository itself is managed in infra/bootstrap)."
+  value       = local.artifact_registry_url
 }
 
 output "frontend_ip" {

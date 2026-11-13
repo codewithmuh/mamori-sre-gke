@@ -58,6 +58,17 @@ resource "google_container_cluster" "mamori" {
     }
   }
 
+  # A second way in: the DNS-based endpoint, which IAM guards and authorized networks don't filter.
+  # GitHub-hosted runners (the weekly evidence workflow) and a laptop away from home use it with
+  # `get-credentials --dns-endpoint`, so master_authorized_networks can pin the IP endpoint to one
+  # address without breaking them. Callers need container.clusters.connect (in
+  # roles/container.viewer and up) plus Kubernetes RBAC, as on the IP endpoint.
+  control_plane_endpoints_config {
+    dns_endpoint_config {
+      allow_external_traffic = true
+    }
+  }
+
   release_channel {
     channel = "REGULAR"
   }

@@ -44,7 +44,7 @@ variable "github_subject_prefix" {
 }
 
 variable "github_apply_environment" {
-  description = "GitHub environment whose jobs may impersonate tf-apply."
+  description = "GitHub environment whose jobs on main may impersonate tf-apply (see attribute.lab_main in wif.tf)."
   type        = string
   default     = "lab"
 }

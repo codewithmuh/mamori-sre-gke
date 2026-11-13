@@ -5,16 +5,16 @@ registry, public edge, budget and spend guard. Two flat roots, no modules:
 
 | Root | State | Applied by | Owns |
 |---|---|---|---|
-| `bootstrap/` | local file (`bootstrap/terraform.tfstate`, gitignored) | the maintainer, once, with own credentials | APIs, state bucket, Workload Identity Federation, all service accounts, the spend-guard custom role, the spend-guard source bucket, CI permissions |
-| `envs/lab/` | GCS bucket from bootstrap, prefix `lab` | `make up` locally, or CI from the GitHub environment `lab` | everything billable: VPC, NAT, firewall rules, GKE, Artifact Registry, static IP, Cloud Armor, certificate, budget, spend guard, and the role bindings of the lab's service accounts |
+| `bootstrap/` | local file (`bootstrap/terraform.tfstate`, gitignored) | the maintainer, once, with own credentials | APIs, state bucket, Workload Identity Federation, all service accounts, the spend-guard custom role, the spend-guard source bucket, the `mamori` image repository, CI permissions |
+| `envs/lab/` | GCS bucket from bootstrap, prefix `lab` | `make up` locally, or CI from the GitHub environment `lab` on `main` | everything billable that `make down` removes: VPC, NAT, firewall rules, GKE, static IP, Cloud Armor, certificate, budget, spend guard (with its own image repository), and the role bindings of the lab's service accounts |
 
 Why identities sit in bootstrap: the CI apply account (`tf-apply`) then can't create service
 accounts, edit roles or grant arbitrary roles. Widening what CI may do takes a bootstrap apply
-by the maintainer.
+by the maintainer. The image repository sits there too, so images survive `make down`.
 
-Files are split by concern: `network.tf`, `gke.tf`, `registry.tf`, `edge.tf`, `budget.tf`,
-`spend_guard.tf`, `iam.tf`, plus `versions.tf`, `providers.tf`, `variables.tf`, `locals.tf`,
-`outputs.tf`.
+Files are split by concern. Bootstrap: `apis.tf`, `storage.tf`, `registry.tf`, `wif.tf`,
+`iam.tf`. Lab: `network.tf`, `gke.tf`, `edge.tf`, `budget.tf`, `spend_guard.tf`, `iam.tf`. Both
+also have `versions.tf`, `providers.tf`, `variables.tf`, `locals.tf` and `outputs.tf`.
 
 ## Apply order
 
@@ -40,17 +40,20 @@ Files are split by concern: `network.tf`, `gke.tf`, `registry.tf`, `edge.tf`, `b
    | `GCP_TF_APPLY_SA` | output `tf_apply_sa` |
    | `TF_STATE_BUCKET` | output `state_bucket` |
 
-   Also add the billing account ID as the repository secret `GCP_BILLING_ACCOUNT_ID`. Then create
-   the environment **`lab`** with a deployment branch rule that allows only `main`, and yourself
-   as required reviewer. `tf-apply` trusts any job that declares `environment: lab`, so those
-   environment rules are what stop a branch or pull request from applying.
+   Also add the billing account ID as the repository secret `GCP_BILLING_ACCOUNT_ID`. Then make
+   sure the environment **`lab`** exists with a deployment branch rule that allows only `main`,
+   and yourself as required reviewer (`make bootstrap` sets this up). `tf-apply` itself already
+   refuses any job that isn't both in `lab` and on `main` (see "IAM"). The environment rules add
+   the human approval step.
 4. **Lab:** `make up`, or:
    ```sh
    cd infra/envs/lab
    terraform init -backend-config="bucket=$TF_STATE_BUCKET" -backend-config="prefix=lab"
    terraform apply
    ```
-   This needs `tools/spend-guard` (the function's Go code) in the checkout; plan zips it.
+   This needs `tools/spend-guard` (the function's Go code) in the checkout; plan zips it. Do the
+   first apply before relying on pull request plans: `tf-plan` can't write the empty state
+   object that the first `init` of a new prefix creates.
 5. **DNS, by hand,** where codewithmuh.com's DNS is hosted. Add the two records from
    `terraform output dns_records_to_add`:
    - `A` for the frontend hostname, pointing to the static IP. The IP is new after every
@@ -83,7 +86,7 @@ Files are split by concern: `network.tf`, `gke.tf`, `registry.tf`, `edge.tf`, `b
 | `frontend_hostname` | `mamori.codewithmuh.com` | |
 | `master_authorized_networks` | `[]` | see "Control-plane access" below |
 | `armor_rate_limit_per_minute` | `600` | requests per client IP per minute before a 429 |
-| `monthly_budget_usd` | `200` | gross cost; keep below the remaining trial credit until the account is upgraded in M5 |
+| `monthly_budget_usd` | `200` | cost after free-tier credits, before the trial credit; keep below the remaining trial credit until the account is upgraded in M5 |
 | `spend_guard_threshold` | `1.0` | lower it briefly to test the guard with a real notification |
 | `spend_guard_dry_run` | `false` | |
 
@@ -92,11 +95,12 @@ Examples: `terraform.tfvars.example` in each root.
 ## Outputs
 
 `bootstrap/`: `wif_provider`, `tf_plan_sa`, `tf_apply_sa`, `state_bucket`,
-`spend_guard_source_bucket`.
+`artifact_registry_url`, `spend_guard_source_bucket`.
 
-`envs/lab/`: `cluster_name`, `cluster_location`, `get_credentials_command`, `node_pool_name`,
-`artifact_registry_url`, `frontend_ip`, `dns_records_to_add` (map of `{name, type, data}`),
-`cert_map_name`, `armor_policy_name`, `budget_alerts_topic`.
+`envs/lab/`: `cluster_name`, `cluster_location`, `get_credentials_command` (IP endpoint),
+`get_credentials_command_dns` (DNS endpoint), `node_pool_name`, `artifact_registry_url`,
+`frontend_ip`, `dns_records_to_add` (map of `{name, type, data}`), `cert_map_name`,
+`armor_policy_name`, `budget_alerts_topic`.
 
 Names other parts of the repository depend on: cluster `mamori`, node pool `spot-pool`, static IP
 `mamori-frontend-ip`, certificate map `mamori-cert-map`, Cloud Armor policy
@@ -117,7 +121,7 @@ settings:
 - Gateway API standard channel, Managed Service for Prometheus.
 - `deletion_protection = false`, so `make down` works.
 - The node service account `gke-nodes` holds only `roles/container.defaultNodeServiceAccount`,
-  plus read access to the `mamori` image repository.
+  plus read access to the `mamori` image repository (granted in `bootstrap/registry.tf`).
 
 **Quota:** 6 vCPU steady, 8 vCPU during a surge upgrade. A trial account can't request quota
 increases, so check the region's `CPUS` and the global `CPUS_ALL_REGIONS` quota in M1.
@@ -135,17 +139,33 @@ the spend guard fired leaves the pool at 0 nodes instead of silently restarting 
 
 ### Control-plane access
 
-The control plane has a public endpoint. With `master_authorized_networks = []` (the default),
-it accepts TLS connections from any IP address. Every request still needs Google IAM credentials
-and passes Kubernetes RBAC, so access control holds. What's lost is network-level filtering: the
-API server is exposed to scanning and to any unauthenticated vulnerability that might appear.
-Trivy flags this (`AVD-GCP-0061`); the finding is ignored inline as a lab trade-off.
+The Kubernetes API server has two public endpoints:
 
-Setting it to your own address (`[{ cidr_block = "x.x.x.x/32", display_name = "home" }]`) turns
-authorized networks on, with Google Cloud public ranges excluded. You can't lock yourself out:
-Terraform, gcloud and the spend guard use the GKE API, not the cluster endpoint. If your IP
-changes, run apply with the new value. CI never talks to the cluster endpoint. Google's preferred
-alternative is the DNS-based endpoint with IAM-only access; it's off here to keep one access path.
+- **IP endpoint** (`get_credentials_command`). With `master_authorized_networks = []` (the
+  default), it accepts TLS connections from any IP address. Setting it to your own address
+  (`[{ cidr_block = "x.x.x.x/32", display_name = "home" }]`) turns authorized networks on, with
+  Google Cloud public ranges excluded.
+- **DNS endpoint** (`get_credentials_command_dns`, i.e. `get-credentials --dns-endpoint`).
+  Authorized networks don't apply to it. Google checks IAM (`container.clusters.connect`, in
+  `roles/container.viewer` and up) before a request reaches the API server.
+
+On both, every request needs Google IAM credentials and passes Kubernetes RBAC, so access control
+holds either way. With the default empty list, what's lost is network-level filtering on the IP
+endpoint: the API server is exposed to scanning and to any unauthenticated vulnerability that
+might appear. Trivy flags this (`AVD-GCP-0061`); the finding is ignored inline as a lab
+trade-off.
+
+| Caller | Talks to | Effect of `master_authorized_networks` |
+|---|---|---|
+| Maintainer's laptop (`make up`, kubectl) | IP endpoint; DNS endpoint when away from the listed address | must be listed for the IP endpoint |
+| GitHub-hosted runners that run kubectl (the weekly evidence workflow) | DNS endpoint | none; their addresses change every run |
+| Terraform (local and CI), `make resume`, the spend guard | GKE API (`container.googleapis.com`), not the cluster | none |
+| Argo CD and everything else in the cluster | in-cluster service | none |
+
+So pinning the IP endpoint to your address breaks nothing, and you can't lock yourself out:
+Terraform and gcloud change authorized networks through the GKE API, and the DNS endpoint stays
+available. Google recommends the DNS endpoint over IP allow-lists. The IP endpoint stays on
+because it's the default path for kubectl and `make up`.
 
 ### Edge
 
@@ -164,8 +184,15 @@ around 400 a minute.
 
 ### Budget and spend guard
 
-- Budget `mamori-lab` on this project, in USD, measured on gross cost (credits excluded). Alerts
-  at 50/90/100 % of current spend. Every update goes to the Pub/Sub topic `budget-alerts`.
+- Budget `mamori-lab` on this project, in USD. Alerts at 50/90/100 % of current spend. Every
+  update goes to the Pub/Sub topic `budget-alerts`.
+- It counts cost after **free-tier credits** but before the **trial credit**
+  (`credit_types_treatment = "INCLUDE_SPECIFIED_CREDITS"`, `credit_types = ["FREE_TIER"]`):
+  - The GKE free tier offsets the zonal cluster fee (about $74 a month). Without it, an ordinary
+    always-on month (about $160 plus $74) reaches $200 around the 27th, and the guard stops the
+    cluster for nothing.
+  - The $300 trial is a `PROMOTION` credit and doesn't count. Otherwise it would hide all spend
+    until it ran out, which is when the trial stops everything anyway.
 - The topic triggers the Cloud Run function `spend-guard` (runtime `go127`, entry point
   `ScaleToZero`, code in `tools/spend-guard`). At `THRESHOLD` it turns autoscaling off and sets
   `spot-pool`'s size to 0.
@@ -208,6 +235,40 @@ Billing Account Viewer so that plan can refresh the budget.
 **Currency:** the budget is in USD. If the billing account bills in another currency, the apply
 fails rather than creating a budget of 200 yen.
 
+**Confirm the credit split once the cluster has run for a day or two (M1):**
+
+1. Billing → Reports, filtered to this project and the Kubernetes Engine service, grouped by SKU.
+   Look at the credits on the cluster-management SKU: they should be the free tier, not the free
+   trial. The trial shows up as a promotion credit across all services.
+2. Billing → Budgets & alerts → `mamori-lab`. "Current spend" should be roughly gross cost minus
+   the cluster fee. It must not be close to zero (that would mean the trial credit is subtracted)
+   and must not include the cluster fee.
+3. If the cluster fee isn't offset, the free-tier credit was booked under another type. If
+   billing export to BigQuery is on, `credits.type` names it. Add that type to `credit_types`.
+
+### Images
+
+The `mamori` Docker repository (`asia-northeast1-docker.pkg.dev/<project>/mamori`) is in
+bootstrap, so images survive `make down` and `make up` deploys the same ones without a rebuild.
+images.yml pushes to it as the `ci-images` account (added to bootstrap with the image pipeline,
+#28); nodes pull as `gke-nodes`.
+
+- **Immutable tags:** a tag, once pushed, can't be moved to other content. images.yml pushes only
+  new tags: `:<git sha>` from main, and `:<X.Y.Z>` for a release, which it refuses to overwrite.
+  Two cases to watch on the first real publish (not testable offline):
+  - Re-pushing an existing `:<git sha>`, for example a release built from a commit that main
+    already published, fails if the rebuilt image differs.
+  - Cosign signatures and attestations must be stored as OCI referrers, not as
+    `sha256-<digest>.sig` tags, which a second signature would have to move.
+- **Cleanup:** release tags (`0.`, `1.`, `2.` prefixes) are kept forever, and so are the 10 newest
+  versions of each image. Other tagged builds go after 30 days. Untagged versions are never
+  deleted: signatures, attestations and multi-arch child manifests are untagged, and with
+  immutable tags no image is ever orphaned by a moved tag.
+
+The spend-guard function's images stay in a separate `spend-guard` repository in the lab root.
+They are rebuilt from source on every deploy and are worthless once the function is gone, so
+`make down` removes them with it. Only the function's build account can push there.
+
 ### IAM
 
 `tf-plan` can be impersonated by any workflow run of the repository. Bindings:
@@ -217,21 +278,41 @@ fails rather than creating a budget of 200 yen.
 | `roles/viewer` | project | refresh every resource during plan |
 | `roles/iam.securityReviewer` | project | read IAM policies on resources (repository IAM, for example) |
 | `roles/serviceusage.serviceUsageConsumer` | project | quota project for the Billing Budget API |
-| `roles/storage.objectViewer` | state bucket | read state |
-| `roles/storage.objectUser`, only on `*.tflock` (IAM condition) | state bucket | take and release the state lock without being able to overwrite state |
+| `roles/storage.legacyBucketReader` | state bucket | list object names (`terraform init` looks up workspaces); no object content |
+| `roles/storage.objectViewer`, only under `lab/` (IAM condition) | state bucket | read the lab's state, not other roots' (`oncall/` holds PagerDuty keys) |
+| `roles/storage.objectUser`, only on `lab/*.tflock` (IAM condition) | state bucket | take and release the state lock without being able to overwrite state |
 | `roles/storage.objectViewer` | spend-guard source bucket | refresh the uploaded zip |
 | `roles/billing.viewer` | billing account | refresh the budget |
 
-`tf-apply` can be impersonated only by jobs in the GitHub environment `lab`. The binding is the
-subject `repo:codewithmuh@51082957/mamori-sre-gke@1456357674:environment:lab` (GitHub's immutable
-subject format, the default for repositories created after 2026-07-15). Bindings:
+The readable prefixes are `tf_plan_state_prefixes` in `bootstrap/iam.tf`; add a root's prefix
+there only if its state holds no secrets.
+
+`tf-apply` can be impersonated only by jobs that run **in the GitHub environment `lab` and on
+`refs/heads/main`**. The WIF provider maps every token to `attribute.lab_main`, and `tf-apply`
+trusts only `principalSet://…/attribute.lab_main/true`. The attribute is `"true"` when both hold:
+
+- `sub` is `repo:codewithmuh@51082957/mamori-sre-gke@1456357674:environment:lab` (GitHub's
+  immutable subject format, the default for repositories created after 2026-07-15);
+- `ref` is `refs/heads/main`.
+
+The environment alone isn't enough. GitHub creates an environment, unprotected, the first time
+any branch's workflow names it, so a pushed branch with `environment: lab` would otherwise get
+`tf-apply` before anyone set up protection. Pull requests run on `refs/pull/<n>/merge` and other
+branches on their own ref, so both get `"false"`. The mapping uses `sub` and `ref` because every
+GitHub token has them. The `environment` claim is missing on jobs without one, and a mapping
+error would break token exchange for every job.
+
+One gap remains: a workflow on `main` triggered by `pull_request_target` also runs with
+`ref = refs/heads/main`. Never give such a workflow `environment: lab`.
+
+`tf-apply` bindings:
 
 | Role | Where | Why |
 |---|---|---|
 | `roles/compute.networkAdmin` | project | VPC, subnet, router, NAT, static IP |
 | `roles/compute.securityAdmin` | project | Cloud Armor policy and firewall rules |
 | `roles/container.clusterAdmin` | project | cluster and node pool, without access to Kubernetes objects |
-| `roles/artifactregistry.admin` | project | repositories, cleanup policies, repository IAM |
+| `roles/artifactregistry.admin` | project | the `spend-guard` image repository, its cleanup policy and IAM |
 | `roles/certificatemanager.editor` | project | DNS authorization, certificate, map, map entry |
 | `roles/pubsub.admin` | project | topic, and topic IAM for the budget link |
 | `roles/cloudfunctions.developer` | project | function and its Eventarc trigger |
@@ -264,9 +345,14 @@ it on projects without an organization). Nothing here runs as that account.
 About **$160 a month** while up, before logging and data volume. Infracost and the M1
 measurement replace these numbers.
 
-After `make down` these stay, by design: the state bucket and the spend-guard source bucket
-(a few KB each), the service accounts, the custom role and the WIF pool (none billable). Cloud
-Run functions also leaves its own `gcf-v2-sources-<project number>-asia-northeast1` bucket
+After `make down` these stay, by design:
+
+- the state bucket and the spend-guard source bucket (a few KB each);
+- the `mamori` image repository: Artifact Registry storage beyond the free 0.5 GB is about $0.10
+  per GB a month (estimate), and the cleanup policy keeps it small;
+- the service accounts, the custom role and the WIF pool (none billable).
+
+Cloud Run functions also leaves its own `gcf-v2-sources-<project number>-asia-northeast1` bucket
 behind (KB-sized).
 
 ## Checks

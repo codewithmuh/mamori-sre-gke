@@ -22,12 +22,19 @@ resource "google_iam_workload_identity_pool_provider" "github" {
   attribute_mapping = {
     # This repository uses GitHub's immutable subject format (default for repositories created after
     # 2026-07-15): sub is "repo:<owner>@<owner-id>/<repo>@<repo-id>:environment:<name>" for a job in a
-    # GitHub environment. tf-apply is bound to that exact subject (iam.tf).
+    # GitHub environment, and "...:ref:<ref>" for a job without one.
     "google.subject"                = "assertion.sub"
     "attribute.repository"          = "assertion.repository"
     "attribute.repository_id"       = "assertion.repository_id"
     "attribute.repository_owner_id" = "assertion.repository_owner_id"
     "attribute.ref"                 = "assertion.ref"
+
+    # "true" only for a job that declares the apply environment AND runs on main. tf-apply is bound
+    # to this attribute (iam.tf). The environment alone isn't enough: GitHub creates an
+    # environment, unprotected, the first time any branch's workflow names it. Built from sub and
+    # ref, which every GitHub token carries; the environment claim is missing on jobs without one,
+    # and a mapping that fails would break token exchange for every other job.
+    "attribute.lab_main" = "(assertion.sub == '${var.github_subject_prefix}:environment:${var.github_apply_environment}' && assertion.ref == 'refs/heads/main') ? 'true' : 'false'"
   }
 
   oidc {
