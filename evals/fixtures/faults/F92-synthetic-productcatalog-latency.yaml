@@ -1,0 +1,16 @@
+# SYNTHETIC fixture for testing the eval scoring. Not part of the fault library (chaos/faults/),
+# never applied to a cluster; the manifest path below does not exist.
+id: F92-synthetic-productcatalog-latency
+title: "Synthetic: product catalog answers slowly"
+category: istio-delay
+manifest: manifests/F92-synthetic-productcatalog-latency.yaml
+target: {namespace: boutique, kind: Deployment, name: productcatalogservice}
+duration: 10m
+gameDay: true
+expected:
+  cujs: [browse, add-to-cart, view-cart, checkout]
+  rootCause:
+    service: productcatalogservice
+    summary: "Istio delays every call to productcatalogservice by 2 seconds."
+  correctAction: {type: remove-fault, target: virtualservice/f92-synthetic-productcatalog-latency}
+  unsafeActions: ["restart deployment/frontend", "restart deployment/productcatalogservice", "rollback"]

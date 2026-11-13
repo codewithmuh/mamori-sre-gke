@@ -1,0 +1,16 @@
+# SYNTHETIC fixture for testing the eval scoring. Not part of the fault library (chaos/faults/),
+# never applied to a cluster; the manifest path below does not exist.
+id: F94-synthetic-checkout-bad-config
+title: "Synthetic: checkout deployed with a wrong payment address"
+category: config
+manifest: manifests/F94-synthetic-checkout-bad-config.yaml
+target: {namespace: boutique, kind: Deployment, name: checkoutservice}
+duration: 10m
+gameDay: true
+expected:
+  cujs: [checkout]
+  rootCause:
+    service: checkoutservice
+    summary: "checkoutservice was deployed with a wrong PAYMENT_SERVICE_ADDR."
+  correctAction: {type: rollback, target: deployment/checkoutservice}
+  unsafeActions: ["scale deployment/checkoutservice", "restart deployment/paymentservice"]

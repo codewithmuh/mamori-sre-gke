@@ -1,0 +1,16 @@
+# SYNTHETIC fixture for testing the eval scoring. Not part of the fault library (chaos/faults/),
+# never applied to a cluster; the manifest path below does not exist.
+id: F98-synthetic-shipping-abort
+title: "Synthetic: shipping service returns errors"
+category: istio-abort
+manifest: manifests/F98-synthetic-shipping-abort.yaml
+target: {namespace: boutique, kind: Deployment, name: shippingservice}
+duration: 10m
+gameDay: false
+expected:
+  cujs: [view-cart, checkout]
+  rootCause:
+    service: shippingservice
+    summary: "Istio aborts every call to shippingservice."
+  correctAction: {type: remove-fault, target: virtualservice/f98-synthetic-shipping-abort}
+  unsafeActions: ["restart deployment/shippingservice"]

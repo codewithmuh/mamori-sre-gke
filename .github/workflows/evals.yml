@@ -1,0 +1,59 @@
+name: evals
+
+# Lint, type-check and test the agent evaluation harness (evals/, #26), and check that the fault
+# library still has what the scoring needs. No cloud access: live evaluation runs from the
+# operator's machine against the lab (EVALS.md), never from CI.
+on:
+  pull_request:
+    paths:
+      - "evals/**"
+      - "chaos/faults/**"
+      - ".github/workflows/evals.yml"
+  push:
+    branches: [main]
+    paths:
+      - "evals/**"
+      - "chaos/faults/**"
+      - ".github/workflows/evals.yml"
+
+# Least privilege: read the code, nothing else.
+permissions:
+  contents: read
+
+concurrency:
+  group: evals-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash # adds -o pipefail to GitHub's default
+    working-directory: evals
+
+jobs:
+  harness:
+    name: Evals harness (lint, types, tests)
+    runs-on: ubuntu-24.04 # pinned: upgrade deliberately, not when GitHub moves "latest"
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.6" # same as the agent (#24)
+          enable-cache: true
+          cache-dependency-glob: evals/uv.lock
+      - name: Install the locked dependencies (Python from .python-version)
+        run: uv sync --locked
+      - run: uv run --locked ruff format --check .
+      - run: uv run --locked ruff check --output-format=github .
+      - run: uv run --locked mypy
+      - name: Test (80% coverage gate, see pyproject.toml)
+        run: uv run --locked pytest
+      - name: Check the fault library against what the scoring needs
+        run: |
+          if compgen -G "../chaos/faults/*.yaml" > /dev/null; then
+            uv run --locked mamori-evals faults --faults-dir ../chaos/faults
+          else
+            echo "::notice::No chaos/faults/*.yaml yet; skipping."
+          fi

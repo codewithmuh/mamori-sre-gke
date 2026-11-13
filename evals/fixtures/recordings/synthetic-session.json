@@ -1,0 +1,614 @@
+{
+  "apiVersion": "mamori/v1",
+  "kind": "EvalRecording",
+  "metadata": {
+    "synthetic": true,
+    "note": "SYNTHETIC: made-up runs that exercise every scoring path. Not lab data; never quote these numbers.",
+    "session": "synthetic-session",
+    "startedAt": "2000-01-01T00:55:00Z",
+    "finishedAt": "2000-01-01T07:40:00Z",
+    "labels": {
+      "AGENT_POSTMORTEMS_GAMEDAYS": "include",
+      "AGENT_HIDE_FAULT_LABELS": "false"
+    }
+  },
+  "runs": [
+    {
+      "faultId": "F91-synthetic-currency-abort",
+      "status": "completed",
+      "reason": null,
+      "injectedAt": "2000-01-01T01:00:00Z",
+      "stoppedAt": "2000-01-01T01:09:00Z",
+      "recoveredAt": "2000-01-01T01:21:00Z",
+      "faultRunId": "20000101T010000Z-F91-synthetic-currency-abort",
+      "faultObjects": [
+        "virtualservice/f91-synthetic-currency-abort"
+      ],
+      "faultEnd": {
+        "reason": "removed-externally",
+        "at": "2000-01-01T01:08:10Z"
+      },
+      "investigation": {
+        "id": "inv-synthetic-01",
+        "incidentId": "incident-synthetic-01",
+        "source": "cloud-monitoring",
+        "status": "completed",
+        "error": null,
+        "startedAt": "2000-01-01T01:03:00Z",
+        "finishedAt": "2000-01-01T01:06:30Z",
+        "cujs": [
+          "browse",
+          "view-cart",
+          "checkout"
+        ],
+        "severity": "SEV2",
+        "impact": "Browse, view cart and checkout fail for about 60 % of requests.",
+        "hypotheses": [
+          {
+            "rank": 1,
+            "service": "currencyservice",
+            "summary": "currencyservice calls fail with UNAVAILABLE.",
+            "confidence": 0.85,
+            "evidence": [
+              "istio_requests_total: 100 % grpc_response_status=14 to currencyservice since 00:59Z",
+              "VirtualService f91-synthetic-currency-abort has an abort rule for currencyservice"
+            ]
+          },
+          {
+            "rank": 2,
+            "service": "frontend",
+            "summary": "frontend errors follow from its dependency.",
+            "confidence": 0.1,
+            "evidence": [
+              "frontend 5xx rate 60 %"
+            ]
+          }
+        ],
+        "proposedAction": {
+          "type": "remove-fault",
+          "namespace": "boutique",
+          "target": "virtualservice/f91-synthetic-currency-abort",
+          "params": {}
+        },
+        "proposalId": "prop-synthetic-01",
+        "proposalError": null,
+        "model": "claude-opus-5-5",
+        "usage": {
+          "inputTokens": 180000,
+          "outputTokens": 9000,
+          "costUsd": 0.9
+        },
+        "toolCalls": 14
+      },
+      "proposal": {
+        "proposalId": "prop-synthetic-01",
+        "status": "executed",
+        "incidentId": "incident-synthetic-01",
+        "investigationId": "inv-synthetic-01",
+        "action": {
+          "type": "remove-fault",
+          "namespace": "boutique",
+          "target": "virtualservice/f91-synthetic-currency-abort",
+          "params": {}
+        },
+        "decidedBy": "U0SYNTHETIC",
+        "executedAt": "2000-01-01T01:08:05Z"
+      },
+      "executorEvents": [
+        {
+          "time": "2000-01-01T01:06:31Z",
+          "severity": "INFO",
+          "message": "proposal_received",
+          "event": "proposal_received",
+          "proposalId": "prop-synthetic-01",
+          "incidentId": "incident-synthetic-01",
+          "investigationId": "inv-synthetic-01",
+          "action": {
+            "type": "remove-fault",
+            "namespace": "boutique",
+            "target": "virtualservice/f91-synthetic-currency-abort",
+            "params": {}
+          },
+          "status": "pending",
+          "rationale": "remove the abort rule"
+        },
+        {
+          "time": "2000-01-01T01:07:50Z",
+          "severity": "INFO",
+          "message": "approved",
+          "event": "approved",
+          "proposalId": "prop-synthetic-01",
+          "incidentId": "incident-synthetic-01",
+          "investigationId": "inv-synthetic-01",
+          "action": {
+            "type": "remove-fault",
+            "namespace": "boutique",
+            "target": "virtualservice/f91-synthetic-currency-abort",
+            "params": {}
+          },
+          "status": "approved",
+          "actor": "U0SYNTHETIC"
+        },
+        {
+          "time": "2000-01-01T01:08:05Z",
+          "severity": "INFO",
+          "message": "executed",
+          "event": "executed",
+          "proposalId": "prop-synthetic-01",
+          "incidentId": "incident-synthetic-01",
+          "investigationId": "inv-synthetic-01",
+          "action": {
+            "type": "remove-fault",
+            "namespace": "boutique",
+            "target": "virtualservice/f91-synthetic-currency-abort",
+            "params": {}
+          },
+          "status": "executed",
+          "actor": "U0SYNTHETIC",
+          "durationMs": 420
+        }
+      ],
+      "notes": []
+    },
+    {
+      "faultId": "F92-synthetic-productcatalog-latency",
+      "status": "completed",
+      "reason": null,
+      "injectedAt": "2000-01-01T02:00:00Z",
+      "stoppedAt": "2000-01-01T02:12:00Z",
+      "recoveredAt": "2000-01-01T02:24:00Z",
+      "faultRunId": "20000101T020000Z-F92-synthetic-productcatalog-latency",
+      "faultObjects": [
+        "virtualservice/f92-synthetic-productcatalog-latency"
+      ],
+      "faultEnd": {
+        "reason": "signal",
+        "at": "2000-01-01T02:12:00Z"
+      },
+      "investigation": {
+        "id": "inv-synthetic-02",
+        "incidentId": "incident-synthetic-02",
+        "source": "cloud-monitoring",
+        "status": "completed",
+        "error": null,
+        "startedAt": "2000-01-01T02:04:00Z",
+        "finishedAt": "2000-01-01T02:09:00Z",
+        "cujs": [
+          "browse",
+          "add-to-cart",
+          "view-cart",
+          "checkout"
+        ],
+        "severity": "SEV2",
+        "impact": "Every journey is slower than its latency target.",
+        "hypotheses": [
+          {
+            "rank": 1,
+            "service": "frontend",
+            "summary": "frontend is slow under load.",
+            "confidence": 0.5,
+            "evidence": [
+              "frontend p95 latency 2.3 s"
+            ]
+          },
+          {
+            "rank": 2,
+            "service": "productcatalogservice",
+            "summary": "productcatalogservice answers slowly.",
+            "confidence": 0.35,
+            "evidence": [
+              "productcatalogservice p95 2.0 s"
+            ]
+          },
+          {
+            "rank": 3,
+            "service": "currencyservice",
+            "summary": "currency conversion adds latency.",
+            "confidence": 0.1,
+            "evidence": []
+          }
+        ],
+        "proposedAction": {
+          "type": "restart",
+          "namespace": "boutique",
+          "target": "deployment/frontend",
+          "params": {}
+        },
+        "proposalId": "prop-synthetic-02",
+        "proposalError": null,
+        "model": "claude-opus-5-5",
+        "usage": {
+          "inputTokens": 240000,
+          "outputTokens": 12000,
+          "costUsd": 1.2
+        },
+        "toolCalls": 18
+      },
+      "proposal": {
+        "proposalId": "prop-synthetic-02",
+        "status": "rejected",
+        "action": {
+          "type": "restart",
+          "namespace": "boutique",
+          "target": "deployment/frontend",
+          "params": {}
+        },
+        "decidedBy": "U0SYNTHETIC"
+      },
+      "executorEvents": [
+        {
+          "time": "2000-01-01T02:09:01Z",
+          "severity": "INFO",
+          "message": "proposal_received",
+          "event": "proposal_received",
+          "proposalId": "prop-synthetic-02",
+          "incidentId": "incident-synthetic-02",
+          "investigationId": "inv-synthetic-02",
+          "action": {
+            "type": "restart",
+            "namespace": "boutique",
+            "target": "deployment/frontend",
+            "params": {}
+          },
+          "status": "pending"
+        },
+        {
+          "time": "2000-01-01T02:10:30Z",
+          "severity": "INFO",
+          "message": "rejected",
+          "event": "rejected",
+          "proposalId": "prop-synthetic-02",
+          "incidentId": "incident-synthetic-02",
+          "investigationId": "inv-synthetic-02",
+          "action": {
+            "type": "restart",
+            "namespace": "boutique",
+            "target": "deployment/frontend",
+            "params": {}
+          },
+          "status": "rejected",
+          "actor": "U0SYNTHETIC"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "faultId": "F93-synthetic-redis-cart-pod-kill",
+      "status": "completed",
+      "reason": null,
+      "injectedAt": "2000-01-01T03:00:00Z",
+      "stoppedAt": "2000-01-01T03:06:00Z",
+      "recoveredAt": "2000-01-01T03:18:00Z",
+      "faultRunId": "20000101T030000Z-F93-synthetic-redis-cart-pod-kill",
+      "faultObjects": [
+        "podchaos/f93-synthetic-redis-cart-pod-kill"
+      ],
+      "faultEnd": {
+        "reason": "signal",
+        "at": "2000-01-01T03:06:00Z"
+      },
+      "investigation": {
+        "id": "inv-synthetic-03",
+        "incidentId": "incident-synthetic-03",
+        "source": "cloud-monitoring",
+        "status": "completed",
+        "error": null,
+        "startedAt": "2000-01-01T03:02:00Z",
+        "finishedAt": "2000-01-01T03:05:00Z",
+        "cujs": [
+          "add-to-cart",
+          "checkout"
+        ],
+        "severity": "SEV2",
+        "impact": "Add to cart and checkout failed for about a minute.",
+        "hypotheses": [
+          {
+            "rank": 1,
+            "service": "redis-cart",
+            "summary": "The redis-cart pod restarted; cartservice could not reach it.",
+            "confidence": 0.8,
+            "evidence": [
+              "pod redis-cart restarted at 03:00:05Z",
+              "cartservice errors: connection refused"
+            ]
+          }
+        ],
+        "proposedAction": {
+          "type": "none",
+          "namespace": "boutique",
+          "target": null,
+          "params": {}
+        },
+        "proposalId": null,
+        "proposalError": null,
+        "model": "claude-opus-5-5",
+        "usage": {
+          "inputTokens": 80000,
+          "outputTokens": 4000,
+          "costUsd": 0.4
+        },
+        "toolCalls": 9
+      },
+      "proposal": null,
+      "executorEvents": [],
+      "notes": []
+    },
+    {
+      "faultId": "F94-synthetic-checkout-bad-config",
+      "status": "completed",
+      "reason": null,
+      "injectedAt": "2000-01-01T04:00:00Z",
+      "stoppedAt": "2000-01-01T04:12:00Z",
+      "recoveredAt": "2000-01-01T04:25:00Z",
+      "faultRunId": "20000101T040000Z-F94-synthetic-checkout-bad-config",
+      "faultObjects": [],
+      "faultEnd": {
+        "reason": "signal",
+        "at": "2000-01-01T04:12:00Z"
+      },
+      "investigation": {
+        "id": "inv-synthetic-04",
+        "incidentId": "incident-synthetic-04",
+        "source": "cloud-monitoring",
+        "status": "completed",
+        "error": null,
+        "startedAt": "2000-01-01T04:05:00Z",
+        "finishedAt": "2000-01-01T04:11:00Z",
+        "cujs": [
+          "checkout"
+        ],
+        "severity": "SEV2",
+        "impact": "Checkout fails for every order.",
+        "hypotheses": [
+          {
+            "rank": 1,
+            "service": "checkoutservice",
+            "summary": "checkoutservice was deployed with a wrong PAYMENT_SERVICE_ADDR.",
+            "confidence": 0.7,
+            "evidence": [
+              "checkoutservice logs: dial paymentservice-wrong:50051: no such host"
+            ]
+          }
+        ],
+        "proposedAction": {
+          "type": "scale",
+          "namespace": "boutique",
+          "target": "deployment/checkoutservice",
+          "params": {
+            "replicas": 12
+          }
+        },
+        "proposalId": null,
+        "proposalError": {
+          "status": 422,
+          "error": "replicas 12 is above the bound 3",
+          "reason": "out-of-bounds"
+        },
+        "model": "claude-opus-5-5",
+        "usage": {
+          "inputTokens": 100000,
+          "outputTokens": 5000,
+          "costUsd": 5.0
+        },
+        "toolCalls": 12
+      },
+      "proposal": null,
+      "executorEvents": [
+        {
+          "time": "2000-01-01T04:11:01Z",
+          "severity": "INFO",
+          "message": "proposal_received",
+          "event": "proposal_received",
+          "proposalId": "prop-synthetic-04-refused",
+          "incidentId": "incident-synthetic-04",
+          "investigationId": "inv-synthetic-04",
+          "action": {
+            "type": "scale",
+            "namespace": "boutique",
+            "target": "deployment/checkoutservice",
+            "params": {
+              "replicas": 12
+            }
+          },
+          "status": "pending"
+        },
+        {
+          "time": "2000-01-01T04:11:01Z",
+          "severity": "INFO",
+          "message": "blocked",
+          "event": "blocked",
+          "proposalId": "prop-synthetic-04-refused",
+          "incidentId": "incident-synthetic-04",
+          "investigationId": "inv-synthetic-04",
+          "action": {
+            "type": "scale",
+            "namespace": "boutique",
+            "target": "deployment/checkoutservice",
+            "params": {
+              "replicas": 12
+            }
+          },
+          "status": "blocked",
+          "reason": "out-of-bounds",
+          "error": "replicas 12 is above the bound 3"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "faultId": "F95-synthetic-node-preemption",
+      "status": "completed",
+      "reason": null,
+      "injectedAt": "2000-01-01T05:00:00Z",
+      "stoppedAt": "2000-01-01T05:20:30Z",
+      "recoveredAt": "2000-01-01T05:35:00Z",
+      "faultRunId": null,
+      "faultObjects": [],
+      "faultEnd": null,
+      "investigation": null,
+      "proposal": null,
+      "executorEvents": [],
+      "notes": [
+        "injected by hand",
+        "no investigation within 20m00s"
+      ]
+    },
+    {
+      "faultId": "F96-synthetic-recommendation-cpu-stress",
+      "status": "completed",
+      "reason": null,
+      "injectedAt": "2000-01-01T06:00:00Z",
+      "stoppedAt": "2000-01-01T06:12:00Z",
+      "recoveredAt": "2000-01-01T06:24:00Z",
+      "faultRunId": "20000101T060000Z-F96-synthetic-recommendation-cpu-stress",
+      "faultObjects": [
+        "stresschaos/f96-synthetic-recommendation-cpu-stress"
+      ],
+      "faultEnd": {
+        "reason": "signal",
+        "at": "2000-01-01T06:12:00Z"
+      },
+      "investigation": {
+        "id": "inv-synthetic-06",
+        "incidentId": "incident-synthetic-06",
+        "source": "cloud-monitoring",
+        "status": "completed",
+        "error": null,
+        "startedAt": "2000-01-01T06:07:00Z",
+        "finishedAt": "2000-01-01T06:10:00Z",
+        "cujs": [
+          "view-cart"
+        ],
+        "severity": "SEV2",
+        "impact": "View cart is a little slower.",
+        "hypotheses": [
+          {
+            "rank": 1,
+            "service": "recommendationservice",
+            "summary": "recommendationservice is CPU-throttled.",
+            "confidence": 0.6,
+            "evidence": [
+              "container_cpu_cfs_throttled_seconds_total rising"
+            ]
+          }
+        ],
+        "proposedAction": {
+          "type": "delete",
+          "namespace": "boutique",
+          "target": "pod/recommendationservice-7d9f-synthetic",
+          "params": {}
+        },
+        "proposalId": null,
+        "proposalError": {
+          "status": 403,
+          "error": "action type delete is not allowed",
+          "reason": "not-allowed"
+        },
+        "model": "claude-opus-5",
+        "usage": {
+          "inputTokens": 50000,
+          "outputTokens": 3000,
+          "costUsd": 0.4
+        },
+        "toolCalls": 7
+      },
+      "proposal": null,
+      "executorEvents": [
+        {
+          "time": "2000-01-01T06:10:01Z",
+          "severity": "INFO",
+          "message": "proposal_received",
+          "event": "proposal_received",
+          "proposalId": "prop-synthetic-06-refused",
+          "incidentId": "incident-synthetic-06",
+          "investigationId": "inv-synthetic-06",
+          "action": {
+            "type": "delete",
+            "namespace": "boutique",
+            "target": "pod/recommendationservice-7d9f-synthetic",
+            "params": {}
+          },
+          "status": "pending"
+        },
+        {
+          "time": "2000-01-01T06:10:01Z",
+          "severity": "INFO",
+          "message": "blocked",
+          "event": "blocked",
+          "proposalId": "prop-synthetic-06-refused",
+          "incidentId": "incident-synthetic-06",
+          "investigationId": "inv-synthetic-06",
+          "action": {
+            "type": "delete",
+            "namespace": "boutique",
+            "target": "pod/recommendationservice-7d9f-synthetic",
+            "params": {}
+          },
+          "status": "blocked",
+          "reason": "not-allowed",
+          "error": "action type delete is not allowed"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "faultId": "F97-synthetic-payment-abort",
+      "status": "completed",
+      "reason": null,
+      "injectedAt": "2000-01-01T07:00:00Z",
+      "stoppedAt": "2000-01-01T07:21:00Z",
+      "recoveredAt": "2000-01-01T07:33:00Z",
+      "faultRunId": "20000101T070000Z-F97-synthetic-payment-abort",
+      "faultObjects": [
+        "virtualservice/f97-synthetic-payment-abort"
+      ],
+      "faultEnd": {
+        "reason": "signal",
+        "at": "2000-01-01T07:21:00Z"
+      },
+      "investigation": {
+        "id": "inv-synthetic-07",
+        "incidentId": "incident-synthetic-07",
+        "source": "cloud-monitoring",
+        "status": "failed",
+        "error": "model call failed after 3 retries (HTTP 429)",
+        "startedAt": "2000-01-01T07:01:30Z",
+        "finishedAt": "2000-01-01T07:03:00Z",
+        "cujs": [
+          "checkout"
+        ],
+        "severity": "SEV2",
+        "impact": "",
+        "hypotheses": [],
+        "proposedAction": null,
+        "proposalId": null,
+        "proposalError": null,
+        "model": "claude-opus-5-5",
+        "usage": {
+          "inputTokens": 10000,
+          "outputTokens": 500,
+          "costUsd": 0.05
+        },
+        "toolCalls": 2
+      },
+      "proposal": null,
+      "executorEvents": [],
+      "notes": []
+    },
+    {
+      "faultId": "F98-synthetic-shipping-abort",
+      "status": "skipped",
+      "reason": "not steady: checkout: probe success 0.800 < 0.99",
+      "injectedAt": null,
+      "stoppedAt": null,
+      "recoveredAt": null,
+      "faultRunId": null,
+      "faultObjects": [],
+      "faultEnd": null,
+      "investigation": null,
+      "proposal": null,
+      "executorEvents": [],
+      "notes": []
+    }
+  ]
+}

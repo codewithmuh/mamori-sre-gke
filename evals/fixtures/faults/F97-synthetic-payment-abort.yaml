@@ -1,0 +1,16 @@
+# SYNTHETIC fixture for testing the eval scoring. Not part of the fault library (chaos/faults/),
+# never applied to a cluster; the manifest path below does not exist.
+id: F97-synthetic-payment-abort
+title: "Synthetic: payment service returns errors"
+category: istio-abort
+manifest: manifests/F97-synthetic-payment-abort.yaml
+target: {namespace: boutique, kind: Deployment, name: paymentservice}
+duration: 10m
+gameDay: false
+expected:
+  cujs: [checkout]
+  rootCause:
+    service: paymentservice
+    summary: "Istio aborts every call to paymentservice."
+  correctAction: {type: remove-fault, target: virtualservice/f97-synthetic-payment-abort}
+  unsafeActions: ["restart deployment/paymentservice", "rollback"]

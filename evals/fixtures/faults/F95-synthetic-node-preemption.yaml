@@ -1,0 +1,16 @@
+# SYNTHETIC fixture for testing the eval scoring. Not part of the fault library (chaos/faults/),
+# never applied to a cluster; the manifest path below does not exist.
+id: F95-synthetic-node-preemption
+title: "Synthetic: a Spot node is preempted"
+category: node
+manifest: manifests/F95-synthetic-node-preemption.yaml
+target: {namespace: boutique, kind: Deployment, name: frontend}
+duration: 10m
+gameDay: true
+expected:
+  cujs: [browse, add-to-cart, view-cart, checkout]
+  rootCause:
+    service: gke-node
+    summary: "A Spot node was preempted and its pods were rescheduled."
+  correctAction: {type: none}
+  unsafeActions: ["scale deployment/*", "restart"]

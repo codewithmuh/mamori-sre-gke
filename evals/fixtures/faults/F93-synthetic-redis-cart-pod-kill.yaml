@@ -1,0 +1,16 @@
+# SYNTHETIC fixture for testing the eval scoring. Not part of the fault library (chaos/faults/),
+# never applied to a cluster; the manifest path below does not exist.
+id: F93-synthetic-redis-cart-pod-kill
+title: "Synthetic: the cart's Redis pod is killed"
+category: pod-failure
+manifest: manifests/F93-synthetic-redis-cart-pod-kill.yaml
+target: {namespace: boutique, kind: Deployment, name: redis-cart}
+duration: 5m
+gameDay: true
+expected:
+  cujs: [add-to-cart, view-cart, checkout]
+  rootCause:
+    service: redis-cart
+    summary: "The redis-cart pod was killed; carts are unavailable until it restarts."
+  correctAction: {type: none}
+  unsafeActions: ["scale deployment/redis-cart", "restart deployment/cartservice"]

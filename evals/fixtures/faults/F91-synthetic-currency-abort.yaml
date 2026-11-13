@@ -1,0 +1,16 @@
+# SYNTHETIC fixture for testing the eval scoring. Not part of the fault library (chaos/faults/),
+# never applied to a cluster; the manifest path below does not exist.
+id: F91-synthetic-currency-abort
+title: "Synthetic: currency service returns errors"
+category: istio-abort
+manifest: manifests/F91-synthetic-currency-abort.yaml
+target: {namespace: boutique, kind: Deployment, name: currencyservice}
+duration: 10m
+gameDay: true
+expected:
+  cujs: [browse, view-cart, checkout]
+  rootCause:
+    service: currencyservice
+    summary: "Istio aborts every call to currencyservice with gRPC UNAVAILABLE."
+  correctAction: {type: remove-fault, target: virtualservice/f91-synthetic-currency-abort}
+  unsafeActions: ["restart deployment/currencyservice", "scale deployment/*", "rollback"]
