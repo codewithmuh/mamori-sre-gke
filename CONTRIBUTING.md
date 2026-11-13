@@ -1,70 +1,45 @@
-# Contributing to Three-Tier DevSecOps Project
+# Contributing
 
-Thank you for your interest in contributing to the **Three-Tier DevSecOps Project**! We welcome contributions of all kinds: bug fixes, documentation improvements, security enhancements, and feature suggestions.
+This is a one-maintainer SRE lab (see [README.md](README.md)). Issues and suggestions are welcome. Small pull
+requests (typos, broken links, clearer docs) are welcome too; anything larger starts with an issue so we can agree on
+scope first. By taking part you agree to the [Code of Conduct](CODE_OF_CONDUCT.md). Report security problems
+privately, as described in [SECURITY.md](SECURITY.md), never in a public issue.
 
----
+## How work flows
 
-## Code of Conduct
+Every change, including the maintainer's own, follows the same path.
 
-By participating in this project, you agree to abide by the terms of our [Code of Conduct](CODE_OF_CONDUCT.md). Please report any unacceptable behavior to [contact@codewithmuh.com](mailto:contact@codewithmuh.com).
+1. **Plan first.** Anything bigger than a small fix gets a written plan (scope, design, risks) in the issue or in
+   [docs/](docs/). A significant decision gets an ADR in [docs/adr/](docs/adr/).
+2. **Issue first.** Open an issue with the problem, the scope and acceptance criteria. No work without an issue
+   number.
+3. **One branch per issue**, from an up-to-date `main`: `<type>/<issue#>-<short-slug>`, for example
+   `feat/6-terraform-foundation` or `docs/4-project-plan`. Never commit to `main` directly.
+4. **Conventional Commits that reference the issue**, for example `feat: add the spend-guard function (#7)`. Types:
+   `feat`, `fix`, `docs`, `ci`, `refactor`, `test`, `chore`, `ops`.
+5. **Run `make check` before pushing.** It runs the same lint and tests as the required `CI result` check. The
+   agent, its evaluation harness and the generated SLO files have their own workflows outside `CI result`
+   (`agent.yml`, `evals.yml`, `slo.yml`); if you touch them, also run `make agent-check`, `make evals-check` or
+   `make slo-check`.
+6. **Open a pull request** that closes the issue (`Closes #7`) and says:
+   - **What changed**, and why.
+   - **How it was tested**: commands and results. For anything that touches Google Cloud, include the `terraform
+     plan` summary or say that it was validated offline only.
+   - **Risks**: what could break, cost impact, and how to roll back.
 
----
+   A draft PR is fine while work is in progress.
+7. **Code review.** Fix review findings on the same branch. CI must be green.
+8. **Squash merge.** The maintainer merges, so each PR becomes one Conventional Commit on `main`, and deletes the
+   branch.
 
-## How Can I Contribute?
+## Rules for every change
 
-### 1. Reporting Bugs
-
-Before creating a bug report, please check existing [Issues](https://github.com/codewithmuh/three-tier-devsecops-project/issues) to avoid duplicates.
-
-When submitting an issue, please use the **Bug Report** template and include:
-* A clear, descriptive title.
-* Step-by-step instructions to reproduce the issue.
-* Expected vs actual behavior.
-* Error messages, logs, or screenshots (ensure secrets/credentials are redacted).
-* Details about your environment (Kubernetes version, Terraform version, OS, etc.).
-
-### 2. Suggesting Enhancements
-
-Feature requests are tracked as GitHub Issues. When proposing an enhancement:
-* Use the **Feature Request** template.
-* Explain the use case and why this improvement benefits the broader DevOps community.
-* Outline the proposed architecture or implementation steps.
-
-### 3. Submitting Pull Requests
-
-1. **Fork the Repository** and clone your fork locally:
-   ```bash
-   git clone https://github.com/<your-username>/three-tier-devsecops-project.git
-   cd three-tier-devsecops-project
-   ```
-2. **Create a Feature Branch**:
-   ```bash
-   git checkout -b feature/your-feature-name
-   # or
-   git checkout -b fix/issue-description
-   ```
-3. **Follow Coding & Security Standards**:
-   * Adhere to 12-factor configuration principles (never hardcode passwords, API keys, or certificates).
-   * Verify all Terraform files format cleanly with `terraform fmt`.
-   * Verify Kubernetes manifests with `kubectl dry-run` or linter.
-4. **Commit with Conventional Commits**:
-   * `feat: add support for AWS Secrets Manager in ECS task definition`
-   * `fix: correct Trivy vulnerability scan severity threshold`
-   * `docs: clarify Jenkins runner security group prerequisites`
-5. **Push to Your Fork** and open a Pull Request against `main`.
-
----
-
-## Pull Request Review Process
-
-* Maintainers will review your PR for architecture alignment, security considerations, and code quality.
-* Automated CI workflows (including Gitleaks secret audits) must pass before merging.
-* Keep pull requests focused on a single topic to expedite review.
-
----
-
-## Community & Support
-
-* **YouTube**: [Code With Muh](https://youtube.com/@codewithmuh)
-* **Website**: [codewithmuh.com](https://codewithmuh.com)
-* **Contact**: [contact@codewithmuh.com](mailto:contact@codewithmuh.com)
+- **No secrets in Git.** gitleaks runs in pre-commit and CI. Configuration comes from the environment or a gitignored
+  `.env` (template: `.env.example`).
+- **No long-lived credentials.** CI reaches Google Cloud only through Workload Identity Federation.
+- **Pin every version:** Terraform providers and modules, Helm charts, container images, GitHub Actions (full commit
+  SHA plus a `# vX.Y.Z` comment), Go modules.
+- **Infrastructure changes only through Terraform**, and Kubernetes changes only through Git and Argo CD. A manual
+  change during an incident is written down and then made in Git.
+- **Plain, short English** in docs and comments. Comments explain why, not what.
+- **Numbers say what they are:** mark each one as measured (with the date and source) or as an estimate.
