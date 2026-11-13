@@ -63,6 +63,7 @@ type handler struct {
 	cfg       Config
 	log       *slog.Logger
 	newClient func(context.Context) (clusterManager, error)
+	now       func() time.Time
 
 	timeout  time.Duration
 	poll     time.Duration
@@ -82,6 +83,7 @@ func newHandler(getenv func(string) string, logger *slog.Logger, newClient func(
 		cfg:       cfg,
 		log:       logger,
 		newClient: newClient,
+		now:       time.Now,
 		timeout:   actionTimeout,
 		poll:      pollInterval,
 		retryMin:  retryInitial,
@@ -90,9 +92,10 @@ func newHandler(getenv func(string) string, logger *slog.Logger, newClient func(
 }
 
 // handle processes one budget notification. It returns an error only when a
-// redelivery could help (a transient API failure). Bad messages and permanent
-// failures return nil: budget messages arrive several times a day, and
-// redelivering a message that can never succeed would only loop.
+// redelivery could help (a transient API failure). Bad, stale and
+// below-threshold messages and permanent failures return nil: budget messages
+// arrive several times a day, and redelivering a message that can never
+// succeed would only loop.
 func (h *handler) handle(ctx context.Context, e cloudevents.Event) error {
 	log := h.log.With("event_id", e.ID())
 
@@ -103,6 +106,12 @@ func (h *handler) handle(ctx context.Context, e cloudevents.Event) error {
 		return nil
 	}
 	log = log.With(b.logAttrs()...)
+
+	if reason := b.staleReason(h.now(), h.cfg.MaxMessageAge); reason != "" {
+		log.WarnContext(ctx, "ignoring stale budget notification: "+reason,
+			"over_threshold", b.reached(h.cfg.Threshold), "outcome", outcomeStale)
+		return nil
+	}
 
 	if b.Currency != expectedCurrency {
 		log.ErrorContext(ctx, "ignoring budget notification: currency is not "+expectedCurrency,

@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cloudevents/sdk-go/v2/binding"
 	cehttp "github.com/cloudevents/sdk-go/v2/protocol/http"
@@ -22,7 +23,10 @@ func TestParseNotificationSample(t *testing.T) {
 	if b.Name != "mamori-lab" || b.Cost != 201.37 || b.Amount != 200 || b.Currency != "USD" {
 		t.Errorf("got %+v", b)
 	}
-	if b.IntervalStart != "2026-12-01T08:00:00Z" || b.SchemaVersion != "1.0" || b.MessageID != "17393460588213456" {
+	if !b.IntervalStart.Equal(mustTime(sampleIntervalStart)) || !b.Published.Equal(mustTime(samplePublished)) {
+		t.Errorf("IntervalStart = %v, Published = %v", b.IntervalStart, b.Published)
+	}
+	if b.SchemaVersion != "1.0" || b.MessageID != "17393460588213456" {
 		t.Errorf("got %+v", b)
 	}
 	if b.BudgetID != "de72f49d-779b-4945-a127-4d6ce8def0bb" {
@@ -127,10 +131,100 @@ func TestParseNotificationReportsAllMissingFields(t *testing.T) {
 	if err == nil {
 		t.Fatal("want an error")
 	}
-	for _, field := range []string{"costAmount", "budgetAmount", "currencyCode"} {
+	for _, field := range []string{"costAmount", "budgetAmount", "currencyCode", "costIntervalStart"} {
 		if !strings.Contains(err.Error(), field) {
 			t.Errorf("error %q does not mention %s", err, field)
 		}
+	}
+}
+
+func TestParseNotificationTimes(t *testing.T) {
+	body := `{"costAmount": 10, "budgetAmount": 200, "currencyCode": "USD", "costIntervalStart": "2026-12-01T08:00:00Z"}`
+	tests := []struct {
+		name        string
+		body        string
+		publishTime string
+		wantErr     string
+	}{
+		{"no publish time", body, "", "publishTime is missing"},
+		{"bad publish time", body, "yesterday", `publishTime "yesterday" is not an RFC 3339 time`},
+		{"no interval start", `{"costAmount": 10, "budgetAmount": 200, "currencyCode": "USD"}`, samplePublished, "costIntervalStart is missing"},
+		{"bad interval start", `{"costAmount": 10, "budgetAmount": 200, "currencyCode": "USD", "costIntervalStart": "2026-12-01"}`, samplePublished, "costIntervalStart"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseNotification(budgetEventAt(t, tt.body, tt.publishTime))
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseNotificationSnakeCasePublishTime(t *testing.T) {
+	body := []byte(`{"costAmount": 10, "budgetAmount": 200, "currencyCode": "USD", "costIntervalStart": "2026-12-01T08:00:00Z"}`)
+	data, err := json.Marshal(map[string]any{
+		"message": map[string]any{"data": body, "publish_time": "2026-12-28T04:12:31Z"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := parseNotification(rawEvent(t, data))
+	if err != nil {
+		t.Fatalf("parseNotification: %v", err)
+	}
+	if !b.Published.Equal(mustTime("2026-12-28T04:12:31Z")) {
+		t.Errorf("Published = %v", b.Published)
+	}
+}
+
+func TestBudgetMonthStart(t *testing.T) {
+	tests := []struct{ now, want string }{
+		// November 1 starts in daylight time (UTC-7), December in standard time (UTC-8).
+		{"2026-11-13T09:00:00Z", "2026-11-01T07:00:00Z"},
+		{"2026-12-28T04:20:00Z", "2026-12-01T08:00:00Z"},
+		// 07:59 UTC on December 1 is still November 30 in California.
+		{"2026-12-01T07:59:59Z", "2026-11-01T07:00:00Z"},
+		{"2026-12-01T08:00:00Z", "2026-12-01T08:00:00Z"},
+		{"2027-01-01T08:05:00Z", "2027-01-01T08:00:00Z"},
+	}
+	for _, tt := range tests {
+		if got := budgetMonthStart(mustTime(tt.now)); !got.Equal(mustTime(tt.want)) {
+			t.Errorf("budgetMonthStart(%s) = %s, want %s", tt.now, got.UTC().Format(time.RFC3339), tt.want)
+		}
+	}
+}
+
+func TestStaleReason(t *testing.T) {
+	december := mustTime("2026-12-01T08:00:00Z")
+	published := mustTime("2026-12-28T04:00:00Z")
+	tests := []struct {
+		name      string
+		published time.Time
+		interval  time.Time
+		now       time.Time
+		wantStale string // "" means current
+	}{
+		{"fresh", published, december, published.Add(5 * time.Minute), ""},
+		{"exactly max age", published, december, published.Add(time.Hour), ""},
+		{"just over max age", published, december, published.Add(time.Hour + time.Second), "published 1h0m1s ago"},
+		{"days old (retried)", published, december, published.Add(72 * time.Hour), "published 72h0m0s ago"},
+		{"publish time a little ahead of our clock", published, december, published.Add(-time.Minute), ""},
+		{"interval starts at the month start", published, december, published, ""},
+		{"last month's interval", mustTime("2027-01-01T08:01:00Z"), december, mustTime("2027-01-01T08:05:00Z"), "its budget month started 2026-12-01T08:00:00Z"},
+		{"interval before month start by a second", published, december.Add(-time.Second), published, "before the current one (2026-12-01T00:00:00-08:00)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := budget{Published: tt.published, IntervalStart: tt.interval}
+			got := b.staleReason(tt.now, time.Hour)
+			if tt.wantStale == "" && got != "" {
+				t.Fatalf("staleReason() = %q, want current", got)
+			}
+			if !strings.Contains(got, tt.wantStale) {
+				t.Fatalf("staleReason() = %q, want it to contain %q", got, tt.wantStale)
+			}
+		})
 	}
 }
 

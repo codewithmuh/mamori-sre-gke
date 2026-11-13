@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadConfigDefaults(t *testing.T) {
@@ -14,6 +15,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	if cfg.DryRun {
 		t.Error("DryRun = true, want default false")
+	}
+	if cfg.MaxMessageAge != time.Hour {
+		t.Errorf("MaxMessageAge = %v, want default 1h", cfg.MaxMessageAge)
 	}
 	if got := cfg.nodePoolName(); got != testNodePool {
 		t.Errorf("nodePoolName() = %q, want %q", got, testNodePool)
@@ -32,7 +36,12 @@ func TestLoadConfigValues(t *testing.T) {
 		"THRESHOLD": " 0.9 ",
 		"DRY_RUN":   "TRUE",
 		"LOCATION":  "asia-northeast1",
+
+		"MAX_MESSAGE_AGE": "90m",
 	})
+	if cfg.MaxMessageAge != 90*time.Minute {
+		t.Errorf("MaxMessageAge = %v, want 90m", cfg.MaxMessageAge)
+	}
 	if cfg.Threshold != 0.9 {
 		t.Errorf("Threshold = %v, want 0.9", cfg.Threshold)
 	}
@@ -66,6 +75,10 @@ func TestLoadConfigErrors(t *testing.T) {
 		{"threshold Inf", map[string]string{"THRESHOLD": "Inf"}, "must be a fraction"},
 		{"threshold as percent", map[string]string{"THRESHOLD": "100"}, "must be a fraction"},
 		{"dry run not a bool", map[string]string{"DRY_RUN": "yes"}, "DRY_RUN=\"yes\" must be true or false"},
+		{"max age not a duration", map[string]string{"MAX_MESSAGE_AGE": "60"}, "MAX_MESSAGE_AGE=\"60\" is not a duration"},
+		{"max age too short", map[string]string{"MAX_MESSAGE_AGE": "30s"}, "must be between 5m0s and 24h0m0s"},
+		{"max age too long", map[string]string{"MAX_MESSAGE_AGE": "168h"}, "must be between"},
+		{"max age negative", map[string]string{"MAX_MESSAGE_AGE": "-1h"}, "must be between"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

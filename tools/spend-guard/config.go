@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config comes only from environment variables, set by Terraform.
@@ -17,12 +18,26 @@ type Config struct {
 	NodePool    string  // NODE_POOL
 	Threshold   float64 // THRESHOLD: act when cost >= budget × THRESHOLD; default 1.0
 	DryRun      bool    // DRY_RUN: log the planned actions only; default false
+
+	// MAX_MESSAGE_AGE: ignore notifications published longer ago than this
+	// (a Go duration such as "1h"); default 1h.
+	MaxMessageAge time.Duration
 }
 
 // Above this the guard would act only after overspending by more than the
 // whole budget. A value like 100 is almost certainly a percentage typed by
 // mistake, and would quietly disarm the guard.
 const maxThreshold = 2.0
+
+// Budget notifications arrive several times a day and Pub/Sub delivers within
+// seconds, so an hour-old message has been retried or overtaken. Below 5
+// minutes normal delays could make the guard skip every message; above a day
+// it would act on numbers that newer messages have replaced.
+const (
+	defaultMaxMessageAge = time.Hour
+	minMaxMessageAge     = 5 * time.Minute
+	maxMaxMessageAge     = 24 * time.Hour
+)
 
 var (
 	projectIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{4,28}[a-z0-9]$`)
@@ -51,6 +66,8 @@ func loadConfig(getenv func(string) string) (Config, error) {
 		ClusterName: required("CLUSTER_NAME", gkeNamePattern),
 		NodePool:    required("NODE_POOL", gkeNamePattern),
 		Threshold:   1.0,
+
+		MaxMessageAge: defaultMaxMessageAge,
 	}
 
 	if v := get("THRESHOLD"); v != "" {
@@ -73,6 +90,18 @@ func loadConfig(getenv func(string) string) (Config, error) {
 		cfg.DryRun = d
 	}
 
+	if v := get("MAX_MESSAGE_AGE"); v != "" {
+		d, err := time.ParseDuration(v)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("MAX_MESSAGE_AGE=%q is not a duration such as 1h or 90m", v))
+		case d < minMaxMessageAge || d > maxMaxMessageAge:
+			errs = append(errs, fmt.Errorf("MAX_MESSAGE_AGE=%q must be between %s and %s", v, minMaxMessageAge, maxMaxMessageAge))
+		default:
+			cfg.MaxMessageAge = d
+		}
+	}
+
 	return cfg, errors.Join(errs...)
 }
 
@@ -89,5 +118,6 @@ func (c Config) logAttrs() []any {
 		"node_pool", c.nodePoolName(),
 		"threshold", c.Threshold,
 		"dry_run", c.DryRun,
+		"max_message_age", c.MaxMessageAge.String(),
 	}
 }

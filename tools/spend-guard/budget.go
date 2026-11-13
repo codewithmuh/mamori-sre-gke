@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
+	_ "time/tzdata" // budget months follow US Pacific time, whatever the runtime image has
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 )
@@ -26,6 +28,7 @@ const (
 // Outcomes, logged as "outcome" so the runbook can query them.
 const (
 	outcomeIgnored        = "ignored"
+	outcomeStale          = "stale"
 	outcomeBelowThreshold = "below_threshold"
 	outcomeDryRun         = "dry_run"
 	outcomeScaledToZero   = "scaled_to_zero"
@@ -33,13 +36,27 @@ const (
 	outcomeFailed         = "failed"
 )
 
+// budgetLocation is the time zone of Cloud Billing budget months.
+var budgetLocation = mustLoadLocation("America/Los_Angeles")
+
+func mustLoadLocation(name string) *time.Location {
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		panic(err) // can't happen: time/tzdata is embedded
+	}
+	return loc
+}
+
 // messagePublishedData is the CloudEvent data for a Pub/Sub message
 // (google.events.cloud.pubsub.v1.MessagePublishedData).
 type messagePublishedData struct {
 	Message struct {
-		Data       []byte            `json:"data"` // base64 in JSON; encoding/json decodes it
-		Attributes map[string]string `json:"attributes"`
-		MessageID  string            `json:"messageId"`
+		Data        []byte            `json:"data"` // base64 in JSON; encoding/json decodes it
+		Attributes  map[string]string `json:"attributes"`
+		MessageID   string            `json:"messageId"`
+		PublishTime string            `json:"publishTime"`
+		// Pub/Sub push messages may carry the snake_case spelling too.
+		PublishTimeSnake string `json:"publish_time"`
 	} `json:"message"`
 	Subscription string `json:"subscription"`
 }
@@ -64,7 +81,8 @@ type budget struct {
 	Cost          float64
 	Amount        float64
 	Currency      string
-	IntervalStart string
+	IntervalStart time.Time // start of the budget month the cost belongs to
+	Published     time.Time // when Cloud Billing published the message
 	AlertExceeded *float64
 	BudgetID      string
 	MessageID     string
@@ -107,6 +125,20 @@ func parseNotification(e cloudevents.Event) (budget, error) {
 	if n.CurrencyCode == "" {
 		errs = append(errs, errors.New("currencyCode is missing"))
 	}
+	// Both times are needed to tell a current message from an old one that
+	// was redelivered or arrived out of order.
+	intervalStart, err := parseTime("costIntervalStart", n.CostIntervalStart)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	publishTime := msg.Message.PublishTime
+	if publishTime == "" {
+		publishTime = msg.Message.PublishTimeSnake
+	}
+	published, err := parseTime("publishTime", publishTime)
+	if err != nil {
+		errs = append(errs, err)
+	}
 	if err := errors.Join(errs...); err != nil {
 		return budget{}, err
 	}
@@ -116,12 +148,45 @@ func parseNotification(e cloudevents.Event) (budget, error) {
 		Cost:          *n.CostAmount,
 		Amount:        *n.BudgetAmount,
 		Currency:      n.CurrencyCode,
-		IntervalStart: n.CostIntervalStart,
+		IntervalStart: intervalStart,
+		Published:     published,
 		AlertExceeded: n.AlertThresholdExceeded,
 		BudgetID:      msg.Message.Attributes["budgetId"],
 		MessageID:     msg.Message.MessageID,
 		SchemaVersion: msg.Message.Attributes["schemaVersion"],
 	}, nil
+}
+
+func parseTime(field, v string) (time.Time, error) {
+	if v == "" {
+		return time.Time{}, fmt.Errorf("%s is missing", field)
+	}
+	t, err := time.Parse(time.RFC3339Nano, v)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%s %q is not an RFC 3339 time", field, v)
+	}
+	return t, nil
+}
+
+// staleReason says why the notification is too old to act on, or returns ""
+// if it is current. Pub/Sub delivers out of order, and a retried message can
+// come back days later: without this check, last month's over-budget message
+// could scale the pool to zero again after `make resume` or a budget raise.
+func (b budget) staleReason(now time.Time, maxAge time.Duration) string {
+	if age := now.Sub(b.Published); age > maxAge {
+		return fmt.Sprintf("published %s ago, more than MAX_MESSAGE_AGE (%s)", age.Round(time.Second), maxAge)
+	}
+	if start := budgetMonthStart(now); b.IntervalStart.Before(start) {
+		return fmt.Sprintf("its budget month started %s, before the current one (%s)",
+			b.IntervalStart.Format(time.RFC3339), start.Format(time.RFC3339))
+	}
+	return ""
+}
+
+// budgetMonthStart is midnight US Pacific time on the first of t's month there.
+func budgetMonthStart(t time.Time) time.Time {
+	t = t.In(budgetLocation)
+	return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, budgetLocation)
 }
 
 // reached reports whether the cost has reached budget × threshold.
@@ -140,7 +205,8 @@ func (b budget) logAttrs() []any {
 		"budget_amount", b.Amount,
 		"currency", b.Currency,
 		"spent_ratio", b.Cost / b.Amount,
-		"cost_interval_start", b.IntervalStart,
+		"cost_interval_start", b.IntervalStart.Format(time.RFC3339),
+		"publish_time", b.Published.Format(time.RFC3339Nano),
 	}
 	if b.AlertExceeded != nil {
 		attrs = append(attrs, "alert_threshold_exceeded", *b.AlertExceeded)

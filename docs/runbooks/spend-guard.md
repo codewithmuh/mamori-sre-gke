@@ -35,7 +35,8 @@ The commands below assume `ZONE` (default `asia-northeast1-a`) and the project a
     --freshness=2d --format='table(timestamp, severity, jsonPayload.outcome, jsonPayload.spent_ratio, jsonPayload.message)'
   ```
 
-  `below_threshold` lines several times a day are normal. `spent_ratio` is cost ÷ budget (1.0 = 100 %).
+  `below_threshold` lines several times a day are normal. `spent_ratio` is cost ÷ budget (1.0 = 100 %). A `stale` line
+  is an old message the guard skipped on purpose (published over an hour ago, or from an earlier budget month).
 
 ## Impact
 
@@ -61,7 +62,9 @@ The commands below assume `ZONE` (default `asia-northeast1-a`) and the project a
 
 **Decide first.** The month's cost is still over the budget, and budget notifications keep arriving several times a
 day. If you resume without changing anything, the guard scales the pool to zero again at the next notification,
-within hours. Choose one:
+within hours. (Old messages can't do this: the guard skips anything published more than an hour ago or dated in an
+earlier budget month, so a redelivered message from before the resume or from last month is logged as `stale`.)
+Choose one:
 
 - **Raise the budget** (`monthly_budget_usd` in `infra/envs/lab`, through a PR and the normal apply). Until the
   account is upgraded in M5, keep it below the trial credit that is left, or a runaway can still end the trial.
@@ -108,11 +111,13 @@ guard.
 
 1. **Offline.** Unit tests and a local run with the sample events: see the
    [README](../../tools/spend-guard/README.md#develop-and-test). No Google Cloud access needed.
-2. **Dry run in the cloud.** Apply with `spend_guard_dry_run = true`, then publish the over-budget sample:
+2. **Dry run in the cloud.** Apply with `spend_guard_dry_run = true`, then publish the over-budget sample. Pub/Sub
+   stamps the publish time; the `sed` dates the sample in the current month, or the guard would skip it as stale:
 
    ```bash
+   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
    gcloud pubsub topics publish budget-alerts \
-     --message="$(cat tools/spend-guard/testdata/budget-notification.json)" \
+     --message="$(sed "s/\"costIntervalStart\": \"[^\"]*\"/\"costIntervalStart\": \"$now\"/" tools/spend-guard/testdata/budget-notification.json)" \
      --attribute=schemaVersion=1.0,budgetId=manual-test
    ```
 

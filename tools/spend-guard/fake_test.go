@@ -192,6 +192,28 @@ func testEnv(overrides map[string]string) func(string) string {
 
 const testNodePool = "projects/mamori-lab-123456/locations/asia-northeast1-a/clusters/mamori/nodePools/spot-pool"
 
+// Times of the over-budget sample (testdata/pubsub-event.json), and a clock
+// a few minutes after it was published.
+const (
+	samplePublished     = "2026-12-28T04:12:31.417Z"
+	sampleIntervalStart = "2026-12-01T08:00:00Z" // midnight US Pacific (PST)
+)
+
+var sampleNow = mustTime("2026-12-28T04:20:00Z")
+
+// The below-threshold sample was published on 2026-12-07.
+var belowSampleNow = mustTime("2026-12-07T10:50:00Z")
+
+func mustTime(v string) time.Time {
+	t, err := time.Parse(time.RFC3339Nano, v)
+	if err != nil {
+		panic(err)
+	}
+	return t
+}
+
+func clockAt(t time.Time) func() time.Time { return func() time.Time { return t } }
+
 func testConfig(t *testing.T, overrides map[string]string) Config {
 	t.Helper()
 	cfg, err := loadConfig(testEnv(overrides))
@@ -261,14 +283,21 @@ func newTestGuard(t *testing.T, api clusterManager, overrides map[string]string)
 	}, logs
 }
 
-// budgetEvent wraps a budget notification body the way Eventarc delivers it.
+// budgetEvent wraps a budget notification body the way Eventarc delivers it,
+// published at the same time as the over-budget sample.
 func budgetEvent(t *testing.T, body string) cloudevents.Event {
+	t.Helper()
+	return budgetEventAt(t, body, samplePublished)
+}
+
+func budgetEventAt(t *testing.T, body, publishTime string) cloudevents.Event {
 	t.Helper()
 	data, err := json.Marshal(map[string]any{
 		"message": map[string]any{
-			"data":       []byte(body), // encoding/json writes base64, like Pub/Sub
-			"attributes": map[string]string{"budgetId": "test-budget", "schemaVersion": "1.0"},
-			"messageId":  "42",
+			"data":        []byte(body), // encoding/json writes base64, like Pub/Sub
+			"attributes":  map[string]string{"budgetId": "test-budget", "schemaVersion": "1.0"},
+			"messageId":   "42",
+			"publishTime": publishTime,
 		},
 		"subscription": "projects/mamori-lab-123456/subscriptions/test",
 	})

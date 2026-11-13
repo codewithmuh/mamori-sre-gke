@@ -11,11 +11,18 @@ in [PLAN.md](../../PLAN.md) and the [runbook](../../docs/runbooks/spend-guard.md
 
 For every budget notification:
 
-1. Parse the Pub/Sub CloudEvent and the budget JSON inside it (`costAmount`, `budgetAmount`, `currencyCode`, ...).
-2. If the message is invalid or a field is missing, or the currency is not USD: log an `ERROR` and do nothing.
-3. If `costAmount < budgetAmount × THRESHOLD`: log at `INFO` and do nothing. This is the common case: Cloud Billing
+1. Parse the Pub/Sub CloudEvent and the budget JSON inside it (`costAmount`, `budgetAmount`, `currencyCode`,
+   `costIntervalStart`, and the message's `publishTime`).
+2. If the message is invalid or a field is missing: log an `ERROR` and do nothing.
+3. If the message is stale, log a `WARNING` and do nothing. Stale means it was published more than `MAX_MESSAGE_AGE`
+   ago (default 1 hour), or its `costIntervalStart` is before the current budget month (months start at midnight US
+   Pacific time). Pub/Sub delivers out of order, and the trigger can redeliver a failed message for days; without
+   this check, December's over-budget message could stop the cluster again after a `make resume` in January or after
+   the budget was raised.
+4. If the currency is not USD: log an `ERROR` and do nothing.
+5. If `costAmount < budgetAmount × THRESHOLD`: log at `INFO` and do nothing. This is the common case: Cloud Billing
    sends notifications several times a day, whatever the spend.
-4. Otherwise read the node pool. If node autoscaling is on, turn it off (so the autoscaler can't add nodes back) and
+6. Otherwise read the node pool. If node autoscaling is on, turn it off (so the autoscaler can't add nodes back) and
    wait for that operation. Then set the node count to 0 and wait for it.
 
 Safe to repeat: autoscaling that is already off is skipped, and resizing to 0 a pool that is already at 0 changes
@@ -30,24 +37,28 @@ With `DRY_RUN=true` it reads the node pool and logs the steps it would take, and
 
 ### Return value and retries
 
-The trigger redelivers a message when the function returns an error (`RETRY_POLICY_RETRY`). So the function returns:
+The trigger redelivers a message when the function returns an error (`RETRY_POLICY_RETRY`). Since stale messages are
+dropped, a transient failure is retried for at most `MAX_MESSAGE_AGE`; after that, the next fresh notification tries
+again. So the function returns:
 
 | Situation | Returns | Why |
 |---|---|---|
-| Invalid message, other currency, below threshold, done, dry run, resize still running | `nil` | Redelivery can't change the outcome |
+| Invalid or stale message, other currency, below threshold, done, dry run, resize still running | `nil` | Redelivery can't change the outcome |
 | Wrong permissions, node pool or cluster not found, invalid request | `nil` (logged as `ERROR`) | Won't fix itself; the next notification tries again |
 | Cluster still busy after 7 minutes, GKE API unavailable, operation failed, no GKE client | error | A retry a few minutes later can succeed |
 
 ### Logs
 
 One JSON object per line on stdout, with `severity` and `message`, which Cloud Logging reads as the log level and
-summary. Every line about a notification carries `event_id`, `budget`, `cost`, `budget_amount`, `currency`,
-`spent_ratio`, `threshold`, `dry_run` and `node_pool`. The final line of each run has an `outcome`:
+summary. Lines about a valid notification carry `event_id`, `budget`, `cost`, `budget_amount`, `currency`,
+`spent_ratio`, `cost_interval_start` and `publish_time`; from the threshold check on, also `threshold`, `dry_run` and
+`node_pool`. The final line of each run has an `outcome`:
 
 | `outcome` | Severity | Meaning |
 |---|---|---|
 | `below_threshold` | INFO | Nothing to do |
 | `ignored` | ERROR | Not a valid budget notification, or not in USD |
+| `stale` | WARNING | Too old, or from an earlier budget month; `over_threshold` says whether it would have acted |
 | `dry_run` | WARNING | Would have acted; `planned_steps` lists what |
 | `scaled_to_zero` | WARNING | Autoscaling off and node count 0 |
 | `resize_running` | WARNING | Resize to 0 started; GKE is still draining nodes |
@@ -66,6 +77,7 @@ the function logs the problem and exits, so the deploy fails instead of leaving 
 | `NODE_POOL` | yes | `spot-pool` | The pool to scale to zero |
 | `THRESHOLD` | no, default `1.0` | `0.9` | Act when cost ≥ budget × THRESHOLD. A fraction, above 0 and at most 2 (`100` is rejected as a likely percentage) |
 | `DRY_RUN` | no, default `false` | `true` | Log the planned actions only |
+| `MAX_MESSAGE_AGE` | no, default `1h` | `90m` | Ignore notifications published longer ago than this. A Go duration from `5m` to `24h` |
 
 The event is a Pub/Sub message published by Cloud Billing, delivered by Eventarc as a CloudEvent of type
 `google.cloud.pubsub.topic.v1.messagePublished`. Samples: [`testdata/pubsub-event.json`](testdata/pubsub-event.json)
@@ -138,19 +150,29 @@ docker run --rm -p 127.0.0.1:8080:8080 -v "$PWD":/src -w /src \
   golang:1.27.3-trixie go run ./cmd/local -host 0.0.0.0
 ```
 
-In another terminal, send a sample in CloudEvents binary mode, as Eventarc does:
+In another terminal, define two helpers. `send` posts a CloudEvent in binary mode, as Eventarc does. `fresh_event`
+wraps a budget JSON (on stdin) as a Pub/Sub message published now and dated this month, so the guard doesn't drop it
+as stale:
 
 ```bash
-curl -sS localhost:8080 \
-  -H "Content-Type: application/json" \
-  -H "ce-id: local-1" \
-  -H "ce-specversion: 1.0" \
-  -H "ce-type: google.cloud.pubsub.topic.v1.messagePublished" \
-  -H "ce-source: //pubsub.googleapis.com/projects/mamori-lab-123456/topics/budget-alerts" \
-  -d @testdata/pubsub-event-below-threshold.json
+send() {
+  curl -sS localhost:8080 -d @- \
+    -H "Content-Type: application/json" -H "ce-id: local-$RANDOM" -H "ce-specversion: 1.0" \
+    -H "ce-type: google.cloud.pubsub.topic.v1.messagePublished" \
+    -H "ce-source: //pubsub.googleapis.com/projects/mamori-lab-123456/topics/budget-alerts"
+}
+fresh_event() {
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  data=$(sed "s/\"costIntervalStart\": \"[^\"]*\"/\"costIntervalStart\": \"$now\"/" | base64 | tr -d '\n')
+  printf '{"message":{"data":"%s","messageId":"local","publishTime":"%s"}}' "$data" "$now"
+}
+
+sed 's/201.37/41.18/' testdata/budget-notification.json | fresh_event | send   # below_threshold
+fresh_event < testdata/budget-notification.json | send                           # over budget
+send < testdata/pubsub-event.json   # stored sample, published 2026-12-28: stale once that is over an hour ago
 ```
 
-That one logs `below_threshold` and needs no Google Cloud access. `testdata/pubsub-event.json` is over budget: without
-credentials it logs `failed` ("could not find default credentials"), which still shows the parsing and the threshold
-check. To dry-run it against the real cluster, log in with `gcloud auth application-default login`, add
+The first needs no Google Cloud access. The over-budget one, without credentials, logs `failed` ("could not find
+default credentials"), which still shows the parsing, the staleness check and the threshold check. To dry-run it
+against the real cluster, log in with `gcloud auth application-default login`, add
 `-v "$HOME/.config/gcloud:/root/.config/gcloud:ro"` to the `docker run`, and keep `DRY_RUN=true`.

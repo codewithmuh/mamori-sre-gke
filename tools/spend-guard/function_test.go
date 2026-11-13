@@ -26,6 +26,7 @@ func newTestHandler(t *testing.T, gke clusterManager, env map[string]string) (*h
 	if err != nil {
 		t.Fatalf("newHandler: %v", err)
 	}
+	h.now = clockAt(sampleNow)
 	h.timeout = time.Second
 	h.poll = time.Millisecond
 	h.retryMin = time.Millisecond
@@ -40,6 +41,9 @@ func TestNewHandlerDefaults(t *testing.T) {
 	}
 	if h.timeout != actionTimeout || h.poll != pollInterval || h.retryMin != retryInitial || h.retryMax != retryMax {
 		t.Errorf("timings = %v %v %v %v", h.timeout, h.poll, h.retryMin, h.retryMax)
+	}
+	if d := time.Since(h.now()); d < 0 || d > time.Minute {
+		t.Errorf("default clock is off by %v", d)
 	}
 	// The function timeout is 540 s; the guard must stop waiting before it.
 	if actionTimeout >= 540*time.Second {
@@ -86,6 +90,7 @@ func TestHandleScalesToZeroOverBudget(t *testing.T) {
 func TestHandleBelowThresholdDoesNothing(t *testing.T) {
 	gke := newFakeGKE(false)
 	h, logs, created := newTestHandler(t, gke, nil)
+	h.now = clockAt(belowSampleNow)
 
 	if err := h.handle(context.Background(), fileEvent(t, "testdata/pubsub-event-below-threshold.json")); err != nil {
 		t.Fatalf("handle: %v", err)
@@ -101,6 +106,7 @@ func TestHandleBelowThresholdDoesNothing(t *testing.T) {
 func TestHandleLowerThreshold(t *testing.T) {
 	gke := newFakeGKE(false)
 	h, _, _ := newTestHandler(t, gke, map[string]string{"THRESHOLD": "0.2"})
+	h.now = clockAt(belowSampleNow)
 
 	// 41.18 of 200 is 20.6 %.
 	if err := h.handle(context.Background(), fileEvent(t, "testdata/pubsub-event-below-threshold.json")); err != nil {
@@ -140,7 +146,7 @@ func TestHandleIgnoresOtherCurrency(t *testing.T) {
 	gke := newFakeGKE(false)
 	h, logs, created := newTestHandler(t, gke, nil)
 
-	e := budgetEvent(t, `{"costAmount": 40000, "budgetAmount": 30000, "currencyCode": "JPY"}`)
+	e := budgetEvent(t, `{"costAmount": 40000, "budgetAmount": 30000, "currencyCode": "JPY", "costIntervalStart": "`+sampleIntervalStart+`"}`)
 	if err := h.handle(context.Background(), e); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
@@ -247,4 +253,57 @@ func TestHandleResizeStillRunning(t *testing.T) {
 		t.Fatalf("handle: %v", err)
 	}
 	logs.find(t, outcomeResizeRunning)
+}
+
+func TestHandleIgnoresOldMessage(t *testing.T) {
+	gke := newFakeGKE(false)
+	h, logs, created := newTestHandler(t, gke, nil)
+	// Retried for two hours, e.g. while the cluster was busy.
+	h.now = clockAt(mustTime(samplePublished).Add(2 * time.Hour))
+
+	if err := h.handle(context.Background(), fileEvent(t, "testdata/pubsub-event.json")); err != nil {
+		t.Fatalf("handle returned %v; a stale message must be acked", err)
+	}
+	if n := created.Load(); n != 0 {
+		t.Errorf("created %d GKE clients for a stale message", n)
+	}
+	entry := logs.find(t, outcomeStale)
+	if entry["severity"] != "WARNING" || entry["over_threshold"] != true {
+		t.Errorf("log entry = %v", entry)
+	}
+	if !strings.Contains(entry["message"].(string), "MAX_MESSAGE_AGE") {
+		t.Errorf("message = %q", entry["message"])
+	}
+}
+
+// After `make resume` in January, December's over-budget messages must not
+// stop the cluster again, even when they are delivered promptly.
+func TestHandleIgnoresLastMonthsBudget(t *testing.T) {
+	gke := newFakeGKE(false)
+	h, logs, _ := newTestHandler(t, gke, nil)
+	h.now = clockAt(mustTime("2027-01-01T08:05:00Z")) // 00:05 on January 1, US Pacific
+
+	body := `{"costAmount": 260, "budgetAmount": 200, "currencyCode": "USD", "costIntervalStart": "2026-12-01T08:00:00Z"}`
+	if err := h.handle(context.Background(), budgetEventAt(t, body, "2027-01-01T08:01:00Z")); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if m := gke.mutations(); len(m) != 0 {
+		t.Errorf("acted on last month's budget: %v", m)
+	}
+	if entry := logs.find(t, outcomeStale); !strings.Contains(entry["message"].(string), "budget month") {
+		t.Errorf("message = %q", entry["message"])
+	}
+}
+
+func TestHandleActsOnRetryWithinMaxAge(t *testing.T) {
+	gke := newFakeGKE(false)
+	h, _, _ := newTestHandler(t, gke, map[string]string{"MAX_MESSAGE_AGE": "3h"})
+	h.now = clockAt(mustTime(samplePublished).Add(2 * time.Hour))
+
+	if err := h.handle(context.Background(), fileEvent(t, "testdata/pubsub-event.json")); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if _, size := gke.state(); size != 0 {
+		t.Errorf("size = %d, want 0: the message is within MAX_MESSAGE_AGE=3h", size)
+	}
 }
