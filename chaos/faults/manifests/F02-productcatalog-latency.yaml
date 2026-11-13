@@ -1,0 +1,23 @@
+# F02-productcatalog-latency: every call to productcatalogservice waits 300 ms first.
+# Applied and removed by tools/gameday only; never under an Argo CD path (chaos/README.md).
+# Istio applies the fault in the client's sidecar, so every caller in the mesh sees it.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: f02-productcatalog-latency
+  namespace: boutique
+  labels:
+    mamori.dev/fault: "true"
+    mamori.dev/fault-id: F02-productcatalog-latency
+spec:
+  hosts:
+    - productcatalogservice.boutique.svc.cluster.local
+  http:
+    - fault:
+        delay:
+          fixedDelay: 300ms
+          percentage:
+            value: 100
+      route:
+        - destination:
+            host: productcatalogservice.boutique.svc.cluster.local

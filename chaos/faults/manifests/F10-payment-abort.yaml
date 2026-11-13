@@ -1,0 +1,23 @@
+# F10-payment-abort: every call to paymentservice fails with gRPC UNAVAILABLE.
+# Applied and removed by tools/gameday only; never under an Argo CD path (chaos/README.md).
+# Istio applies the fault in the client's sidecar, so every caller in the mesh sees it.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: f10-payment-abort
+  namespace: boutique
+  labels:
+    mamori.dev/fault: "true"
+    mamori.dev/fault-id: F10-payment-abort
+spec:
+  hosts:
+    - paymentservice.boutique.svc.cluster.local
+  http:
+    - fault:
+        abort:
+          grpcStatus: UNAVAILABLE
+          percentage:
+            value: 100
+      route:
+        - destination:
+            host: paymentservice.boutique.svc.cluster.local

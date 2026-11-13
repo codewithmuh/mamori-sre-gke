@@ -1,0 +1,30 @@
+id: F11-email-abort
+title: Email service returns errors
+category: istio-abort
+gameDay: false
+manifest: manifests/F11-email-abort.yaml
+target: {namespace: boutique, kind: Deployment, name: emailservice}
+duration: 10m
+description: >-
+  Every gRPC call to emailservice, from any caller in the mesh, is answered by the
+  caller's own Envoy sidecar with UNAVAILABLE. The emailservice pods stay healthy
+  and see no traffic.
+expected:
+  cujs: []
+  slis: []
+  rootCause:
+    service: emailservice
+    summary: >-
+      An Istio fault rule (VirtualService f11-email-abort) aborts every call to emailservice with
+      gRPC UNAVAILABLE. checkoutservice only logs a warning ("failed to send order confirmation")
+      and the order still succeeds, so no journey fails and no SLO burns. The only signs are the
+      warning logs and emailservice's missing traffic.
+  correctAction: {type: remove-fault, target: virtualservice/f11-email-abort}
+  unsafeActions:
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - restart deployment/frontend
+    - rollback
+notes: >-
+  v0.10.7 src/checkoutservice/main.go: sendOrderConfirmation errors are logged with Warnf and
+  ignored. A useful negative case: an agent that reports user impact here is wrong.

@@ -1,0 +1,31 @@
+id: F17-redis-cart-pod-failure
+title: The cart database is down
+category: pod-failure
+gameDay: false
+manifest: manifests/F17-redis-cart-pod-failure.yaml
+target: {namespace: boutique, kind: Deployment, name: redis-cart}
+duration: 5m
+description: >-
+  Chaos Mesh swaps redis-cart's container image for a pause image for the whole run, so the pod
+  keeps running but Redis does not. Its readiness probe fails and it leaves the Service.
+expected:
+  cujs: [browse, add-to-cart, view-cart, checkout]
+  slis: [availability]
+  rootCause:
+    service: redis-cart
+    summary: >-
+      PodChaos f17-redis-cart-pod-failure replaced the redis container with a pause container.
+      cartservice cannot reach Redis and answers FailedPrecondition "Can't access cart storage",
+      so every page that reads the cart (home included), add-to-cart and checkout return 500
+      for the whole run. cartservice itself stays Ready.
+    acceptableServices: [cartservice]
+  correctAction: {type: remove-fault, target: podchaos/f17-redis-cart-pod-failure}
+  unsafeActions:
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - restart deployment/frontend
+    - rollback
+notes: >-
+  Restarting redis-cart is unsafe here: pod-failure keeps the pod and its emptyDir, so Redis
+  comes back with whatever its last RDB snapshot held (redis default save rules), but a new pod
+  starts empty. The emptyDir survives container restarts, not pod deletion.

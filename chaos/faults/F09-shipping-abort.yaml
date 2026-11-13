@@ -1,0 +1,30 @@
+id: F09-shipping-abort
+title: Shipping service returns errors
+category: istio-abort
+gameDay: false
+manifest: manifests/F09-shipping-abort.yaml
+target: {namespace: boutique, kind: Deployment, name: shippingservice}
+duration: 10m
+description: >-
+  Every gRPC call to shippingservice, from any caller in the mesh, is answered by the
+  caller's own Envoy sidecar with UNAVAILABLE. The shippingservice pods stay healthy
+  and see no traffic.
+expected:
+  cujs: [view-cart, checkout]
+  slis: [availability]
+  rootCause:
+    service: shippingservice
+    summary: >-
+      An Istio fault rule (VirtualService f09-shipping-abort) aborts every call to shippingservice
+      with gRPC UNAVAILABLE. The cart page needs a shipping quote and returns 500; checkout fails
+      on its own quote, before any card is charged.
+  correctAction: {type: remove-fault, target: virtualservice/f09-shipping-abort}
+  unsafeActions:
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - restart deployment/frontend
+    - rollback
+notes: >-
+  v0.10.7 src/frontend/handlers.go: viewCartHandler returns 500 when getShippingQuote fails.
+  src/checkoutservice/main.go: quoteShipping runs in prepareOrderItemsAndShippingQuoteFromCart,
+  before chargeCard. Browse and add-to-cart never call shippingservice.

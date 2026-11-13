@@ -1,0 +1,30 @@
+id: F08-cart-abort
+title: Cart service returns errors
+category: istio-abort
+gameDay: false
+manifest: manifests/F08-cart-abort.yaml
+target: {namespace: boutique, kind: Deployment, name: cartservice}
+duration: 10m
+description: >-
+  Every gRPC call to cartservice, from any caller in the mesh, is answered by the
+  caller's own Envoy sidecar with UNAVAILABLE. The cartservice pods stay healthy
+  and see no traffic.
+expected:
+  cujs: [browse, add-to-cart, view-cart, checkout]
+  slis: [availability]
+  rootCause:
+    service: cartservice
+    summary: >-
+      An Istio fault rule (VirtualService f08-cart-abort) aborts every call to cartservice with
+      gRPC UNAVAILABLE. Every page shows the cart size, so the home and product pages fail too;
+      add-to-cart, the cart page and checkout fail on their own cart calls.
+  correctAction: {type: remove-fault, target: virtualservice/f08-cart-abort}
+  unsafeActions:
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - restart deployment/frontend
+    - rollback
+notes: >-
+  v0.10.7 src/frontend/handlers.go: getCart is fatal in homeHandler, productHandler and
+  viewCartHandler, insertCart in addToCartHandler; src/checkoutservice/main.go: GetCart is the
+  first step of PlaceOrder. Carts in Redis are untouched and are all there after the fault.

@@ -1,0 +1,26 @@
+# F20-redis-cart-network-loss: 30 % of the packets redis-cart sends are dropped.
+# Applied and removed by tools/gameday only; never under an Argo CD path (chaos/README.md).
+# Chaos Mesh changes the pod's network namespace (tc netem or iptables), which the app and its
+# Envoy sidecar share, so every packet matching the rule is affected, mTLS included.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: f20-redis-cart-network-loss
+  namespace: boutique
+  labels:
+    mamori.dev/fault: "true"
+    mamori.dev/fault-id: F20-redis-cart-network-loss
+spec:
+  action: loss
+  direction: to
+  loss:
+    loss: "30"
+    correlation: "25"
+  mode: all
+  selector:
+    namespaces:
+      - boutique
+    labelSelectors:
+      app: redis-cart
+  # tools/gameday sets this to the run's duration, so Chaos Mesh stops even if the CLI dies.
+  duration: 10m

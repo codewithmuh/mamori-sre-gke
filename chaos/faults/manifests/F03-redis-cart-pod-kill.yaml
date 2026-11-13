@@ -1,0 +1,21 @@
+# F03-redis-cart-pod-kill: kill the redis-cart pod once. Its cart data lives in an emptyDir, so every cart is lost.
+# Applied and removed by tools/gameday only; never under an Argo CD path (chaos/README.md).
+# One-shot: Chaos Mesh deletes the pod and the Deployment creates a new one. The object stays
+# until the run ends, but it does nothing more.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: f03-redis-cart-pod-kill
+  namespace: boutique
+  labels:
+    mamori.dev/fault: "true"
+    mamori.dev/fault-id: F03-redis-cart-pod-kill
+spec:
+  action: pod-kill
+  mode: all
+  gracePeriod: 0
+  selector:
+    namespaces:
+      - boutique
+    labelSelectors:
+      app: redis-cart

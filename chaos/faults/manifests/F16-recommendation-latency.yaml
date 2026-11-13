@@ -1,0 +1,23 @@
+# F16-recommendation-latency: every call to recommendationservice waits 2 s first.
+# Applied and removed by tools/gameday only; never under an Argo CD path (chaos/README.md).
+# Istio applies the fault in the client's sidecar, so every caller in the mesh sees it.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: f16-recommendation-latency
+  namespace: boutique
+  labels:
+    mamori.dev/fault: "true"
+    mamori.dev/fault-id: F16-recommendation-latency
+spec:
+  hosts:
+    - recommendationservice.boutique.svc.cluster.local
+  http:
+    - fault:
+        delay:
+          fixedDelay: 2s
+          percentage:
+            value: 100
+      route:
+        - destination:
+            host: recommendationservice.boutique.svc.cluster.local

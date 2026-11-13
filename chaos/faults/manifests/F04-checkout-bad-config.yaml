@@ -1,0 +1,29 @@
+# F04-checkout-bad-config: a "tidy up the mesh config" change for checkoutservice that forgets one
+# of its six dependencies. The Sidecar limits what checkoutservice's Envoy knows about and, with
+# REGISTRY_ONLY, blocks everything else. paymentservice is missing from the list, so every Charge
+# call ends at Envoy's block-all route (HTTP 502, gRPC UNAVAILABLE) while all pods stay healthy.
+# Applied and removed by tools/gameday only; never under an Argo CD path (chaos/README.md).
+apiVersion: networking.istio.io/v1
+kind: Sidecar
+metadata:
+  name: f04-checkout-bad-config
+  namespace: boutique
+  labels:
+    mamori.dev/fault: "true"
+    mamori.dev/fault-id: F04-checkout-bad-config
+spec:
+  workloadSelector:
+    labels:
+      app: checkoutservice
+  outboundTrafficPolicy:
+    mode: REGISTRY_ONLY
+  egress:
+    - hosts:
+        - ./cartservice.boutique.svc.cluster.local
+        - ./currencyservice.boutique.svc.cluster.local
+        - ./emailservice.boutique.svc.cluster.local
+        - ./productcatalogservice.boutique.svc.cluster.local
+        - ./shippingservice.boutique.svc.cluster.local
+        # Traces go to the OpenTelemetry collector (#19). Kept, so only the Charge call fails.
+        - observability/otel-collector.observability.svc.cluster.local
+        - istio-system/*

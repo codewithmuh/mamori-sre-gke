@@ -1,0 +1,30 @@
+# F27-currency-memory-stress: a 100 MiB memory worker inside currencyservice's container (memory limit 128Mi).
+# Applied and removed by tools/gameday only; never under an Argo CD path (chaos/README.md).
+# The stress-ng processes run inside the target container's cgroup, so they share its CPU and
+# memory limits with the app.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: f27-currency-memory-stress
+  namespace: boutique
+  labels:
+    mamori.dev/fault: "true"
+    mamori.dev/fault-id: F27-currency-memory-stress
+spec:
+  mode: all
+  containerNames:
+    - server
+  selector:
+    namespaces:
+      - boutique
+    labelSelectors:
+      app: currencyservice
+  stressors:
+    memory:
+      workers: 1
+      size: 100MiB
+      # -1000: the kernel never picks stress-ng when the container hits its limit, so the
+      # OOM killer takes the Node.js server instead.
+      oomScoreAdj: -1000
+  # tools/gameday sets this to the run's duration, so Chaos Mesh stops even if the CLI dies.
+  duration: 10m

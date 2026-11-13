@@ -1,0 +1,75 @@
+# F24-productcatalog-bad-canary: a canary of productcatalogservice that is 2 s slower on every
+# call. It is a second Deployment whose pods carry app=productcatalogservice, so the existing
+# Service sends it part of the traffic. Same pinned v0.10.7 image as deploy/online-boutique; the
+# slowness comes from the image's own EXTRA_LATENCY setting (src/productcatalogservice).
+# The shop's own Deployment is never touched: Argo CD would undo that within seconds.
+# Applied and removed by tools/gameday only; never under an Argo CD path (chaos/README.md).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: f24-productcatalog-bad-canary
+  namespace: boutique
+  labels:
+    mamori.dev/fault: "true"
+    mamori.dev/fault-id: F24-productcatalog-bad-canary
+    app.kubernetes.io/name: productcatalogservice
+    app.kubernetes.io/part-of: mamori
+    app.kubernetes.io/version: v0.10.7-canary
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: productcatalogservice
+      mamori.dev/fault-id: F24-productcatalog-bad-canary
+  template:
+    metadata:
+      labels:
+        app: productcatalogservice
+        mamori.dev/fault: "true"
+        mamori.dev/fault-id: F24-productcatalog-bad-canary
+        app.kubernetes.io/name: productcatalogservice
+        app.kubernetes.io/part-of: mamori
+        app.kubernetes.io/version: v0.10.7-canary
+    spec:
+      serviceAccountName: productcatalogservice
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 5
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/productcatalogservice:v0.10.7@sha256:ba573405e9b03ea29970185eeaf0a9de9db7400b9104695e39d4dfc0fb651cb5
+          ports:
+            - containerPort: 3550
+          env:
+            - name: PORT
+              value: "3550"
+            - name: DISABLE_PROFILER
+              value: "1"
+            - name: EXTRA_LATENCY
+              value: 2s
+          readinessProbe:
+            grpc:
+              port: 3550
+          livenessProbe:
+            grpc:
+              port: 3550
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            privileged: false
+            readOnlyRootFilesystem: true

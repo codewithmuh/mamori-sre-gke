@@ -1,0 +1,32 @@
+# F28-shipping-shiporder-abort: only ShipOrder calls to shippingservice fail with gRPC UNAVAILABLE.
+# GetQuote still works, so checkoutservice charges the card before ShipOrder fails, and then
+# returns UNAVAILABLE itself, which Istio's default retry policy retries.
+# Applied and removed by tools/gameday only; never under an Argo CD path (chaos/README.md).
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: f28-shipping-shiporder-abort
+  namespace: boutique
+  labels:
+    mamori.dev/fault: "true"
+    mamori.dev/fault-id: F28-shipping-shiporder-abort
+spec:
+  hosts:
+    - shippingservice.boutique.svc.cluster.local
+  http:
+    - match:
+        - uri:
+            exact: /hipstershop.ShippingService/ShipOrder
+      fault:
+        abort:
+          grpcStatus: UNAVAILABLE
+          percentage:
+            value: 100
+      route:
+        - destination:
+            host: shippingservice.boutique.svc.cluster.local
+    # Everything else (GetQuote, health checks) as normal. Without this route, other methods
+    # would have no route at all.
+    - route:
+        - destination:
+            host: shippingservice.boutique.svc.cluster.local

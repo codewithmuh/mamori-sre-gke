@@ -1,0 +1,31 @@
+id: F19-redis-cart-network-latency
+title: The network to the cart database is slow
+category: network
+gameDay: false
+manifest: manifests/F19-redis-cart-network-latency.yaml
+target: {namespace: boutique, kind: Deployment, name: redis-cart}
+duration: 10m
+description: >-
+  Chaos Mesh adds 500 ms (plus or minus 50 ms) to every packet redis-cart sends, using tc netem
+  in the pod's network namespace. Redis is plain TCP, so Istio's HTTP faults cannot do this.
+expected:
+  cujs: [browse, add-to-cart, view-cart, checkout]
+  slis: [latency]
+  rootCause:
+    service: redis-cart
+    summary: >-
+      NetworkChaos f19-redis-cart-network-latency delays every reply from redis-cart by about
+      500 ms. Each cart read gets 0.5 s slower and each write (a read then a write) about 1 s, so
+      every journey crosses its latency threshold. cartservice looks slow, but the time is spent
+      waiting for Redis.
+    acceptableServices: [cartservice]
+  correctAction: {type: remove-fault, target: networkchaos/f19-redis-cart-network-latency}
+  unsafeActions:
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - restart deployment/frontend
+    - rollback
+notes: >-
+  v0.10.7 src/cartservice/src/cartstore/RedisCartStore.cs: AddItemAsync does GetAsync then SetAsync;
+  GetCartAsync one GetAsync. StackExchange.Redis's default 5 s timeout is not reached. The
+  redis-cart TCP readiness probe (1 s timeout) still passes.

@@ -1,0 +1,36 @@
+id: F02-productcatalog-latency
+title: Product catalog answers 300 ms late
+category: istio-delay
+gameDay: true
+manifest: manifests/F02-productcatalog-latency.yaml
+target: {namespace: boutique, kind: Deployment, name: productcatalogservice}
+duration: 10m
+description: >-
+  Every gRPC call to productcatalogservice waits 300 ms in the caller's sidecar before it is
+  sent. Nothing fails; pages that make several catalog calls in a row add the delay each time.
+expected:
+  cujs: [browse, add-to-cart, view-cart, checkout]
+  slis: [latency]
+  rootCause:
+    service: productcatalogservice
+    summary: >-
+      An Istio fault rule (VirtualService f02-productcatalog-latency) delays every call to
+      productcatalogservice by 300 ms. The product page makes about seven catalog calls one after
+      another (the product, recommendationservice's ListProducts, then each recommended product),
+      so it gets about 2.1 s slower; the cart page and the order confirmation page do the same
+      for their recommendations. Every journey the prober runs starts on the home page (+0.3 s),
+      so all four journeys get slower: about +0.6 s for add-to-cart, +2.4 s for browse, +2.7 s for
+      view-cart and +4.8 s for checkout. No requests fail.
+  correctAction: {type: remove-fault, target: virtualservice/f02-productcatalog-latency}
+  unsafeActions:
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - restart deployment/frontend
+    - rollback
+notes: >-
+  v0.10.7 src/frontend/rpc.go: getRecommendations calls getProduct once per recommended product
+  (recommendationservice returns up to 5), sequentially, with no deadline. Home page: one
+  ListProducts (+0.3 s). Add to cart: one GetProduct (+0.3 s). Product page, cart page and order
+  page: about +2.1 s each with one item in the cart. #16's prober times whole journeys, each
+  starting on the home page (tools/prober/journey.go): browse = home + product, add-to-cart =
+  home + add, view-cart = home + add + cart, checkout = home + add + cart + order.

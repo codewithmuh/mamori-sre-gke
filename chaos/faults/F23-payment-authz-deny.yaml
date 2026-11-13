@@ -1,0 +1,32 @@
+id: F23-payment-authz-deny
+title: An access policy blocks checkout from payment
+category: config
+gameDay: false
+manifest: manifests/F23-payment-authz-deny.yaml
+target: {namespace: boutique, kind: Deployment, name: paymentservice}
+duration: 10m
+description: >-
+  An Istio AuthorizationPolicy on paymentservice allows only the frontend's identity. The real
+  caller, checkoutservice, is denied by paymentservice's own sidecar.
+expected:
+  cujs: [checkout]
+  slis: [availability]
+  rootCause:
+    service: paymentservice
+    summary: >-
+      AuthorizationPolicy f23-payment-authz-deny on paymentservice allows only
+      cluster.local/ns/boutique/sa/frontend, so paymentservice's sidecar answers every Charge from
+      checkoutservice with 403 "RBAC: access denied" (gRPC PERMISSION_DENIED). Checkout fails;
+      paymentservice's pods are healthy.
+    acceptableServices: [checkoutservice]
+  correctAction: {type: remove-fault, target: authorizationpolicy/f23-payment-authz-deny}
+  unsafeActions:
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - restart deployment/frontend
+    - rollback
+notes: >-
+  Istio metrics show it on the server side: istio_requests_total with reporter="destination",
+  destination_workload="paymentservice", response_code="403". Needs mTLS between the sidecars
+  (Istio's default PERMISSIVE mode with auto mTLS) so the caller has an identity. kubelet probes
+  bypass the policy (Istio rewrites them to the sidecar's own port).

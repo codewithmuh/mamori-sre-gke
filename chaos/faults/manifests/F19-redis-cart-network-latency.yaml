@@ -1,0 +1,28 @@
+# F19-redis-cart-network-latency: every packet redis-cart sends is delayed by 500 ms (plus or minus 50 ms).
+# Applied and removed by tools/gameday only; never under an Argo CD path (chaos/README.md).
+# Chaos Mesh changes the pod's network namespace (tc netem or iptables), which the app and its
+# Envoy sidecar share, so every packet matching the rule is affected, mTLS included.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: f19-redis-cart-network-latency
+  namespace: boutique
+  labels:
+    mamori.dev/fault: "true"
+    mamori.dev/fault-id: F19-redis-cart-network-latency
+spec:
+  action: delay
+  # No target: the delay applies to everything the pod sends, i.e. every Redis reply.
+  direction: to
+  delay:
+    latency: 500ms
+    jitter: 50ms
+    correlation: "25"
+  mode: all
+  selector:
+    namespaces:
+      - boutique
+    labelSelectors:
+      app: redis-cart
+  # tools/gameday sets this to the run's duration, so Chaos Mesh stops even if the CLI dies.
+  duration: 10m

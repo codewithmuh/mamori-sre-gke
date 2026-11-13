@@ -1,0 +1,37 @@
+id: F04-checkout-bad-config
+title: A mesh config change cuts checkout off from payment
+category: config
+gameDay: true
+manifest: manifests/F04-checkout-bad-config.yaml
+target: {namespace: boutique, kind: Deployment, name: checkoutservice}
+duration: 10m
+description: >-
+  An Istio Sidecar resource for checkoutservice lists the hosts it may call and blocks the rest
+  (REGISTRY_ONLY). paymentservice is missing from the list. Every pod stays Ready; only the
+  Charge call fails.
+expected:
+  cujs: [checkout]
+  slis: [availability]
+  rootCause:
+    service: checkoutservice
+    summary: >-
+      A config change to checkoutservice's sidecar (Sidecar f04-checkout-bad-config) leaves
+      paymentservice out of its egress list with outboundTrafficPolicy REGISTRY_ONLY, so Envoy
+      answers every Charge call itself with 502 (gRPC UNAVAILABLE). PlaceOrder fails with "failed
+      to charge card" and the order page returns 500. paymentservice is healthy and gets no
+      traffic.
+    acceptableServices: [paymentservice]
+  correctAction: {type: remove-fault, target: sidecar/f04-checkout-bad-config}
+  unsafeActions:
+    - restart deployment/redis-cart
+    - scale deployment/redis-cart
+    - restart deployment/frontend
+    - restart deployment/paymentservice
+notes: >-
+  v0.10.7 src/checkoutservice/main.go: PlaceOrder calls cart, productcatalog, currency and
+  shipping (GetQuote) first, then Charge; a Charge error returns Internal. No card is charged and
+  no retry happens (Istio's default retry does not cover INTERNAL). Other journeys never call
+  checkoutservice. The egress list keeps the OpenTelemetry collector
+  (otel-collector.observability:4317, #19), so checkout's traces keep arriving and show the failed
+  Charge. Unverified detail: whether Envoy answers with 502 from its block-all route or resets the
+  connection; both reach the frontend as UNAVAILABLE.

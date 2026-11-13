@@ -1,0 +1,42 @@
+id: F26-node-drain
+title: A node is drained for maintenance
+category: node
+gameDay: false
+procedure:
+  reason: >-
+    A drain evicts pods in every namespace (Argo CD, Istio, the shop), and gameday only touches
+    objects in the boutique namespace.
+  inject:
+    - >-
+      Pick the node that runs redis-cart:
+      NODE=$(kubectl -n boutique get pod -l app=redis-cart -o jsonpath='{.items[0].spec.nodeName}')
+    - >-
+      kubectl cordon $NODE; kubectl drain $NODE --ignore-daemonsets --delete-emptydir-data
+      --timeout=10m. (--delete-emptydir-data is the flag that throws away every cart.)
+  revert:
+    - kubectl uncordon $NODE
+target: {namespace: boutique, kind: Deployment, name: redis-cart}
+duration: 15m
+description: >-
+  The node that runs redis-cart is cordoned and drained the way an upgrade or a manual
+  maintenance would do it. Its pods are evicted and recreated on the other two nodes.
+expected:
+  cujs: [browse, add-to-cart, view-cart, checkout]
+  slis: [availability]
+  rootCause:
+    service: node
+    summary: >-
+      A node was drained. Every single-replica pod on it was evicted and restarted elsewhere, so
+      its service was down for the restart; redis-cart lost every cart (its emptyDir is deleted
+      with the pod). M1 has no PodDisruptionBudgets, so nothing slowed the drain. The node stays
+      cordoned until someone uncordons it.
+    acceptableServices: [redis-cart]
+  correctAction: {type: none}
+  unsafeActions:
+    - scale deployment/redis-cart
+    - restart deployment/redis-cart
+    - rollback
+notes: >-
+  Unlike a preemption (F05), a drain uses the eviction API, so PodDisruptionBudgets added in M4
+  will hold it back. With two nodes left, requests are about 91 % of allocatable CPU
+  (deploy/README.md, estimate), so some pods may stay Pending until the uncordon.

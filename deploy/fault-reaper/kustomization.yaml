@@ -1,0 +1,19 @@
+# fault-reaper: a CronJob that removes game-day fault objects left behind after their run ended
+# (see reap.sh). Objects live in two namespaces: the job in chaos-mesh, its Role in boutique.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - rbac.yaml
+  - admission-policy.yaml
+  - cronjob.yaml
+
+configMapGenerator:
+  - name: fault-reaper-script
+    namespace: chaos-mesh
+    files:
+      - reap.sh
+    options:
+      labels:
+        app.kubernetes.io/name: fault-reaper
+        app.kubernetes.io/part-of: mamori
