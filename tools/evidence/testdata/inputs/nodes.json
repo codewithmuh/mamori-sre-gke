@@ -1,0 +1,15 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {"metadata": {"name": "gke-mamori-spot-pool-1a2b3c4d-abcd", "creationTimestamp": "2026-11-15T03:12:44Z", "labels": {"cloud.google.com/gke-nodepool": "spot-pool", "cloud.google.com/gke-spot": "true"}},
+     "status": {"nodeInfo": {"kubeletVersion": "v1.37.2-gke.1100000", "osImage": "Container-Optimized OS from Google", "containerRuntimeVersion": "containerd://2.1.4"},
+                "conditions": [{"type": "MemoryPressure", "status": "False"}, {"type": "Ready", "status": "True"}]}},
+    {"metadata": {"name": "gke-mamori-spot-pool-1a2b3c4d-efgh", "creationTimestamp": "2026-11-13T22:01:09Z", "labels": {"cloud.google.com/gke-nodepool": "spot-pool", "cloud.google.com/gke-spot": "true"}},
+     "status": {"nodeInfo": {"kubeletVersion": "v1.37.2-gke.1100000", "osImage": "Container-Optimized OS from Google", "containerRuntimeVersion": "containerd://2.1.4"},
+                "conditions": [{"type": "Ready", "status": "True"}]}},
+    {"metadata": {"name": "gke-mamori-spot-pool-1a2b3c4d-ijkl", "creationTimestamp": "2026-11-16T00:02:51Z", "labels": {"cloud.google.com/gke-nodepool": "spot-pool", "cloud.google.com/gke-spot": "true"}},
+     "status": {"nodeInfo": {"kubeletVersion": "v1.37.2-gke.1100000", "osImage": "Container-Optimized OS from Google", "containerRuntimeVersion": "containerd://2.1.4"},
+                "conditions": [{"type": "Ready", "status": "True"}]}}
+  ]
+}

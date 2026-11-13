@@ -1,0 +1,8 @@
+{
+  "collectedAt": "2026-11-16T00:18:30Z",
+  "slos": [
+    {"name": "projects/123456789012/services/cuj-checkout/serviceLevelObjectives/availability", "displayName": "checkout availability", "service": "projects/123456789012/services/cuj-checkout", "serviceDisplayName": "CUJ checkout", "goal": 0.99, "rollingPeriod": "2419200s", "compliance": 0.9987, "budgetFraction": 0.87},
+    {"name": "projects/123456789012/services/cuj-browse/serviceLevelObjectives/availability", "displayName": "browse availability", "service": "projects/123456789012/services/cuj-browse", "serviceDisplayName": "CUJ browse", "goal": 0.995, "rollingPeriod": "2419200s", "compliance": 0.99601, "budgetFraction": 0.202},
+    {"name": "projects/123456789012/services/cuj-browse/serviceLevelObjectives/latency", "displayName": "browse latency", "service": "projects/123456789012/services/cuj-browse", "serviceDisplayName": "CUJ browse", "goal": 0.95, "rollingPeriod": "2419200s", "compliance": null, "budgetFraction": null}
+  ]
+}

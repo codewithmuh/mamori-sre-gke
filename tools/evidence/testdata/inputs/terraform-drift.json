@@ -1,0 +1,11 @@
+{
+  "exitCode": 2,
+  "changes": [
+    {"address": "google_compute_security_policy.frontend", "actions": ["update"]},
+    {"address": "google_container_node_pool.spot", "actions": ["no-op"]},
+    {"address": "data.google_project.this", "actions": ["read"]}
+  ],
+  "drift": [
+    {"address": "google_compute_security_policy.frontend", "actions": ["update"]}
+  ]
+}

@@ -1,0 +1,149 @@
+{
+ "spdxVersion": "SPDX-2.3",
+ "dataLicense": "CC0-1.0",
+ "SPDXID": "SPDXRef-DOCUMENT",
+ "name": "codewithmuh/mamori-sre-gke",
+ "documentNamespace": "https://anchore.com/syft/dir/codewithmuh/mamori-sre-gke-00000000-0000-0000-0000-000000000000",
+ "creationInfo": {
+  "licenseListVersion": "3.29",
+  "creators": [
+   "Organization: Anchore, Inc",
+   "Tool: syft-1.55.0"
+  ],
+  "created": "2026-11-16T00:19:40Z"
+ },
+ "packages": [
+  {
+   "name": "actions/checkout",
+   "SPDXID": "SPDXRef-Package-github-action-actions-checkout-24e61621b123a71e",
+   "versionInfo": "v7.0.1",
+   "supplier": "Organization: GitHub",
+   "originator": "Organization: GitHub",
+   "downloadLocation": "NOASSERTION",
+   "filesAnalyzed": false,
+   "sourceInfo": "acquired package info from GitHub Actions workflow file or composite action file: /.github/workflows/ci.yml",
+   "licenseConcluded": "NOASSERTION",
+   "licenseDeclared": "NOASSERTION",
+   "copyrightText": "NOASSERTION",
+   "externalRefs": [
+    {
+     "referenceCategory": "SECURITY",
+     "referenceType": "cpe23Type",
+     "referenceLocator": "cpe:2.3:a:actions\\/checkout:actions\\/checkout:v7.0.1:*:*:*:*:*:*:*"
+    },
+    {
+     "referenceCategory": "PACKAGE-MANAGER",
+     "referenceType": "purl",
+     "referenceLocator": "pkg:github/actions/checkout@v7.0.1"
+    }
+   ]
+  },
+  {
+   "name": "actions/checkout",
+   "SPDXID": "SPDXRef-Package-github-action-actions-checkout-a37167940809e366",
+   "versionInfo": "v7.0.1",
+   "supplier": "Organization: GitHub",
+   "originator": "Organization: GitHub",
+   "downloadLocation": "NOASSERTION",
+   "filesAnalyzed": false,
+   "sourceInfo": "acquired package info from GitHub Actions workflow file or composite action file: /.github/workflows/terraform-apply.yml",
+   "licenseConcluded": "NOASSERTION",
+   "licenseDeclared": "NOASSERTION",
+   "copyrightText": "NOASSERTION",
+   "externalRefs": [
+    {
+     "referenceCategory": "SECURITY",
+     "referenceType": "cpe23Type",
+     "referenceLocator": "cpe:2.3:a:actions\\/checkout:actions\\/checkout:v7.0.1:*:*:*:*:*:*:*"
+    },
+    {
+     "referenceCategory": "PACKAGE-MANAGER",
+     "referenceType": "purl",
+     "referenceLocator": "pkg:github/actions/checkout@v7.0.1"
+    }
+   ]
+  },
+  {
+   "name": "cloud.google.com/go/auth",
+   "SPDXID": "SPDXRef-Package-go-module-cloud.google.com-go-auth-18751bf5ca7a2e09",
+   "versionInfo": "v0.24.1-0.20261001053825-dbc26066f70a",
+   "supplier": "NOASSERTION",
+   "downloadLocation": "NOASSERTION",
+   "filesAnalyzed": false,
+   "sourceInfo": "acquired package info from go module information: /tools/spend-guard/go.mod",
+   "licenseConcluded": "NOASSERTION",
+   "licenseDeclared": "NOASSERTION",
+   "copyrightText": "NOASSERTION",
+   "externalRefs": [
+    {
+     "referenceCategory": "SECURITY",
+     "referenceType": "cpe23Type",
+     "referenceLocator": "cpe:2.3:a:go:auth:v0.24.1-0.20261001053825-dbc26066f70a:*:*:*:*:*:*:*"
+    },
+    {
+     "referenceCategory": "PACKAGE-MANAGER",
+     "referenceType": "purl",
+     "referenceLocator": "pkg:golang/cloud.google.com/go/auth@v0.24.1-0.20261001053825-dbc26066f70a"
+    }
+   ]
+  },
+  {
+   "name": "cloud.google.com/go/auth/oauth2adapt",
+   "SPDXID": "SPDXRef-Package-go-module-cloud.google.com-go-auth-oauth2adapt-aa4c5d0f17de1d99",
+   "versionInfo": "v0.3.0",
+   "supplier": "NOASSERTION",
+   "downloadLocation": "NOASSERTION",
+   "filesAnalyzed": false,
+   "sourceInfo": "acquired package info from go module information: /tools/spend-guard/go.mod",
+   "licenseConcluded": "NOASSERTION",
+   "licenseDeclared": "NOASSERTION",
+   "copyrightText": "NOASSERTION",
+   "externalRefs": [
+    {
+     "referenceCategory": "SECURITY",
+     "referenceType": "cpe23Type",
+     "referenceLocator": "cpe:2.3:a:go:auth\\/oauth2adapt:v0.3.0:*:*:*:*:*:*:*"
+    },
+    {
+     "referenceCategory": "PACKAGE-MANAGER",
+     "referenceType": "purl",
+     "referenceLocator": "pkg:golang/cloud.google.com/go/auth/oauth2adapt@v0.3.0"
+    }
+   ]
+  },
+  {
+   "name": "docker://rhysd/actionlint:1.7.12",
+   "SPDXID": "SPDXRef-Package-github-action-docker---rhysd-actionlint-1.7.12-1c3781e45405bf81",
+   "versionInfo": "UNKNOWN",
+   "supplier": "Organization: docker:",
+   "originator": "Organization: docker:",
+   "downloadLocation": "NOASSERTION",
+   "filesAnalyzed": false,
+   "sourceInfo": "acquired package info from GitHub Actions workflow file or composite action file: /.github/workflows/ci.yml",
+   "licenseConcluded": "NOASSERTION",
+   "licenseDeclared": "NOASSERTION",
+   "copyrightText": "NOASSERTION",
+   "externalRefs": [
+    {
+     "referenceCategory": "SECURITY",
+     "referenceType": "cpe23Type",
+     "referenceLocator": "cpe:2.3:a:docker\\:\\/\\/rhysd\\/actionlint\\:1.7.12:docker\\:\\/\\/rhysd\\/actionlint\\:1.7.12:*:*:*:*:*:*:*:*"
+    }
+   ]
+  },
+  {
+   "name": "mamori-sre-gke",
+   "SPDXID": "SPDXRef-DocumentRoot-Directory-mamori-sre-gke",
+   "versionInfo": "test",
+   "supplier": "NOASSERTION",
+   "downloadLocation": "NOASSERTION",
+   "filesAnalyzed": false,
+   "licenseConcluded": "NOASSERTION",
+   "licenseDeclared": "NOASSERTION",
+   "copyrightText": "NOASSERTION",
+   "primaryPackagePurpose": "FILE"
+  }
+ ],
+ "files": [],
+ "relationships": []
+}
