@@ -1,0 +1,6 @@
+# Copy to terraform.tfvars (gitignored) or export TF_VAR_* instead. Never commit the real values.
+# The PagerDuty API token is not a variable: export PAGERDUTY_TOKEN (see README.md).
+oncall_user_email = "you@example.com"
+
+# Default, shown for reference:
+# time_zone = "Asia/Tokyo"
