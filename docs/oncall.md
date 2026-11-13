@@ -12,7 +12,7 @@ Slack free workspace).
 ```
 SLO burn-rate alert policies (Cloud Monitoring; generated into infra/envs/lab/slo_generated.tf.json)
   │  page:   fast burn, medium burn, journey without probe data  → local.incident_notification_channels
-  │  notify: slow burn                                           → local.incident_ticket_notification_channels
+  │  notify: slow burn, spend-guard watchdog                     → local.incident_ticket_notification_channels
   ▼
 notification channels (infra/envs/lab/notifications.tf)
   ├─ "mamori-shop"              pagerduty, page only ──▶ PagerDuty service mamori-shop (infra/envs/oncall)
@@ -20,7 +20,8 @@ notification channels (infra/envs/lab/notifications.tf)
   │                                                           └▶ schedule mamori-primary ─▶ the on-call person
   │                                                               push now, phone call after 5 min (own rules)
   │                                                       └▶ Slack #incidents: incident card
-  ├─ "mamori alerts (email)"    email, page and notify ─▶ inbox (second path if PagerDuty delivery fails)
+  ├─ "mamori alerts (email)"    email, page and notify ─▶ inbox (second path if PagerDuty delivery fails;
+  │                                                        only if alert_email is set)
   └─ "incident-alerts (Pub/Sub)" pubsub, page and notify ─▶ topic incident-alerts
                                                            └▶ subscription mamori-agent-incidents (M5)
                                                                └▶ incident agent ─▶ Slack: summary, root cause,
@@ -32,6 +33,7 @@ notification channels (infra/envs/lab/notifications.tf)
 | Fast or medium burn of a journey's error budget | `CRITICAL` | PagerDuty, email, Pub/Sub | yes |
 | A journey's prober stopped reporting | `CRITICAL` | PagerDuty, email, Pub/Sub | yes |
 | Slow burn | `WARNING` | email, Pub/Sub | no |
+| Spend guard logged an error, or handled no budget message for 23.5 hours | `WARNING` | email, Pub/Sub | no |
 
 Why it is split this way:
 
@@ -41,7 +43,8 @@ Why it is split this way:
   plan's 100 phone/SMS notifications a month for real pages.
 - **Email gets everything.** Google recommends a second channel type next to PagerDuty, because
   PagerDuty, webhook and Slack notifications go through the same delivery service on Google's
-  side. Email also keeps a record of the alerts that don't page.
+  side. Email also keeps a record of the alerts that don't page. It is optional in Terraform
+  (`alert_email`), but without it only the agent sees the alerts that don't page.
 - **Pub/Sub gets everything.** The agent (M5) sees every alert, slow burns included; it only
   proposes.
 
@@ -79,7 +82,8 @@ policy page decides the final rules; the count of pages a month is an alert-qual
 
 ## Set up, once
 
-Do these in order. Steps 1–4 can happen before the cluster exists.
+Do these in order. Steps 1–4 can happen before the cluster exists. No step puts a PagerDuty key in
+Git, GitHub or Terraform state.
 
 1. **PagerDuty account.** Sign up for the free plan with the address you want paged. Install the
    mobile app, sign in, add your phone number, and set your notification rules (above).
@@ -87,7 +91,11 @@ Do these in order. Steps 1–4 can happen before the cluster exists.
    `infra/envs/oncall` from your laptop with `PAGERDUTY_TOKEN` and `TF_VAR_oncall_user_email` set.
    Step by step, including the free-plan cleanup before the first apply:
    [infra/envs/oncall/README.md](../infra/envs/oncall/README.md). CI never touches this root.
-3. **Slack.** Create a free workspace (or use one you own) and a public channel `#incidents`. In
+3. **Cloud Monitoring integration, by hand.** In PagerDuty: **Services > mamori-shop > Integrations
+   > Add an integration**, type **Events API v1**, name "Google Cloud Monitoring". Its integration
+   key stays visible on that page; you need it in step 7. (Why by hand, and when to add an Events
+   API v2 integration too: [infra/envs/oncall/README.md](../infra/envs/oncall/README.md).)
+4. **Slack.** Create a free workspace (or use one you own) and a public channel `#incidents`. In
    PagerDuty, **Integrations > Extensions > Slack** (or **Configuration > Integrations >
    Extensions**), **Add Workspace**, then **Allow** in Slack (needs a workspace owner or admin:
    you). Link your PagerDuty and Slack accounts when asked. In `#incidents`, run `/pd connect`,
@@ -100,31 +108,19 @@ Do these in order. Steps 1–4 can happen before the cluster exists.
      approval app (M5) takes another; Datadog's, if used in its window, a third.
    - Slack is a convenience, not the page: the phone is paged by PagerDuty whether or not Slack
      works.
-4. **Lab inputs.** `infra/envs/lab` needs two values that are not in Git:
-
-   | Terraform variable | Locally | GitHub (repository secret) |
-   |---|---|---|
-   | `pagerduty_integration_key` | `TF_VAR_pagerduty_integration_key` | `PAGERDUTY_INTEGRATION_KEY` |
-   | `alert_email` | `TF_VAR_alert_email` | `ALERT_EMAIL` |
-
-   ```sh
-   key="$(terraform -chdir=infra/envs/oncall output -raw cloud_monitoring_integration_key)"
-   printf '%s' "$key" | gh secret set PAGERDUTY_INTEGRATION_KEY     # read from stdin, not argv
-   printf '%s' 'you@example.com' | gh secret set ALERT_EMAIL
-   export TF_VAR_pagerduty_integration_key="$key" TF_VAR_alert_email='you@example.com'
-   ```
-
-   Both are secrets so that GitHub masks them in the public logs, and both variables are
-   `sensitive`, so plans posted on pull requests show `(sensitive value)`. CI's plan and apply jobs
-   pass them as `TF_VAR_*` (`ci.yml` job `terraform-plan`, `terraform-apply.yml`). Both variables
-   are required on purpose: a missing secret fails the plan instead of silently applying a lab that
-   can't page.
-5. **CI permission.** `tf-apply` needs `roles/monitoring.notificationChannelEditor` on the project
-   to manage the channels. It is granted in `infra/bootstrap/iam.tf`, so run `make bootstrap` once
-   after that change, before the first CI apply. (The topic and its IAM are already covered by
-   `roles/pubsub.admin`.)
-6. **Apply the lab** (`make up`, or the `terraform-apply` workflow). This creates the three
-   channels, topic `incident-alerts`, and the topic grant for Cloud Monitoring.
+5. **Alert email and CI permissions.**
+   - Put your address in `.env` as `ALERT_EMAIL` (or export `TF_VAR_alert_email`), and in the
+     GitHub repository secret `ALERT_EMAIL`, which CI passes as `TF_VAR_alert_email`. The variable
+     is optional: empty means no email channel, so plan and `make down` never need it. But a CI
+     apply without the secret removes the email channel that `make up` created, so set both.
+   - `tf-apply` needs `roles/monitoring.notificationChannelEditor` (channels),
+     `roles/monitoring.alertPolicyEditor` and `roles/logging.configWriter` (the spend-guard
+     watchdog) on the project. They are granted in `infra/bootstrap/iam.tf`, so run
+     `make bootstrap` once after that change, before the first CI apply. The topic and its IAM
+     are already covered by `roles/pubsub.admin`.
+6. **Apply the lab** (`make up`, or the `terraform-apply` workflow). This creates the channels
+   (the PagerDuty one with a placeholder key), topic `incident-alerts`, its grant for Cloud
+   Monitoring, and the spend-guard watchdog.
 
    If the apply stops at `google_pubsub_topic_iam_member.incident_alerts_monitoring` with "service
    account ... does not exist": Cloud Monitoring creates its notification service agent
@@ -139,20 +135,45 @@ Do these in order. Steps 1–4 can happen before the cluster exists.
    gcloud beta services identity create --service=monitoring.googleapis.com --project="$PROJECT_ID"
    ```
 
-7. **Test** the whole path (next section).
+7. **Set the PagerDuty key on the channel, by hand.** Terraform creates the channel with a
+   placeholder key and then leaves it alone (`ignore_changes = all`), so the real key is set once
+   here and stays out of the state. Until it is set, **nothing pages**. Either:
+   - Console: **Monitoring > Alerting > Edit notification channels > PagerDuty**, edit
+     `mamori-shop`, paste the key from step 3 into **Service key**, save.
+   - Shell (the key is read without echo and stays out of your shell history; it is visible in
+     the process list while gcloud runs):
 
-`make down` deletes the channels and the topic with the rest of the lab; PagerDuty and Slack stay
-(both free). The next `make up` recreates the channels with the same key.
+     ```sh
+     channel="$(terraform -chdir=infra/envs/lab output -raw pagerduty_notification_channel)"
+     read -rs -p 'PagerDuty integration key: ' PD_KEY; echo
+     gcloud beta monitoring channels update "$channel" \
+       --update-channel-labels="service_key=${PD_KEY}" --project="$PROJECT_ID"
+     unset PD_KEY
+     ```
+
+   **Repeat this after every `make up` that follows a `make down`**: `make down` deletes the
+   channel, and the new one starts with the placeholder again. An apply on a running lab doesn't
+   touch the key. To change the channel itself, run
+   `terraform apply -replace=google_monitoring_notification_channel.pagerduty` and set the key
+   again.
+8. **Test** the whole path (next section).
+
+`make down` deletes the channels (even if a hand-made policy still uses them), the topic and the
+watchdog with the rest of the lab; PagerDuty, its integrations and Slack stay (all free).
 
 ## Test a page
 
 Each test can cost one phone call or SMS if you don't acknowledge it within your rules' delay.
 
-**1. PagerDuty alone (no cluster needed).** Sends one event to the service's Events API v2
-integration. Your phone should get a push within a minute, and `#incidents` an incident card.
+**1. PagerDuty alone (no cluster needed).** In the PagerDuty web or mobile app, create an incident
+by hand on service `mamori-shop` (**Incidents > New Incident**). Your phone should get a push within
+a minute, and `#incidents` an incident card. Acknowledge it, then resolve it.
+
+If you have added an Events API v2 integration for another tool, you can test it the same way that
+tool will call it:
 
 ```sh
-ROUTING_KEY="$(terraform -chdir=infra/envs/oncall output -raw events_api_v2_integration_key)"
+read -rs -p 'Events API v2 integration key: ' ROUTING_KEY; echo
 curl -sS https://events.pagerduty.com/v2/enqueue -H 'Content-Type: application/json' -d @- <<EOF
 {"routing_key": "${ROUTING_KEY}", "event_action": "trigger", "dedup_key": "mamori-test-page",
  "payload": {"summary": "mamori test page: acknowledge me", "source": "docs/oncall.md", "severity": "critical"}}
@@ -160,12 +181,12 @@ EOF
 # Expect: {"status":"success","message":"Event processed","dedup_key":"mamori-test-page"}
 ```
 
-Acknowledge it on the phone, then resolve it with the same request and `"event_action": "resolve"`
-(the `payload` can be left out).
+Resolve it with the same request and `"event_action": "resolve"` (the `payload` can be left out).
 
-**2. Cloud Monitoring end to end (cluster up).** A temporary alert policy that fires at once (the
-cluster has nodes) and sends to the paging channels. Expect, within a few minutes: a PagerDuty
-incident for the policy, an email, and a Pub/Sub message.
+**2. Cloud Monitoring end to end (cluster up; run after every step 7).** A temporary alert policy
+that fires at once (the cluster has nodes) and sends to the paging channels. Expect, within a few
+minutes: a PagerDuty incident for the policy, an email (if `alert_email` is set), and a Pub/Sub
+message. No PagerDuty incident while the email arrives means the key is still the placeholder.
 
 ```sh
 channels="$(terraform -chdir=infra/envs/lab output -json incident_notification_channels)"
@@ -196,7 +217,8 @@ gcloud monitoring policies create --policy-from-file="$policy" --project="$PROJE
 
 Clean up in this order: acknowledge in PagerDuty; delete the policy; if its incident is still open
 in **Monitoring > Alerting > Incidents**, close it there; resolve the PagerDuty incident if it is
-still open.
+still open. A forgotten test policy doesn't block `make down`: the channels are deleted with
+`force_delete`.
 
 ```sh
 gcloud monitoring policies list --project="$PROJECT_ID" \
@@ -219,50 +241,64 @@ The message is Cloud Monitoring's incident JSON (`{"incident": {...}, "version":
 Pub/Sub channel also has **Send test notification** in **Monitoring > Alerting > Edit notification
 channels**.
 
+## Spend-guard watchdog
+
+The spend guard is the only thing that stops spending when the budget is gone, and it fails
+quietly: when a retry can't help, it logs an error and acknowledges the message. Two policies in
+`notifications.tf` notify (email and Pub/Sub, no page):
+
+| Policy | Fires when | Notes |
+|---|---|---|
+| `spend-guard logged an error` | any spend-guard log entry at `ERROR` or above: permission denied, node pool not found, a bad or non-USD message | log-based; at most one notification an hour while errors go on |
+| `spend-guard handled no budget message for 23.5 hours` | log-based metric `spend-guard-outcomes` (one line per handled message) has no data for 23.5 hours | Cloud Billing sends several messages a day; 23.5 hours is Monitoring's longest absence window; it starts counting only after the first message, so a fresh lab stays quiet |
+
+Both link to the runbook [runbooks/spend-guard.md](runbooks/spend-guard.md).
+
 ## When paging breaks
 
 | Symptom | Likely cause | Check |
 |---|---|---|
-| Email arrives, no PagerDuty incident | Wrong or rotated key in `pagerduty_integration_key`; integration deleted in the web app | `terraform -chdir=infra/envs/oncall plan` shows the drift; set the secret again from the output (step 4) and apply the lab |
+| Email arrives, no PagerDuty incident | The channel still has the placeholder key (a new channel after `make down` / `make up`), or a wrong key | Set the key again (step 7), then run test 2 |
 | PagerDuty incident, but no push or call | Notification rules, phone settings, or nobody on the schedule | PagerDuty **My Profile > Notification Rules**; **People > On-Call Schedules** |
 | No Pub/Sub messages | Cloud Monitoring can't publish | the topic's IAM has `roles/pubsub.publisher` for the notification service agent (step 6) |
 | No alerts at all while the shop is down | Prober or collectors down with the cluster | the per-journey "no probe data" alerts page; Cloud Monitoring keeps working outside the cluster |
-| CI plan fails: "No value for required variable" | `PAGERDUTY_INTEGRATION_KEY` or `ALERT_EMAIL` secret missing | step 4 |
+| The email channel disappeared after a CI apply | `ALERT_EMAIL` secret missing, so CI applied an empty `alert_email` | step 5 |
 
 ## Where each secret lives
 
 | Secret | Where it is | Where it never is |
 |---|---|---|
 | PagerDuty REST API key | Your shell (`PAGERDUTY_TOKEN`) while applying `infra/envs/oncall`; then deleted or in a password manager | Git, GitHub, Terraform state |
-| Cloud Monitoring integration key | PagerDuty; state of `infra/envs/oncall` and `infra/envs/lab`; GitHub secret `PAGERDUTY_INTEGRATION_KEY` | Git, plan output |
-| Events API v2 integration key | PagerDuty; state of `infra/envs/oncall` | Git, GitHub |
-| Alert email address | GitHub secret `ALERT_EMAIL`; state of `infra/envs/lab` | Git, plan output |
+| Cloud Monitoring integration key (Events API v1) | PagerDuty (integration page); the Cloud Monitoring channel, set by hand | Git, GitHub, Terraform state, shell history |
+| Events API v2 integration key (only if added) | PagerDuty; the tool that uses it | Git, Terraform state |
+| Alert email address | `.env` (gitignored) or your shell; GitHub secret `ALERT_EMAIL`; state of `infra/envs/lab` | Git, plan output |
 
-The integration keys sit in Terraform state because the providers keep what they create or send.
-State is in the private state bucket; `tf-plan` (any workflow run of this repository) and
-`tf-apply` can read it. A leaked integration key lets someone page you or resolve an open page;
-it can't read or change the PagerDuty account. Rotate it with
-`terraform -chdir=infra/envs/oncall apply -replace=pagerduty_service_integration.cloud_monitoring`,
-update the GitHub secret, and apply the lab. Once the lab no longer has to run on Terraform 1.9,
-the channel can use the provider's write-only `service_key_wo` (Terraform 1.11 or later) and the
-key leaves the lab's state.
+Terraform state holds only the placeholder `placeholder-set-by-hand-see-docs` for the PagerDuty
+channel. A leaked integration key lets someone page you or resolve an open page; it can't read or
+change the PagerDuty account. To rotate it, delete the integration in PagerDuty, add it again, and
+set the new key on the channel (step 7).
 
 ## Limits and risks
 
 - **Free plans.** PagerDuty Free: 5 users, 1 schedule, 1 escalation policy, 100 phone/SMS
   notifications a month, no noise reduction, no per-incident Slack channels. A noisy alert that
   spends the allowance is an alert-fatigue finding to fix, not a reason to upgrade.
+- **The key step after `make up`.** A rebuilt lab doesn't page until step 7 is done again. That
+  is the price of keeping the key out of the state; test 2 shows whether it was done.
 - **One person on call.** Nobody to escalate to; the policy repeats instead. Time to acknowledge is
   measured, not promised.
 - **Events API v1.** Cloud Monitoring's PagerDuty channel speaks v1, so the service has a v1
-  integration for it next to the v2 one. PagerDuty calls v1 "legacy"; no end date was published
-  when this was written.
+  integration for it. PagerDuty calls v1 "legacy"; no end date was published when this was
+  written.
 - **Who can publish to `incident-alerts`.** Cloud Monitoring's notification agent (topic grant),
   project Owners and Editors, and `tf-apply` (Pub/Sub Admin). A fake message makes the agent
   investigate a fake incident; it can only propose, and the executor acts only after a human
   approves in Slack.
-- **Not verified yet** (no accounts exist): that Cloud Monitoring's PagerDuty channel delivers to
-  an Events API v1 integration key as Google's guide describes; that the free plan accepts the
-  shift-based schedule and a repeating escalation policy through the API; whether the notification
-  service agent appears with the first Pub/Sub channel created by API (step 6 has the fix); the
-  exact PagerDuty and Slack menu names, which change often.
+- **Not verified yet** (no accounts exist): that Cloud Monitoring accepts the placeholder service
+  key when it creates the channel, and that `gcloud beta monitoring channels update
+  --update-channel-labels` sets the key as the console does; that Cloud Monitoring's PagerDuty
+  channel delivers to an Events API v1 integration key as Google's guide describes; that the free
+  plan accepts the shift-based schedule and a repeating escalation policy through the API; whether
+  the notification service agent appears with the first Pub/Sub channel created by API (step 6 has
+  the fix); the watchdog's filters against real spend-guard logs; the exact PagerDuty and Slack
+  menu names, which change often.

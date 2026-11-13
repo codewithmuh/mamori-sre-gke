@@ -10,8 +10,7 @@ the Slack setup and the test page are in [docs/oncall.md](../../../docs/oncall.m
 | Schedule | `mamori-primary` | Shift-based (`pagerduty_schedulev2`); one weekly shift, Monday 09:00 Tokyo, one member |
 | Escalation policy | `mamori-default` | Notifies whoever is on call; repeats after 15 and 30 minutes if nobody acknowledges |
 | Service | `mamori-shop` | Urgency high (PagerDuty's default); acknowledgement timeout 30 minutes; auto-resolve off |
-| Integration | `Google Cloud Monitoring (Events API v1)` | Its key goes into `infra/envs/lab` as `pagerduty_integration_key` |
-| Integration | `Events API v2` | Test pages; any later tool that speaks Events API v2 |
+| Integrations | added by hand, not here | "Events API v1" for Cloud Monitoring; "Events API v2" only when a tool needs it (see below) |
 
 Free-plan limits this root stays within: 5 users, 1 on-call schedule, 1 escalation policy, 100
 phone/SMS notifications a month (push and email are not counted).
@@ -23,8 +22,8 @@ The maintainer applies this root from a laptop. CI never plans or applies it:
 - The PagerDuty token can change the whole PagerDuty account. Keeping it off GitHub means a
   workflow can't page, silence or rewire on-call.
 - It changes rarely: once at setup, then when someone joins the schedule.
-- `make down` doesn't touch it. PagerDuty costs nothing while the lab is down, and the next
-  `make up` recreates the Cloud Monitoring channel with the same key.
+- `make down` doesn't touch it. PagerDuty costs nothing while the lab is down; after the next
+  `make up`, the same integration key goes onto the new Cloud Monitoring channel by hand.
 
 ## Apply
 
@@ -55,12 +54,8 @@ unset PAGERDUTY_TOKEN
 An account in PagerDuty's EU region also needs `export PAGERDUTY_SERVICE_REGION=eu`. Delete the API
 key afterwards, or keep it in a password manager; this root needs it only when it changes.
 
-Then hand the Cloud Monitoring key to the lab (details in docs/oncall.md):
-
-```sh
-terraform output -raw cloud_monitoring_integration_key | gh secret set PAGERDUTY_INTEGRATION_KEY
-export TF_VAR_pagerduty_integration_key="$(terraform output -raw cloud_monitoring_integration_key)"
-```
+Then add the Cloud Monitoring integration by hand (next section), and set its key on the lab's
+PagerDuty channel once the lab is up ([docs/oncall.md](../../../docs/oncall.md), step 7).
 
 ## Inputs and outputs
 
@@ -69,33 +64,34 @@ export TF_VAR_pagerduty_integration_key="$(terraform output -raw cloud_monitorin
 | `oncall_user_email` | none | sensitive; your PagerDuty login |
 | `time_zone` | `Asia/Tokyo` | how the schedule is shown; full IANA name (`Etc/UTC`, not `UTC`) |
 
-| Output | Sensitive | Use |
-|---|---|---|
-| `cloud_monitoring_integration_key` | yes | `pagerduty_integration_key` of `infra/envs/lab` |
-| `events_api_v2_integration_key` | yes | `routing_key` for the test page in docs/oncall.md |
-| `service_url` | no | the service in the PagerDuty web app |
+| Output | Use |
+|---|---|
+| `service_url` | the service in the PagerDuty web app, where its integrations are added |
 
 Example: `terraform.tfvars.example`.
 
-## Why two integrations
+## Integrations, by hand
 
-Cloud Monitoring's PagerDuty channel sends Events API v1 events with a "service key", and Google's
-setup guide asks for an integration of type **Events API v1**. PagerDuty's guides tie a key to the
-API version of its integration. So Cloud Monitoring gets its own v1 integration, and everything
-else uses the v2 one. PagerDuty's docs call v1 "legacy", but no end-of-life date was published
-when this was checked (2026-11-13).
+Integrations hold the keys that send events to `mamori-shop`. Managed here, a key would sit in this
+root's state, in the state bucket that `tf-plan` (any workflow run of the repository) can read. So
+they are added in the web app: **Services > mamori-shop > Integrations > Add an integration**.
+
+| Integration | When | Why |
+|---|---|---|
+| **Events API v1**, named "Google Cloud Monitoring" | at setup | Cloud Monitoring's PagerDuty channel sends Events API v1 events with a "service key", and Google's setup guide asks for this type. PagerDuty's guides tie a key to its integration's API version |
+| **Events API v2** | only when a tool needs one (Datadog's window, Alertmanager) | that tool's routing key |
+
+The key stays visible on the integration's page, so there is nothing to store. PagerDuty's docs call
+v1 "legacy", but no end-of-life date was published when this was checked (2026-11-13).
 
 ## State and secrets
 
-- State: the lab's state bucket, prefix `oncall`. It holds both integration keys in plain text, as
-  the lab's state holds the Cloud Monitoring key. The bucket is private, but every identity that
-  can read the lab's state can read this too (`tf-plan`, which any workflow run of the repository
-  can use, and `tf-apply`).
-- An integration key can only send events to `mamori-shop`: someone holding it could page you or
-  resolve an open page, not read or change the account. To rotate one:
-  `terraform apply -replace=pagerduty_service_integration.cloud_monitoring`, then update the
-  GitHub secret and apply the lab again.
+- State: the lab's state bucket, prefix `oncall`. It holds names, IDs and settings only: no
+  integration key and no token.
 - The API token is read from `PAGERDUTY_TOKEN` only, so it never reaches the state.
+- An integration key can only send events to `mamori-shop`: someone holding it could page you or
+  resolve an open page, not read or change the account. To rotate one, delete the integration and
+  add it again, then set the new key on the Cloud Monitoring channel ([docs/oncall.md](../../../docs/oncall.md)).
 
 ## Checks
 

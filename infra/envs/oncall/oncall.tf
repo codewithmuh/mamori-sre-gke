@@ -1,7 +1,7 @@
 # Paging for the lab (D6). PagerDuty's free plan allows 5 users, 1 on-call schedule, 1 escalation
 # policy and 100 phone/SMS notifications a month, so this root creates exactly one schedule and one
-# escalation policy, and one service that every lab alert pages through. How alerts reach it and
-# how to test it: docs/oncall.md.
+# escalation policy, and one service that every lab alert pages through. How alerts reach it, the
+# integrations added by hand, and how to test it: docs/oncall.md.
 
 locals {
   # One shift a week, Monday 09:00 to Monday 09:00 in Tokyo, written in UTC as the API stores it.
@@ -84,19 +84,8 @@ resource "pagerduty_service" "shop" {
   auto_resolve_timeout = "null"
 }
 
-# Cloud Monitoring's built-in PagerDuty channel speaks Events API v1, and Google's setup guide asks
-# for an "Events API v1" integration. PagerDuty's own guides tie the key to the API version of its
-# integration, so this integration is for Cloud Monitoring only.
-resource "pagerduty_service_integration" "cloud_monitoring" {
-  name    = "Google Cloud Monitoring (Events API v1)"
-  type    = "generic_events_api_inbound_integration"
-  service = pagerduty_service.shop.id
-}
-
-# Everything else that sends events: the test page in docs/oncall.md now, and later Alertmanager,
-# the Datadog window or the incident agent if they ever page.
-resource "pagerduty_service_integration" "events_v2" {
-  name    = "Events API v2"
-  type    = "events_api_v2_inbound_integration"
-  service = pagerduty_service.shop.id
-}
+# No integrations here on purpose. An integration key would sit in this root's state, which shares
+# the state bucket that every CI workflow run can read. They are added by hand in the PagerDuty web
+# app, where the key can be looked up again at any time (docs/oncall.md):
+#   - "Events API v1", for Cloud Monitoring's PagerDuty channel (Google's setup asks for v1);
+#   - "Events API v2", only when another tool (Datadog, Alertmanager) needs one.
