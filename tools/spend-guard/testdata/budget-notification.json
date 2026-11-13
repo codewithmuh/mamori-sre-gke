@@ -1,0 +1,9 @@
+{
+  "budgetDisplayName": "mamori-lab",
+  "alertThresholdExceeded": 1.0,
+  "costAmount": 201.37,
+  "costIntervalStart": "2026-12-01T08:00:00Z",
+  "budgetAmount": 200.0,
+  "budgetAmountType": "SPECIFIED_AMOUNT",
+  "currencyCode": "USD"
+}
