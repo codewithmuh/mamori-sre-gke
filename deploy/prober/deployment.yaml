@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prober
+  labels:
+    app.kubernetes.io/name: prober
+    app.kubernetes.io/part-of: mamori
+spec:
+  # Raise to 1 after the first image publish; see docs/images.md. Until the image exists in
+  # Artifact Registry (and scripts/set-registry.sh has replaced PROJECT_ID), a pod would sit in
+  # ImagePullBackOff, keep this app unhealthy and hold Argo CD's root sync at wave 5.
+  # Then one prober: two would double the probe rate and still share the cluster's failure domain.
+  replicas: 0
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prober
+  # The new pod starts before the old one stops, so a rollout leaves no gap in the SLO data. The
+  # old pod drops its in-flight probes on SIGTERM instead of recording them as failures.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: prober
+        app.kubernetes.io/part-of: mamori
+        sidecar.istio.io/inject: "false"
+    spec:
+      serviceAccountName: prober
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: prober
+          # PROJECT_ID is replaced by scripts/set-registry.sh (#28) once the project exists.
+          image: asia-northeast1-docker.pkg.dev/PROJECT_ID/mamori/prober:0.1.0
+          imagePullPolicy: IfNotPresent
+          env:
+            # The journeys go through the ingress gateway's cluster-internal port 8080 with the
+            # public Host header, so they follow the shopper's path from the gateway on: Istio
+            # Gateway and VirtualService, frontend, and every service behind it. Port 8080 is not
+            # behind the public rate limit (probes never compete with shoppers for it) and the GKE
+            # Gateway doesn't expose it. The load balancer, Cloud Armor, TLS and DNS in front of the
+            # public port 80 are not covered (see tools/prober/README.md).
+            - name: PROBER_TARGET_URL
+              value: http://istio-ingressgateway.istio-ingress.svc.cluster.local:8080
+            - name: PROBER_HOST
+              value: mamori.codewithmuh.com
+            - name: PROBER_INTERVAL
+              value: 60s
+            - name: PROBER_STEP_TIMEOUT
+              value: 12s
+            - name: PROBER_CUJS
+              value: browse,add-to-cart,view-cart,checkout
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          # Readiness never depends on the shop: a prober that went unready when the shop failed
+          # would stop reporting exactly when it matters.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+          # Fails when a scheduled journey loop stops making progress (no probe for longer than
+          # an interval plus the longest possible probe), so a stuck prober restarts.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 2
+            failureThreshold: 3
+          # Idle Go process with four light probes a minute: about 1-3m CPU and 15-25 MiB
+          # (estimate; measure with kubectl top). No CPU limit: throttling would show up as
+          # journey latency in the SLO data.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL

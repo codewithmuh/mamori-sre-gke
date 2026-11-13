@@ -1,0 +1,6 @@
+# Only what the build needs; a docs or test change must not change the image.
+*
+!go.mod
+!go.sum
+!*.go
+*_test.go

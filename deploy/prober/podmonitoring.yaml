@@ -1,0 +1,22 @@
+# Managed Service for Prometheus scrapes the prober's mamori_cuj_* metrics into Cloud Monitoring
+# (prometheus.googleapis.com/mamori_cuj_*), where the journey SLOs read source="scheduled".
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: prober
+  labels:
+    app.kubernetes.io/name: prober
+    app.kubernetes.io/part-of: mamori
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prober
+  endpoints:
+    - port: http
+      path: /metrics
+      # Once a minute, like the probes: scraping faster adds billed samples, not information.
+      # About 240 series, about 480 once on-demand runs have happened (each histogram bucket
+      # counted as one). At most about 21 million samples a month, about $1.25 at $0.06 per
+      # million (estimate, my math).
+      interval: 60s
+      timeout: 10s
