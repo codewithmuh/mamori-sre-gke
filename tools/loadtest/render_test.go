@@ -57,13 +57,35 @@ func TestMarkdownAllPassedAndNoRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := b.String()
-	for _, want := range []string{"| First step that did not pass | none |", "no requests", "limit is above the last step", "**1.0 req/s**"} {
+	for _, want := range []string{"| Search ended at | no step failed |", "no requests", "no step failed: the limit is above", "**1.0 req/s**"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("markdown lacks %q\n%s", want, out)
 		}
 	}
 	if strings.Contains(out, "without the load generator") {
 		t.Error("net cost shown without generator CPU")
+	}
+}
+
+func TestMarkdownWhenNoStepConfirmed(t *testing.T) {
+	results := []stepResult{
+		{Index: 1, PlannedRPS: 10, Status: statusInconclusive, Reasons: []string{"view-cart: 50 requests, fewer than the 100 needed"}},
+		{Index: 2, PlannedRPS: 20, Status: statusFail, Reasons: []string{"checkout availability 90.00 % < 99.0 %"}},
+	}
+	var b bytes.Buffer
+	if err := writeMarkdown(&b, fixtureReport(t, results)); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	for _, want := range []string{
+		"| Highest rate that held every SLO | none: no step confirmed every SLO (see Warnings) |",
+		"| Search ended at | step 2 (20 RPS), fail: checkout availability",
+		"- Step 1 (10 RPS), inconclusive: view-cart: 50 requests",
+		"- step 1 was inconclusive and step 2 did not pass",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("markdown lacks %q\n%s", want, out)
+		}
 	}
 }
 

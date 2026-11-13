@@ -23,6 +23,7 @@ type report struct {
 	Cluster             string       `json:"cluster"`
 	MinDeliveredRatio   float64      `json:"minDeliveredRatio"`
 	MinRequests         float64      `json:"minRequestsPerJourney"`
+	ConfidenceZ         float64      `json:"confidenceZ"`
 	CostModel           costModel    `json:"costModel"`
 	SLOs                []journeySLO `json:"slos"`
 	Steps               []stepResult `json:"steps"`
@@ -63,8 +64,8 @@ func writeMarkdown(w io.Writer, r report) error {
 	p("| Run | `%s`, %s to %s |", run, r.From.UTC().Format(timeLayout), r.To.UTC().Format(timeLayout))
 	p("| Cluster | `%s`: %d × %s %s, %s |", r.Cluster, m.Nodes, m.MachineType, m.Provisioning, m.Region)
 	p("| Steps | %s RPS; %s each; the first %s of each step not measured |", joinNumbers(stepRates(r.Steps)), r.StepDuration, r.Warmup)
-	p("| Pass rule | every journey meets both SLOs on at least %.0f requests, and k6 delivers at least %s of the planned rate |",
-		r.MinRequests, pct(r.MinDeliveredRatio, 0))
+	p("| Pass rule | for every journey, availability and latency above target at the lower end of the Wilson interval (z = %g), on at least %.0f requests; k6 delivers at least %s of the planned rate; no 429s. Inconclusive steps are passed over |",
+		r.ConfidenceZ, r.MinRequests, pct(r.MinDeliveredRatio, 0))
 	p("")
 
 	p("## Result")
@@ -75,14 +76,16 @@ func writeMarkdown(w io.Writer, r report) error {
 	case r.MaxStep != nil && r.MaxRPS != nil:
 		s := r.Steps[*r.MaxStep-1]
 		p("| Highest rate that held every SLO | **%s req/s** (step %d, planned %s RPS) |", num(*r.MaxRPS, 1), s.Index, num(s.PlannedRPS, -1))
-	default:
+	case r.FirstNotPassingStep != nil && *r.FirstNotPassingStep == 1:
 		p("| Highest rate that held every SLO | none: the first step did not pass, so start lower |")
+	default:
+		p("| Highest rate that held every SLO | none: no step confirmed every SLO (see Warnings) |")
 	}
 	if r.FirstNotPassingStep != nil {
 		s := r.Steps[*r.FirstNotPassingStep-1]
-		p("| First step that did not pass | step %d (%s RPS), %s: %s |", s.Index, num(s.PlannedRPS, -1), s.Status, strings.Join(s.Reasons, "; "))
+		p("| Search ended at | step %d (%s RPS), %s: %s |", s.Index, num(s.PlannedRPS, -1), s.Status, strings.Join(s.Reasons, "; "))
 	} else {
-		p("| First step that did not pass | none |")
+		p("| Search ended at | no step failed |")
 	}
 	p("| Cluster cost (nodes and disks, list price) | %s an hour, %s a month |", money(m.clusterHourly(), m.Currency), money(m.clusterHourly()*m.HoursPerMonth, m.Currency))
 	if c := r.Cost; c != nil {
@@ -112,6 +115,7 @@ func writeMarkdown(w io.Writer, r report) error {
 	p("## Steps")
 	p("")
 	p("Each journey cell: availability · share of requests under its latency threshold · p95 latency.")
+	p("**Bold**: an SLO clearly missed. (?): too few requests to tell, so the step is inconclusive.")
 	p("")
 	header := "| Step | Planned RPS | Measured req/s | Delivered |"
 	align := "|---:|---:|---:|---:|"
@@ -162,6 +166,9 @@ func writeMarkdown(w io.Writer, r report) error {
 	p("  kept running; *Frontend req/s* (from the mesh, when available) is everything the frontend served.")
 	p("- The SLIs here are measured by k6 at the Istio ingress gateway, per request; failed requests never count")
 	p("  as fast. They are a load-test view of the SLOs in `slo/slos.yaml`, not the 28-day SLO itself.")
+	p("- A step passes only when every SLI is above its target at the lower end of its Wilson interval, so a")
+	p("  lucky few hundred requests cannot pass a 99.5 %% target. Inconclusive steps neither pass nor end the")
+	p("  search; fail, invalid and not-run steps end it.")
 	p("- Cost per 1K RPS assumes cost grows in proportion to load, on the same nodes at the same list price.")
 	p("  It covers nodes and disks only. Source: %s.", m.Source)
 	p("- Method and limits: `docs/capacity/README.md` in the repository.")
@@ -178,12 +185,15 @@ func journeyCell(s stepResult, id string) string {
 		if j.Availability == nil {
 			return "no requests"
 		}
-		cell := pct(*j.Availability, 3) + " · " + pct(*j.LatencyShare, 1)
+		cell := pct(j.Availability.Value, 3) + " · " + pct(j.Latency.Value, 1)
 		if j.P95Ms != nil {
 			cell += " · " + num(*j.P95Ms, 0) + " ms"
 		}
-		if !j.AvailabilityMet || !j.LatencyMet {
+		switch {
+		case j.Availability.Verdict == sliMissed || j.Latency.Verdict == sliMissed:
 			cell = "**" + cell + "**"
+		case j.Availability.Verdict == sliUndecided || j.Latency.Verdict == sliUndecided:
+			cell += " (?)"
 		}
 		return cell
 	}

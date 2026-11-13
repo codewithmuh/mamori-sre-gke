@@ -5,10 +5,10 @@
 // whether or not the shop keeps up. A slow shop shows up as latency and errors, not as less load.
 //
 // Settings (environment variables, all optional):
-//   STEPS                  requests per second for each step, e.g. "5,10,20,40"
+//   STEPS                  requests per second for each step, e.g. "10,20,40"
 //   STEP_DURATION          length of each step, e.g. "5m" (k6 duration: h, m, s)
 //   RAMP                   time to move from one step's rate to the next, inside the step ("10s")
-//   MIX                    share of journeys per CUJ, e.g. "browse=50,add-to-cart=20,view-cart=15,checkout=15"
+//   MIX                    share of journeys per CUJ, e.g. "browse=40,add-to-cart=10,view-cart=25,checkout=25"
 //   LATENCY_THRESHOLDS_MS  latency thresholds counted per request; must include each SLO's threshold
 //   TARGET_URL, TARGET_HOST, RUN_ID, MAX_VUS, REQUEST_TIMEOUT
 import http from 'k6/http';
@@ -65,15 +65,18 @@ function parseMix(text) {
   return mix;
 }
 
-// In the cluster, straight to the Istio ingress gateway, with the public Host header its Gateway and
-// VirtualService accept. The public URL would go through Cloud Armor's per-IP rate limit.
-const BASE_URL = env('TARGET_URL', 'http://istio-ingressgateway.istio-ingress.svc.cluster.local').replace(/\/+$/, '');
+// In the cluster, to the Istio ingress gateway's internal port 8080, with the public Host header its
+// Gateway and VirtualService accept. Port 8080 is outside the gateway's public rate-limit bucket; the
+// public URL would also go through Cloud Armor's per-IP rate limit.
+const BASE_URL = env('TARGET_URL', 'http://istio-ingressgateway.istio-ingress.svc.cluster.local:8080').replace(/\/+$/, '');
 const HOST = env('TARGET_HOST', 'mamori.codewithmuh.com');
 const RUN_ID = env('RUN_ID', 'manual');
-const STEPS = parseNumbers('STEPS', env('STEPS', '5,10'));
+const STEPS = parseNumbers('STEPS', env('STEPS', '10,20'));
 const STEP_SECONDS = parseDuration(env('STEP_DURATION', '5m'));
 const RAMP_SECONDS = parseDuration(env('RAMP', '10s'));
-const MIX = parseMix(env('MIX', 'browse=50,add-to-cart=20,view-cart=15,checkout=15'));
+// Shares of journeys, not requests, weighted towards the cart journeys so that each CUJ gets enough
+// requests per step to confirm its SLO.
+const MIX = parseMix(env('MIX', 'browse=40,add-to-cart=10,view-cart=25,checkout=25'));
 const LATENCY_THRESHOLDS_MS = parseNumbers('LATENCY_THRESHOLDS_MS', env('LATENCY_THRESHOLDS_MS', '100,250,500,750,1000,1500,2000,3000'));
 const MAX_VUS = Math.max(1, Math.floor(parseNumbers('MAX_VUS', env('MAX_VUS', '100'))[0]));
 const REQUEST_TIMEOUT = env('REQUEST_TIMEOUT', '10s');

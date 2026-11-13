@@ -21,7 +21,7 @@ import (
 // The fixture run: testdata/k6-summary.json and testdata/run-fixture.json describe the same schedule.
 var (
 	fixtureStart = time.Date(2027, 1, 12, 10, 0, 0, 250_000_000, time.UTC)
-	fixtureSteps = []float64{5, 10, 20, 40}
+	fixtureSteps = []float64{10, 20, 40, 60, 80}
 )
 
 const (

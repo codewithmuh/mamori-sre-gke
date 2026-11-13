@@ -2,29 +2,38 @@
 # Prometheus. Method and limits: docs/capacity/README.md. Needs kubectl pointed at the lab (make up
 # does that) and, for the report, Go and `gcloud auth application-default login`.
 #
-#   make loadtest-run STEPS=5,10,20,40 STEP_DURATION=5m      prints the run id at the start
+#   make loadtest-run STEPS=10,20,40 STEP_DURATION=5m        prints the run id at the start
 #   make loadtest-report RUN_ID=20270112-100000              reads loadtest-results/<run id>/summary.json
-#   make loadtest-report FROM=2027-01-12T10:00:00Z TO=2027-01-12T10:40:00Z STEPS=5,10,20,40 STEP_DURATION=5m
+#   make loadtest-report FROM=2027-01-12T10:00:00Z TO=2027-01-12T10:40:00Z STEPS=10,20,40 STEP_DURATION=5m
 #   make loadtest-clean
 #
 # Results go to loadtest-results/<run id>/ (gitignored): the k6 log, its summary and the report.
 
-LOADTEST_STEPS ?= 5,10,20,30,40,60,80,100
+LOADTEST_STEPS ?= 10,20,30,40,50,60,80,100
 LOADTEST_STEP_DURATION ?= 5m
-LOADTEST_MIX ?= browse=50,add-to-cart=20,view-cart=15,checkout=15
+# Shares of journeys, not requests: weighted towards the cart journeys so each CUJ gets enough
+# requests per step to confirm its SLO (docs/capacity/README.md, "When a step passes").
+LOADTEST_MIX ?= browse=40,add-to-cart=10,view-cart=25,checkout=25
 # Must include every latency threshold in slo/slos.yaml.
 LOADTEST_LATENCY_THRESHOLDS_MS ?= 100,250,500,750,1000,1500,2000,3000
 LOADTEST_RESULTS := loadtest-results
 LOADTEST_BIN := bin/loadtest
-# off: turn the ingress gateway's local rate limit enforcement off for the run, so the test finds the
-# shop's knee instead of the limit's (#27, deploy/resilience/ingress-rate-limit.yaml). keep: leave it.
-LOADTEST_GATEWAY_LIMIT ?= off
+# The ingress gateway's internal port, outside the public rate-limit bucket (#27,
+# deploy/resilience/ingress-rate-limit.yaml): capacity runs never meet the limit.
+LOADTEST_TARGET_URL ?= http://istio-ingressgateway.istio-ingress.svc.cluster.local:8080
+# Opt-in, only for a test of the public path (LOADTEST_TARGET_URL without :8080, inside the limit):
+# off = do not enforce the gateway's rate limit during the run, so it finds the shop's knee there.
+# keep (default) = leave the limit alone, for example to check that it sheds load at its rate.
+LOADTEST_GATEWAY_LIMIT ?= keep
 
 # Envoy runtime switch, per gateway pod, reset when the pod restarts. No Git change, so Argo CD has
-# nothing to undo. $(1): 0 = not enforced (still counted), 100 = enforced.
-loadtest-gateway-limit = for pod in $$(kubectl -n istio-ingress get pods -l istio=ingressgateway -o name); do \
-	kubectl -n istio-ingress exec "$$pod" -c istio-proxy -- \
-	pilot-agent request POST "runtime_modify?ingress_local_rate_limit_enforced=$(1)" >/dev/null; done
+# nothing to undo. $(1): 0 = not enforced (still counted), 100 = enforced. It tries every pod, then
+# fails if there was no pod or any pod refused. The last command is a plain `[`, which `set -e` sees
+# in every bash (macOS's bash 3.2 ignores a failing `[[`).
+loadtest-gateway-limit = pods="$$(kubectl -n istio-ingress get pods -l istio=ingressgateway -o name)"; failed=0; \
+	for pod in $$pods; do kubectl -n istio-ingress exec "$$pod" -c istio-proxy -- \
+	pilot-agent request POST "runtime_modify?ingress_local_rate_limit_enforced=$(1)" >/dev/null || failed=1; done; \
+	[ -n "$$pods" ] || failed=1; [ "$$failed" = 0 ]
 
 # STEPS, STEP_DURATION, RUN_ID, FROM and TO count only when given on the command line or in the
 # environment, so a variable of the same name in another mk/*.mk file cannot change a run.
@@ -36,34 +45,35 @@ loadtest-step-duration = $(or $(call loadtest-arg,STEP_DURATION),$(LOADTEST_STEP
 
 # Order: the relay must be up before k6 sends to it; the old Job must go (Jobs are immutable). The
 # Job's settings are set on the rendered manifest with `kubectl set env`, so the repo stays as is.
-# The gateway's rate limit goes back on when this command ends, however it ends (EXIT trap).
-loadtest-run: ## Step-load the shop from inside the cluster: STEPS=5,10,20 STEP_DURATION=5m
+# With LOADTEST_GATEWAY_LIMIT=off the gateway's rate limit goes back on when this command ends, however
+# it ends: the EXIT trap is set before the first pod is switched, so a partial switch is undone too.
+loadtest-run: ## Step-load the shop from inside the cluster: STEPS=10,20,40 STEP_DURATION=5m
 	@$(call require-tools,kubectl)
 	@set -euo pipefail; \
 	run_id="$(or $(call loadtest-arg,RUN_ID),$$(date -u +%Y%m%d-%H%M%S))"; \
 	case "$$run_id" in *[!A-Za-z0-9._-]*) echo "error: RUN_ID may only hold letters, digits, '.', '_' and '-'" >&2; exit 1 ;; esac; \
 	out="$(LOADTEST_RESULTS)/$$run_id"; \
 	mkdir -p "$$out"; \
-	printf 'RUN_ID=%s\nSTEPS=%s\nSTEP_DURATION=%s\nMIX=%s\nLATENCY_THRESHOLDS_MS=%s\nTARGET_HOST=%s\nGATEWAY_LIMIT=%s\n' \
+	printf 'RUN_ID=%s\nSTEPS=%s\nSTEP_DURATION=%s\nMIX=%s\nLATENCY_THRESHOLDS_MS=%s\nTARGET_URL=%s\nTARGET_HOST=%s\nGATEWAY_LIMIT=%s\n' \
 		"$$run_id" "$(loadtest-steps)" "$(loadtest-step-duration)" "$(LOADTEST_MIX)" \
-		"$(LOADTEST_LATENCY_THRESHOLDS_MS)" "$(FRONTEND_HOSTNAME)" "$(LOADTEST_GATEWAY_LIMIT)" >"$$out/run.env"; \
+		"$(LOADTEST_LATENCY_THRESHOLDS_MS)" "$(LOADTEST_TARGET_URL)" "$(FRONTEND_HOSTNAME)" "$(LOADTEST_GATEWAY_LIMIT)" >"$$out/run.env"; \
 	echo "--- run $$run_id: $(loadtest-steps) RPS, $(loadtest-step-duration) per step (results in $$out)"; \
 	kubectl apply -k deploy/loadtest; \
 	kubectl -n loadtest rollout status deployment/k6-metrics --timeout=3m; \
 	kubectl -n loadtest delete job k6 --ignore-not-found --wait=true; \
 	if [ "$(LOADTEST_GATEWAY_LIMIT)" = off ]; then \
-		echo "--- ingress gateway rate limit: not enforced during the run (LOADTEST_GATEWAY_LIMIT=keep leaves it)"; \
+		trap 'if { $(call loadtest-gateway-limit,100); }; then echo "--- ingress gateway rate limit: enforced again"; \
+			else echo "warning: could not re-enable the gateway rate limit on every pod; run make loadtest-gateway-limit-on" >&2; fi' EXIT; \
+		echo "--- ingress gateway rate limit: not enforced during the run (LOADTEST_GATEWAY_LIMIT=off)"; \
 		$(call loadtest-gateway-limit,0); \
-		trap '$(call loadtest-gateway-limit,100) && echo "--- ingress gateway rate limit: enforced again" \
-			|| echo "warning: could not re-enable the gateway rate limit; run make loadtest-gateway-limit-on" >&2' EXIT; \
 	fi; \
 	kubectl kustomize deploy/loadtest/run \
 		| kubectl set env --local -f - -c k6 -o yaml \
 			RUN_ID="$$run_id" STEPS="$(loadtest-steps)" STEP_DURATION="$(loadtest-step-duration)" \
 			MIX="$(LOADTEST_MIX)" LATENCY_THRESHOLDS_MS="$(LOADTEST_LATENCY_THRESHOLDS_MS)" \
-			TARGET_HOST="$(FRONTEND_HOSTNAME)" \
+			TARGET_URL="$(LOADTEST_TARGET_URL)" TARGET_HOST="$(FRONTEND_HOSTNAME)" \
 		| kubectl create -f -; \
-	echo "--- following k6. Ctrl-C ends this command and re-enables the gateway rate limit; the Job runs on."; \
+	echo "--- following k6. Ctrl-C ends this command, not the Job (and re-enables the gateway limit if it was turned off)."; \
 	kubectl -n loadtest logs -f job/k6 --pod-running-timeout=5m \
 		| awk '/^MAMORI_K6_SUMMARY_BEGIN$$/ { skip = 1 } !skip { print } /^MAMORI_K6_SUMMARY_END$$/ { skip = 0 }' || true; \
 	while :; do \

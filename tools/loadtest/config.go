@@ -24,6 +24,7 @@ type config struct {
 	Warmup                duration       `yaml:"warmup" json:"warmup"`
 	MinDeliveredRatio     float64        `yaml:"minDeliveredRatio" json:"minDeliveredRatio"`
 	MinRequestsPerJourney float64        `yaml:"minRequestsPerJourney" json:"minRequestsPerJourney"`
+	ConfidenceZ           float64        `yaml:"confidenceZ" json:"confidenceZ"`
 	GeneratorCPULimit     float64        `yaml:"generatorCPULimit" json:"generatorCPULimit"`
 	RateLimitShare        float64        `yaml:"rateLimitShare" json:"rateLimitShare"`
 	Metrics               metricNames    `yaml:"metrics" json:"metrics"`
@@ -134,6 +135,7 @@ func (c config) validate() error {
 	check(c.Warmup.Duration >= 0 && c.Warmup.Duration%time.Second == 0, "warmup %s must be whole seconds, 0 or more", c.Warmup.Duration)
 	check(c.MinDeliveredRatio > 0 && c.MinDeliveredRatio <= 1, "minDeliveredRatio %g must be above 0 and at most 1", c.MinDeliveredRatio)
 	check(c.MinRequestsPerJourney >= 1, "minRequestsPerJourney %g must be at least 1", c.MinRequestsPerJourney)
+	check(c.ConfidenceZ > 0 && c.ConfidenceZ <= 5, "confidenceZ %g must be above 0 and at most 5", c.ConfidenceZ)
 	check(positive(c.GeneratorCPULimit), "generatorCPULimit %g must be above 0", c.GeneratorCPULimit)
 	check(c.RateLimitShare > 0 && c.RateLimitShare <= 1, "rateLimitShare %g must be above 0 and at most 1", c.RateLimitShare)
 

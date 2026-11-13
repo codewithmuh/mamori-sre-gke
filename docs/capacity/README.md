@@ -22,31 +22,32 @@ The test spends error budget on purpose, so treat it like a game day: check the
 burn-rate alerts at the top steps.
 
 ```sh
-make loadtest-run STEPS=2 STEP_DURATION=2m       # smoke test of the plumbing (~2 minutes; its report says
-                                                  # "invalid": too few requests to judge an SLO)
-make loadtest-run STEPS=5,10,20,30,40,60,80,100   # the real run: 8 steps x 5 minutes = ~41 minutes
+make loadtest-run STEPS=5 STEP_DURATION=2m        # smoke test of the plumbing (~2 minutes; its report says
+                                                  # "inconclusive": too few requests to confirm an SLO)
+make loadtest-run                                 # the real run: 10,20,30,40,50,60,80,100 RPS x 5 minutes = ~41 minutes
 make loadtest-report RUN_ID=<the id it printed>   # a minute or two after the run, once the last scrape is in
 make loadtest-clean                               # removes the namespace, the relay and the Job
 ```
 
-`loadtest-run` prints the run id first, turns the ingress gateway's rate limit enforcement off for the
-run (see [below](#the-ingress-gateways-rate-limit)), follows k6's log, and saves `k6.log`,
-`summary.json` and `run.env` in `loadtest-results/<run id>/`. `loadtest-report` writes `report.md` and `report.json`
-next to them. Without a saved summary, give the time range by hand:
+`loadtest-run` prints the run id first, follows k6's log, and saves `k6.log`, `summary.json` and
+`run.env` in `loadtest-results/<run id>/`. `loadtest-report` writes `report.md` and `report.json` next to
+them. Without a saved summary, give the time range by hand:
 `make loadtest-report FROM=2027-01-12T10:00:05Z TO=2027-01-12T10:46:00Z STEPS=... STEP_DURATION=5m`.
 
-Choose the steps from the smoke test: if 2 RPS already shows high latency, start lower. The search stops
-at the first step that does not pass, so the steps must rise, and the last one should be above the
-expected limit (the report warns when every step held).
+Choose the steps from the smoke test: if 5 RPS already shows high latency, start lower and lengthen the
+steps (see [When a step passes](#when-a-step-passes) for why low rates need longer steps). The steps must
+rise, and the last one should be above the expected limit (the report warns when no step failed).
 
 ## Method
 
 ### Where the load comes from
 
 k6 runs as a Job in the `loadtest` namespace, without an Istio sidecar, and sends plain HTTP to the
-Istio ingress gateway Service (`istio-ingressgateway.istio-ingress.svc.cluster.local`) with the header
-`Host: mamori.codewithmuh.com`, the only host the gateway's `Gateway` and `VirtualService` accept. That
-is the same path as the prober and the same pods as public traffic, minus the load balancer.
+Istio ingress gateway's cluster-internal port 8080
+(`http://istio-ingressgateway.istio-ingress.svc.cluster.local:8080`, `LOADTEST_TARGET_URL`) with the
+header `Host: mamori.codewithmuh.com`, the host the gateway's `Gateway` and `VirtualService` accept.
+That is the same gateway pods, routes and shop as public traffic, minus the load balancer, and outside
+the public listener's rate limit (next section).
 
 Why not the public URL: Cloud Armor limits each client IP to 600 requests a minute
 (`armor_rate_limit_per_minute` in `infra/envs/lab`), which is 10 requests per second from one generator.
@@ -58,17 +59,23 @@ services that scale on their own; checking them needs a test from many IPs, whic
 
 M4 adds load shedding at the Istio ingress gateway: Envoy's local rate limit, a token bucket that
 answers 429 above a set rate ([`deploy/resilience/ingress-rate-limit.yaml`](../../deploy/resilience/ingress-rate-limit.yaml),
-#27). k6 goes through the gateway, so with the limit enforced the test would find the limit (a 40 req/s
-placeholder), not the shop's knee. So:
+#27). It guards the public listener (port 80, where the load balancer sends traffic). Internal callers,
+the prober and k6, use port 8080, which has no limit, so the test finds the shop's knee and not the
+limit's (a 40 req/s placeholder). So:
 
-- `make loadtest-run` turns enforcement off with Envoy's runtime switch on every gateway pod
-  (`runtime_modify?ingress_local_rate_limit_enforced=0`) and turns it back on (`=100`) when the command
-  ends, however it ends. The switch lives in the pod, not in Git, so Argo CD has nothing to undo; a
-  gateway pod that restarts during the run comes back enforcing. `LOADTEST_GATEWAY_LIMIT=keep` leaves
-  the limit alone, for example to check that it sheds load at the right rate.
-  `make loadtest-gateway-limit-on` turns it back on by hand.
-- The report counts k6's 429 answers per step and warns when there are any: that step measured the
-  limit, not the shop.
+- A capacity run needs nothing switched off. If a run ever meets the limit anyway (wrong port, or the
+  routes changed), any 429 makes the step **invalid**: it measured the limit, not the shop, and it ends
+  the search. Otherwise a limit that was on would become the "capacity", and the suggested limit below
+  would only repeat it.
+- Opt-in, for a test of the public path: `LOADTEST_TARGET_URL=http://istio-ingressgateway.istio-ingress.svc.cluster.local`
+  sends k6 to port 80, inside the limit. With `LOADTEST_GATEWAY_LIMIT=keep` (the default) that checks
+  the limit sheds load at its rate; expect invalid steps above it. With `LOADTEST_GATEWAY_LIMIT=off`,
+  `make loadtest-run` stops enforcing it on every gateway pod with Envoy's runtime switch
+  (`runtime_modify?ingress_local_rate_limit_enforced=0`) and enforces it again (`=100`) when the command
+  ends, however it ends: the exit trap is set before the first pod is switched, so a partial switch is
+  undone too. The switch lives in the pod, not in Git, so Argo CD has nothing to undo; a gateway pod
+  that restarts during the run comes back enforcing (and its 429s make the step invalid).
+  `make loadtest-gateway-limit-on` enforces it again by hand.
 - The report suggests a value for the limit: 90 % of the capacity, rounded down (`rateLimitShare` in
   `tools/loadtest/config.yaml`). It goes into `tokens_per_fill`; the burst (`max_tokens`) stays twice
   that. The bucket is per gateway pod, so with N gateway replicas each gets 1/N of it. #27 asks for the
@@ -77,14 +84,19 @@ placeholder), not the shop's knee. So:
 
 ### Load shape
 
-- **Steps.** `STEPS` lists requests per second, for example `5,10,20,40`. Each step lasts
+- **Steps.** `STEPS` lists requests per second, by default `10,20,30,40,50,60,80,100`. Each step lasts
   `STEP_DURATION` (default 5 minutes). k6 moves to the new rate over the first 10 s of a step (`RAMP`).
+  The default starts at 10 RPS because below that the cart journeys get too few requests per step to
+  confirm a 99.5 % target (next sections).
 - **Open model.** Each journey is a k6 `ramping-arrival-rate` scenario: journeys start at the planned
   rate whether or not earlier ones have finished. A slow shop shows up as latency and errors, not as
   less load, which is how real users behave. If the shop is so slow that k6 runs out of virtual users
   (`MAX_VUS`, 100 per journey), k6 counts `dropped_iterations` and the report marks the step.
-- **Mix.** `MIX` splits journeys (not requests) between the four CUJs: by default browse 50 %, add to
-  cart 20 %, view cart 15 %, checkout 15 %. Every journey starts a new session with an empty cart.
+- **Mix.** `MIX` splits journeys (not requests) between the four CUJs: by default browse 40 %, add to
+  cart 10 %, view cart 25 %, checkout 25 %. Every journey starts a new session with an empty cart. The
+  mix leans towards the cart journeys on purpose: a shop's real traffic is mostly browsing, but here
+  each CUJ needs enough requests of its own in every step to judge its SLO. With this mix view cart and
+  checkout each get 13 % of the requests (they got 8 % with a 50/20/15/15 mix).
 
 | Journey (CUJ id) | Requests it sends | Counted as |
 |---|---|---|
@@ -93,7 +105,7 @@ placeholder), not the shop's knee. So:
 | `view-cart` | `POST /cart`, then `GET /cart` | add-to-cart, view-cart |
 | `checkout` | `POST /cart`, then `POST /cart/checkout` with the demo's pre-filled fake card | add-to-cart, checkout |
 
-With the default mix a journey sends 1.8 requests on average, so 10 RPS is about 5.6 journeys a second.
+With the default mix a journey sends 1.9 requests on average, so 10 RPS is about 5.3 journeys a second.
 The dependent request is sent even when adding the item failed, so every journey always sends the same
 number of requests and the measured rate stays comparable with the plan.
 
@@ -139,20 +151,34 @@ k6 Job ──OTLP gRPC──▶ k6-metrics (OpenTelemetry Collector, core distri
 
 ### When a step passes
 
-A step **passes** when, in its measured window:
+A measured ratio on a few hundred requests is noisy: 300 requests with no failure say 100 %, but the
+true rate could be as low as 99.1 %. So each SLI is judged on its **Wilson score interval** at one-sided
+95 % confidence (`confidenceZ: 1.645`), not on the measured ratio alone:
 
-1. every journey in `slo/slos.yaml` meets its availability target and its latency target;
-2. every journey has at least 100 requests (`minRequestsPerJourney`): with fewer, 99.5 % cannot be told
-   apart from 100 %;
-3. k6 delivered at least 95 % of the planned rate (`minDeliveredRatio`); otherwise the step did not
-   really test that rate.
+- **met** when the interval's lower end is at or above the target;
+- **missed** when its upper end is below the target;
+- **undecided** when the target lies inside the interval: too few requests to tell.
 
-A miss of 1 makes the step **fail**; only 2 or 3 makes it **invalid**. A step that had not finished by
-the end of the time range is **not-run**.
+With no failures at all, confirming 99.5 % takes about 540 requests and 99 % about 270 (my math:
+n ≥ z² × target ÷ (1 − target)). With the default mix and 4 measured minutes per step, view cart and
+checkout reach 540 requests at about 17 RPS; any failure raises the number needed.
 
-The **capacity** is the measured request rate of the highest step reached by passing every step below
-it. The search stops at the first step that does not pass; if a higher step passes again, the report
-warns that the run is noisy and should be repeated rather than taking the higher number.
+Each step gets one of five verdicts:
+
+| Verdict | When | Ends the search? |
+|---|---|---|
+| **pass** | every SLI of every journey met, each journey has at least 100 requests (`minRequestsPerJourney`), k6 delivered at least 95 % of the plan (`minDeliveredRatio`), no 429s | no |
+| **fail** | an SLI clearly missed | yes |
+| **inconclusive** | nothing missed, but an SLI undecided or a journey below 100 requests | no: passed over |
+| **invalid** | not a test of the shop at the planned rate: any 429 from the gateway (even beside a miss), k6 below 95 % of the plan, or no data | yes |
+| **not-run** | the step had not finished by the end of the time range | yes |
+
+The **capacity** is the measured request rate of the highest step that passed before the first step
+that ended the search. Inconclusive steps neither confirm nor refute the SLOs, so they are passed over:
+a run whose first step is too small to judge still finds its capacity higher up. When inconclusive steps
+sit between the capacity and the step that failed, the report says the limit lies between those two
+steps. If a higher step passes again after the search ended, the report warns that the run is noisy and
+should be repeated rather than taking the higher number.
 
 ### Cost per 1K RPS
 
@@ -206,7 +232,7 @@ Expect the first of these to end the search; the report and the dashboards show 
   currency, catalog and recommendation services) an HPA of up to 2–3 replicas; replicas take a minute
   or two to arrive, and new pods compete for the same CPU. Its CPU is likely the first limit (estimate).
 - **The ingress gateway.** One replica, requesting 50m CPU with a 1-CPU limit, in front of every
-  request. Its local rate limit is off during the run (see above); 429s in a step mean it was not.
+  request. k6 uses its internal port, outside the rate limit (see above); 429s in a step mean it did not.
 - **Checkout's fan-out.** One checkout calls six services, so its latency usually breaks first; its
   SLO is 1,000 ms for that reason.
 - **Shared services.** `currencyservice` (Node.js) is on every page; `redis-cart` is one pod without a
@@ -225,20 +251,26 @@ Expect the first of these to end the search; the report and the dashboards show 
 The report (`report.md`, structure as in [report-template.md](report-template.md)) has:
 
 - **Result.** The highest rate that held every SLO (measured requests per second, with the planned
-  step), the first step that did not and why, the cluster cost, the cost per 1K RPS with and
+  step), the step that ended the search and why, the cluster cost, the cost per 1K RPS with and
   without the load generator's share, and the suggested gateway rate limit (90 % of the capacity).
 - **Steps.** One row per step: planned and measured RPS, the share of the plan k6 delivered, and per
   journey *availability · share under the latency threshold · p95 latency* (bold when an SLO was
-  missed), then k6's CPU (cores), the nodes' average CPU utilisation, the node count and the
-  frontend's total request rate from the mesh, and the verdict.
-- **Why steps did not pass** and **Warnings**, step by step.
+  clearly missed, "(?)" when there were too few requests to tell), then k6's CPU (cores), the nodes'
+  average CPU utilisation, the node count and the frontend's total request rate from the mesh, and
+  the verdict.
+- **Why steps did not pass** and **Warnings**, step by step. The JSON report also has each SLI's
+  interval (`low`, `high`) and verdict.
 
 Reading it:
 
-- The verdict changes from `pass` to `fail` at the capacity. Look at which journey and which SLO broke
-  first, and at node CPU and k6 CPU in that row.
-- `invalid` with "delivered" means k6 fell behind: raise `MAX_VUS` (and check k6's CPU) or lower the
-  steps. `invalid` with "requests" means the step was too short or the rate too low for that journey.
+- The capacity is the last `pass` before the step that ended the search. Look at which journey and
+  which SLO broke there, and at node CPU and k6 CPU in that row.
+- `inconclusive` steps are passed over. Many of them, or "no step confirmed every SLO", means the steps
+  were too short or the rates too low for the targets: lengthen `STEP_DURATION` (more requests per
+  step) rather than lowering the bar. A warning that the limit lies between two steps means the knee
+  is somewhere in that range; a finer run around it narrows it.
+- `invalid` with "429" means the run met the gateway's rate limit (see above). `invalid` with
+  "delivered" means k6 fell behind: raise `MAX_VUS` (and check k6's CPU) or lower the steps.
 - A warning about the node count or about a pass after a failure: repeat the run.
 - p95 comes from k6's duration histogram with fixed buckets, so it is approximate; the pass rule uses
   the exact threshold counters.
@@ -253,6 +285,7 @@ Reading it:
 | The report says "no k6 data" | The relay was not scraped: `kubectl -n loadtest get podmonitoring k6-metrics -o yaml` (status), the managed collection is on, and a global metric filter (if any) lets `k6_.*` through. Also check `RUN_ID` and the time range. |
 | Every request fails | The `Host` header: `TARGET_HOST` must match the Istio `Gateway` host (`FRONTEND_HOSTNAME`). |
 | "did not count requests under N ms" | An SLO threshold is not in `LATENCY_THRESHOLDS_MS`; add it and run again. |
-| "requests got 429" in a step | The gateway's rate limit was enforced: `LOADTEST_GATEWAY_LIMIT=keep`, `kubectl exec` was not allowed, or a gateway pod restarted. Repeat the run. |
-| The gateway still limits after a run | The run was interrupted before its exit trap ran: `make loadtest-gateway-limit-on`. |
+| "requests got 429" in a step | The run met the gateway's rate limit: `LOADTEST_TARGET_URL` is not the internal port 8080, or (public-path test with `LOADTEST_GATEWAY_LIMIT=off`) a gateway pod restarted. Repeat the run. |
+| The gateway still limits after a public-path run with `LOADTEST_GATEWAY_LIMIT=off` | The command was killed before its exit trap ran: `make loadtest-gateway-limit-on`. |
+| Every step inconclusive | Too few requests per step for the targets: lengthen `STEP_DURATION` or raise `STEPS`. |
 | `context query failed` in the log | Only that context column is n/a. GKE system metrics take a few minutes to arrive. |

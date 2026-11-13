@@ -23,7 +23,7 @@ func TestPromAPIQueryAgainstFake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 4 || got[1].Labels["cuj"] != "browse" || got[1].Value != 1334 {
+	if len(got) != 4 || got[1].Labels["cuj"] != "browse" || got[1].Value != 2000 {
 		t.Errorf("Query() = %+v", got)
 	}
 	// The time travels as Unix seconds with milliseconds.

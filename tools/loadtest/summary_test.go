@@ -22,7 +22,7 @@ func TestReadK6Summary(t *testing.T) {
 	if !reflect.DeepEqual(p.Steps, fixtureSteps) {
 		t.Errorf("steps = %v", p.Steps)
 	}
-	if want := fixtureStart.Add(1215000500 * time.Microsecond); !p.End.Equal(want) {
+	if want := fixtureStart.Add(1515000500 * time.Microsecond); !p.End.Equal(want) {
 		t.Errorf("end = %s, want %s", p.End, want)
 	}
 	if !reflect.DeepEqual(p.LatencyThresholdsMs, []float64{100, 250, 500, 750, 1000, 1500, 2000, 3000}) {

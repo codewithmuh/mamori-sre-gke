@@ -11,7 +11,7 @@ import (
 
 func TestLoadConfigDefaults(t *testing.T) {
 	cfg := mustConfig(t)
-	if cfg.Cluster != "mamori" || cfg.Warmup.Duration != time.Minute || cfg.MinDeliveredRatio != 0.95 {
+	if cfg.Cluster != "mamori" || cfg.Warmup.Duration != time.Minute || cfg.MinDeliveredRatio != 0.95 || cfg.ConfidenceZ != 1.645 {
 		t.Errorf("defaults = %+v", cfg)
 	}
 	if cfg.Metrics.Requests != "k6_mamori_cuj_requests_total" || cfg.Metrics.Duration != "k6_http_req_duration_milliseconds" {
@@ -60,6 +60,7 @@ func TestLoadConfigErrors(t *testing.T) {
 		{"min requests", "minRequestsPerJourney: 0\n", "minRequestsPerJourney 0"},
 		{"cpu limit", "generatorCPULimit: 0\n", "generatorCPULimit 0"},
 		{"rate limit share", "rateLimitShare: 1.2\n", "rateLimitShare 1.2"},
+		{"confidence", "confidenceZ: 0\n", "confidenceZ 0"},
 		{"status label", "metrics:\n  statusLabel: \"\"\n", `metrics.statusLabel ""`},
 		{"http requests metric", "metrics:\n  httpRequests: \"a-b\"\n", `metrics.httpRequests "a-b"`},
 		{"metric name", "metrics:\n  good: \"k6 good\"\n", `metrics.good "k6 good"`},

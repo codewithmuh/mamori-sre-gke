@@ -11,7 +11,8 @@ load on three Spot nodes: not a production figure.
 |---|---|
 | Highest request rate that held every SLO | TBD (measured) req/s |
 | Planned rate of that step | TBD (measured) RPS |
-| First step that did not pass, and why | TBD (measured) |
+| Step that ended the search (fail, invalid or not-run), and why | TBD (measured) |
+| Inconclusive steps (too few requests to judge), if any | TBD (measured) |
 | What limited it | TBD (measured) |
 | Cluster cost (nodes and disks, list price) | TBD (measured) an hour, TBD (measured) a month |
 | Cost per 1K RPS | TBD (measured) an hour, TBD (measured) a month |
@@ -31,7 +32,7 @@ One or two sentences: what the number means for this lab, and what would raise i
 | Istio, Online Boutique | Istio TBD (measured), Online Boutique v0.10.7 |
 | Resilience settings in place (HPA, PDBs, retries, timeouts) | TBD (measured) |
 | HPA replicas at the highest passing step (maximum each) | TBD (measured) |
-| Gateway rate limit during the run | not enforced (runtime switch); 429s seen: TBD (measured) |
+| Target and gateway rate limit | internal port 8080, outside the rate limit; 429s seen: TBD (measured) |
 | Steps and step duration | TBD (measured) RPS, TBD (measured) each, first 60 s not measured |
 | Journey mix | TBD (measured) |
 | Background traffic during the run | Locust TBD (measured) users, prober every minute; frontend total TBD (measured) req/s |

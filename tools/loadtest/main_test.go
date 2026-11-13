@@ -26,18 +26,22 @@ func TestRunReportFromSummary(t *testing.T) {
 	}
 	for _, want := range []string{
 		"# Capacity report: run `20270112-100000`",
-		"| Highest rate that held every SLO | **10.0 req/s** (step 2, planned 10 RPS) |",
-		"| First step that did not pass | step 3 (20 RPS), fail: checkout: 90.0 % of requests under 1000 ms < 95.0 % |",
+		"| Highest rate that held every SLO | **20.0 req/s** (step 2, planned 20 RPS) |",
+		"| Search ended at | step 4 (60 RPS), fail: checkout requests under 1000 ms 83.33 % < 95.0 % (at most 84.73 %) |",
+		"lower end of the Wilson interval (z = 1.645), on at least 100 requests",
 		"| Cluster cost (nodes and disks, list price) | $0.1612 an hour, $118 a month |",
-		"| Cost per 1K RPS | **$16.12 an hour**, $11,765 a month |",
-		"k6 used 0.09 of 5.79 cores, 1.6 %",
+		"| Cost per 1K RPS | **$8.06 an hour**, $5,882 a month |",
+		"k6 used 0.15 of 5.79 cores, 2.6 %",
+		"| Suggested ingress gateway rate limit | 18 req/s (90 % of the capacity): `tokens_per_fill`",
 		"| checkout | 99.0 % | 95.0 % under 1000 ms |",
-		"| 2 | 10 | 10.00 | 100 % | 99.925 % · 99.0 % · 260 ms |",
-		"**99.000 % · 90.0 % · 1380 ms**",
-		"| 0.85 | 97 % | 4 | 32.0 | fail |",
-		"- Step 4: k6 dropped 120 journeys",
-		"- Step 4: 30 requests got 429 Too Many Requests",
-		"| Suggested ingress gateway rate limit | 9 req/s (90 % of the capacity): `tokens_per_fill`",
+		"| 2 | 20 | 20.00 | 100 % | 99.950 % · 98.0 % · 280 ms |",
+		"99.500 % · 97.5 % · 450 ms (?)",
+		"**99.444 % · 83.3 % · 1600 ms**",
+		"| 0.85 | 97 % | 4 | 62.0 | invalid |",
+		"- Step 1 (10 RPS), inconclusive: view-cart availability 100.00 %",
+		"- Step 5 (80 RPS), invalid: 30 requests got 429 Too Many Requests",
+		"- Step 5: k6 dropped 120 journeys",
+		"- step 3 was inconclusive: the limit lies between step 2 and step 4",
 		"the Prometheus API at " + srv.URL,
 	} {
 		if !strings.Contains(out, want) {
@@ -54,7 +58,7 @@ func TestRunReportJSONWithFlagsToFile(t *testing.T) {
 	dir := t.TempDir()
 	outFile, copyFile := filepath.Join(dir, "report.json"), filepath.Join(dir, "copy.json")
 	code, stdout, errOut := runCLI(t, "report", "--prometheus-url", srv.URL, "--slos", "testdata/slos.yaml",
-		"--from", "2027-01-12T10:00:00.25Z", "--to", "2027-01-12T10:16:00Z", "--steps", "5,10,20,40",
+		"--from", "2027-01-12T10:00:00.25Z", "--to", "2027-01-12T10:16:00Z", "--steps", "10,20,40,60,80",
 		"--step-duration", "5m", "--run-id", fixtureRunID, "--format", "json", "--out", outFile, "--json-out", copyFile)
 	if code != 0 || stdout != "" {
 		t.Fatalf("exit %d, stdout %q, stderr:\n%s", code, stdout, errOut)
@@ -82,11 +86,12 @@ func TestRunReportJSONWithFlagsToFile(t *testing.T) {
 	if err := json.Unmarshal(data, &r); err != nil {
 		t.Fatalf("not JSON: %v\n%s", err, data)
 	}
-	// The range ends during step 4, so step 4 is not run.
-	if r.MaxStep != 2 || r.FirstNotPassingStep != 3 || r.MaxRPS != 10 || r.SuggestedRateLimit != 9 || r.StepDuration != "5m0s" || r.Steps[3].Status != statusNotRun {
+	// The range ends during step 4: step 3 is inconclusive and passed over, and step 4 (not run) ends
+	// the search.
+	if r.MaxStep != 2 || r.FirstNotPassingStep != 4 || r.MaxRPS != 20 || r.SuggestedRateLimit != 18 || r.StepDuration != "5m0s" || r.Steps[3].Status != statusNotRun {
 		t.Errorf("report = %+v", r)
 	}
-	if !near(r.Cost.Per1KRPSHourly, planHourly*1000/10) {
+	if !near(r.Cost.Per1KRPSHourly, planHourly*1000/20) {
 		t.Errorf("cost = %v", r.Cost.Per1KRPSHourly)
 	}
 }

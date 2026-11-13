@@ -266,6 +266,7 @@ func buildReport(cfg config, slos sloSpec, plan runPlan, results []stepResult, s
 		Cluster:             cfg.Cluster,
 		MinDeliveredRatio:   cfg.MinDeliveredRatio,
 		MinRequests:         cfg.MinRequestsPerJourney,
+		ConfidenceZ:         cfg.ConfidenceZ,
 		CostModel:           cfg.Cost,
 		SLOs:                slos.Journeys,
 		Steps:               results,

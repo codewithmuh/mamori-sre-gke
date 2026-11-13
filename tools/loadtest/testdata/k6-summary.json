@@ -169,26 +169,27 @@
    3000
   ],
   "mix": {
-   "add-to-cart": 0.2,
-   "browse": 0.5,
-   "checkout": 0.15,
-   "view-cart": 0.15
+   "add-to-cart": 0.1,
+   "browse": 0.4,
+   "checkout": 0.25,
+   "view-cart": 0.25
   },
   "rampSeconds": 10,
   "runId": "20270112-100000",
   "start": "2027-01-12T10:00:00.250Z",
   "stepSeconds": 300,
   "steps": [
-   5,
    10,
    20,
-   40
+   40,
+   60,
+   80
   ],
   "target": "http://istio-ingressgateway.istio-ingress.svc.cluster.local"
  },
  "state": {
   "isStdErrTTY": false,
   "isStdOutTTY": false,
-  "testRunDurationMs": 1215000.5
+  "testRunDurationMs": 1515000.5
  }
 }

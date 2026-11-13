@@ -63,13 +63,13 @@ spec:
           env:
             # Defaults for a run started by hand; `make loadtest-run` overrides the first group.
             - name: STEPS
-              value: "5,10,20,30,40,60,80,100"
+              value: "10,20,30,40,50,60,80,100"
             - name: STEP_DURATION
               value: 5m
             - name: RAMP
               value: 10s
             - name: MIX
-              value: browse=50,add-to-cart=20,view-cart=15,checkout=15
+              value: browse=40,add-to-cart=10,view-cart=25,checkout=25
             - name: RUN_ID
               value: manual
             - name: TARGET_HOST
@@ -77,8 +77,9 @@ spec:
             # Must include every SLO's latency threshold (slo/slos.yaml).
             - name: LATENCY_THRESHOLDS_MS
               value: "100,250,500,750,1000,1500,2000,3000"
+            # The gateway's internal port, outside its public rate-limit bucket (deploy/istio).
             - name: TARGET_URL
-              value: http://istio-ingressgateway.istio-ingress.svc.cluster.local
+              value: http://istio-ingressgateway.istio-ingress.svc.cluster.local:8080
             - name: MAX_VUS
               value: "100"
             - name: REQUEST_TIMEOUT

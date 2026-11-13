@@ -12,8 +12,14 @@ warmup: 60s
 # (k6 ran out of VUs or CPU): it cannot pass.
 minDeliveredRatio: 0.95
 
-# A journey with fewer requests than this in a step's measured window cannot pass that step: there is
-# too little data to tell 99.5 % from 100 %.
+# Each SLI is judged on its Wilson score interval, not on the measured ratio alone: met when the
+# interval's lower end reaches the target, missed when its upper end is below it, undecided in
+# between. 1.645 is one-sided 95 % confidence. With no failures, confirming 99.5 % takes about 540
+# requests and 99 % about 270 (my math); a step with too few is inconclusive, never a pass.
+confidenceZ: 1.645
+
+# A floor on top of that: a journey with fewer requests than this in a step's measured window makes
+# the step inconclusive whatever the interval says.
 minRequestsPerJourney: 100
 
 # k6's CPU limit in cores (deploy/loadtest/run/job.yaml). A step where k6 used more than 80 % of it

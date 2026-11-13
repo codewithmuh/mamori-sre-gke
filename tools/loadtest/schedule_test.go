@@ -30,11 +30,11 @@ func TestParseSteps(t *testing.T) {
 
 func TestBuildSchedule(t *testing.T) {
 	steps := fixtureSchedule(t, time.Minute)
-	if len(steps) != 4 {
+	if len(steps) != 5 {
 		t.Fatalf("len = %d", len(steps))
 	}
 	s3 := steps[2]
-	if s3.Index != 3 || s3.PlannedRPS != 20 ||
+	if s3.Index != 3 || s3.PlannedRPS != 40 ||
 		!s3.Start.Equal(fixtureStart.Add(600*time.Second)) ||
 		!s3.MeasuredFrom.Equal(fixtureStart.Add(660*time.Second)) ||
 		!s3.End.Equal(fixtureStart.Add(900*time.Second)) {

@@ -11,28 +11,41 @@ import (
 	"time"
 )
 
-// Step verdicts.
+// Step verdicts. Only fail, invalid and not-run end the search for the capacity.
 const (
-	statusPass    = "pass"    // every journey met both SLOs on enough data, at the planned rate
-	statusFail    = "fail"    // at least one SLO was missed
-	statusInvalid = "invalid" // no SLO missed, but too little data or less load than planned
-	statusNotRun  = "not-run" // the step had not finished by the end of the time range
+	statusPass         = "pass"         // every SLI clearly met, at the planned rate
+	statusFail         = "fail"         // at least one SLI clearly missed
+	statusInconclusive = "inconclusive" // nothing clearly missed, but too few requests to confirm every SLI
+	statusInvalid      = "invalid"      // not a test of the shop at the planned rate: 429s, k6 fell behind, or no data
+	statusNotRun       = "not-run"      // the step had not finished by the end of the time range
 )
 
+// SLI verdicts, from the Wilson score interval of the measured ratio.
+const (
+	sliMet       = "met"       // the interval's lower end is at or above the target
+	sliMissed    = "missed"    // the interval's upper end is below the target
+	sliUndecided = "undecided" // the target lies inside the interval: too few requests to tell
+)
+
+// sli is one measured ratio with its interval and verdict.
+type sli struct {
+	Value   float64 `json:"value"`
+	Low     float64 `json:"low"`
+	High    float64 `json:"high"`
+	Target  float64 `json:"target"`
+	Verdict string  `json:"verdict"`
+}
+
 type journeyResult struct {
-	ID                 string   `json:"id"`
-	Requests           float64  `json:"requests"`
-	Good               float64  `json:"good"`
-	Fast               float64  `json:"fast"`
-	Availability       *float64 `json:"availability"`
-	LatencyShare       *float64 `json:"latencyShare"`
-	P95Ms              *float64 `json:"p95Ms,omitempty"`
-	AvailabilityTarget float64  `json:"availabilityTarget"`
-	LatencyTarget      float64  `json:"latencyTarget"`
-	ThresholdMs        float64  `json:"thresholdMs"`
-	AvailabilityMet    bool     `json:"availabilityMet"`
-	LatencyMet         bool     `json:"latencyMet"`
-	EnoughData         bool     `json:"enoughData"`
+	ID           string   `json:"id"`
+	Requests     float64  `json:"requests"`
+	Good         float64  `json:"good"`
+	Fast         float64  `json:"fast"`
+	Availability *sli     `json:"availability"`
+	Latency      *sli     `json:"latency"`
+	ThresholdMs  float64  `json:"thresholdMs"`
+	P95Ms        *float64 `json:"p95Ms,omitempty"`
+	EnoughData   bool     `json:"enoughData"`
 }
 
 type stepResult struct {
@@ -144,7 +157,16 @@ func (e *evaluator) evaluateStep(ctx context.Context, s step, r *stepResult) err
 	delivered := measured / s.PlannedRPS
 	r.MeasuredRPS, r.Delivered = &measured, &delivered
 
-	var misses, gaps []string
+	// The ingress gateway's local rate limit (deploy/resilience/ingress-rate-limit.yaml) answers 429.
+	// `make loadtest-run` turns its enforcement off; 429s mean it was on, or a gateway pod restarted.
+	tooMany := e.selector(fmt.Sprintf("%s=%q", m.StatusLabel, "429"))
+	r.RateLimited = e.optionalScalar(ctx, "429 responses", fmt.Sprintf("sum(increase(%s%s[%s]))", m.HTTPRequests, tooMany, window), at, true)
+
+	var limited, misses, load, undecided, gaps []string
+	if r.RateLimited != nil && *r.RateLimited >= 1 {
+		limited = append(limited, fmt.Sprintf("%.0f requests got 429 Too Many Requests: the ingress gateway's rate limit was enforced, so this step measured the limit, not the shop", *r.RateLimited))
+	}
+	z := e.cfg.ConfidenceZ
 	for _, slo := range e.slos.Journeys {
 		label := thresholdLabel(slo.Latency.ThresholdMs)
 		if good[slo.ID] > 0 && !thresholds[label] {
@@ -152,26 +174,30 @@ func (e *evaluator) evaluateStep(ctx context.Context, s step, r *stepResult) err
 				label, strings.Join(sortedKeys(thresholds), ", "), label)
 		}
 		j := journeyResult{
-			ID:                 slo.ID,
-			Requests:           requests[slo.ID],
-			Good:               good[slo.ID],
-			Fast:               fast[slo.ID][label],
-			AvailabilityTarget: slo.Availability.Target,
-			LatencyTarget:      slo.Latency.Target,
-			ThresholdMs:        slo.Latency.ThresholdMs,
-			EnoughData:         requests[slo.ID] >= e.cfg.MinRequestsPerJourney,
+			ID:          slo.ID,
+			Requests:    requests[slo.ID],
+			Good:        good[slo.ID],
+			Fast:        fast[slo.ID][label],
+			ThresholdMs: slo.Latency.ThresholdMs,
+			EnoughData:  requests[slo.ID] >= e.cfg.MinRequestsPerJourney,
 		}
-		if j.Requests > 0 {
-			// increase() extrapolates to the window's edges, so a ratio can come out a hair over 1.
-			a, l := math.Min(j.Good/j.Requests, 1), math.Min(j.Fast/j.Requests, 1)
-			j.Availability, j.LatencyShare = &a, &l
-			j.AvailabilityMet = a >= j.AvailabilityTarget
-			j.LatencyMet = l >= j.LatencyTarget
-			if !j.AvailabilityMet {
-				misses = append(misses, fmt.Sprintf("%s availability %s < %s", j.ID, pct(a, 3), pct(j.AvailabilityTarget, 1)))
-			}
-			if !j.LatencyMet {
-				misses = append(misses, fmt.Sprintf("%s: %s of requests under %s ms < %s", j.ID, pct(l, 1), label, pct(j.LatencyTarget, 1)))
+		// A failed request never counts as fast, so both ratios share the denominator.
+		j.Availability = judge(j.Good, j.Requests, slo.Availability.Target, z)
+		j.Latency = judge(j.Fast, j.Requests, slo.Latency.Target, z)
+		for _, c := range []struct {
+			name string
+			s    *sli
+		}{
+			{slo.ID + " availability", j.Availability},
+			{fmt.Sprintf("%s requests under %s ms", slo.ID, label), j.Latency},
+		} {
+			switch {
+			case c.s == nil:
+			case c.s.Verdict == sliMissed:
+				misses = append(misses, fmt.Sprintf("%s %s < %s (at most %s)", c.name, pct(c.s.Value, 2), pct(c.s.Target, 1), pct(c.s.High, 2)))
+			case c.s.Verdict == sliUndecided:
+				undecided = append(undecided, fmt.Sprintf("%s %s: %.0f requests cannot tell it from the %s target (%s to %s)",
+					c.name, pct(c.s.Value, 2), j.Requests, pct(c.s.Target, 1), pct(c.s.Low, 2), pct(c.s.High, 2)))
 			}
 		}
 		if !j.EnoughData {
@@ -180,24 +206,60 @@ func (e *evaluator) evaluateStep(ctx context.Context, s step, r *stepResult) err
 		r.Journeys = append(r.Journeys, j)
 	}
 	if delivered < e.cfg.MinDeliveredRatio {
-		gaps = append(gaps, fmt.Sprintf("k6 delivered %s of the planned rate (VUs or CPU ran out)", pct(delivered, 0)))
+		load = append(load, fmt.Sprintf("k6 delivered %s of the planned rate (VUs or CPU ran out)", pct(delivered, 0)))
 	}
 	if delivered > 1.2 {
 		r.Warnings = append(r.Warnings, fmt.Sprintf("measured %s of the planned rate: another run in the window, or the wrong --steps or --run-id?", pct(delivered, 0)))
 	}
 
+	// 429s come first: they are failures the shop did not cause, so a miss beside them proves nothing.
 	switch {
+	case len(limited) > 0:
+		r.Status = statusInvalid
 	case len(misses) > 0:
 		r.Status = statusFail
-	case len(gaps) > 0:
+	case len(load) > 0:
 		r.Status = statusInvalid
+	case len(undecided) > 0 || len(gaps) > 0:
+		r.Status = statusInconclusive
 	default:
 		r.Status = statusPass
 	}
-	r.Reasons = append(misses, gaps...)
+	for _, part := range [][]string{limited, misses, load, undecided, gaps} {
+		r.Reasons = append(r.Reasons, part...)
+	}
 
 	e.addContext(ctx, s, r, window)
 	return nil
+}
+
+// judge rates k good out of n against a target. Nil when there were no requests.
+func judge(k, n, target, z float64) *sli {
+	if !(n > 0) {
+		return nil
+	}
+	// increase() extrapolates to the window's edges, so a ratio can come out a hair over 1.
+	v := math.Max(0, math.Min(k/n, 1))
+	lo, hi := wilson(v, n, z)
+	s := &sli{Value: v, Low: lo, High: hi, Target: target, Verdict: sliUndecided}
+	switch {
+	case lo >= target:
+		s.Verdict = sliMet
+	case hi < target:
+		s.Verdict = sliMissed
+	}
+	return s
+}
+
+// wilson is the Wilson score interval of a ratio p measured on n requests. Unlike p ± z·σ it stays
+// inside [0, 1] and is honest near 100 %: with no failures in 200 requests and z = 1.645 its lower
+// end is 98.7 %, so 200 requests cannot show a 99.5 % target is met.
+func wilson(p, n, z float64) (lo, hi float64) {
+	z2 := z * z
+	denom := 1 + z2/n
+	center := (p + z2/(2*n)) / denom
+	half := z / denom * math.Sqrt(p*(1-p)/n+z2/(4*n*n))
+	return math.Max(0, center-half), math.Min(1, center+half)
 }
 
 // addContext fills the informational numbers. A failed query only costs that number.
@@ -208,14 +270,6 @@ func (e *evaluator) addContext(ctx context.Context, s step, r *stepResult, windo
 	r.Dropped = e.optionalScalar(ctx, "dropped iterations", fmt.Sprintf("sum(increase(%s%s[%s]))", m.Dropped, e.selector(), window), at, true)
 	if r.Dropped != nil && *r.Dropped >= 1 {
 		r.Warnings = append(r.Warnings, fmt.Sprintf("k6 dropped %.0f journeys: it had no free VU to start them (raise MAX_VUS, or the shop is very slow)", *r.Dropped))
-	}
-
-	// The ingress gateway's local rate limit (deploy/resilience/ingress-rate-limit.yaml) answers 429.
-	// `make loadtest-run` turns its enforcement off; 429s mean it was on, or a gateway pod restarted.
-	tooMany := e.selector(fmt.Sprintf("%s=%q", m.StatusLabel, "429"))
-	r.RateLimited = e.optionalScalar(ctx, "429 responses", fmt.Sprintf("sum(increase(%s%s[%s]))", m.HTTPRequests, tooMany, window), at, true)
-	if r.RateLimited != nil && *r.RateLimited >= 1 {
-		r.Warnings = append(r.Warnings, fmt.Sprintf("%.0f requests got 429 Too Many Requests: the ingress gateway's rate limit was enforced, so this step measured the limit, not the shop", *r.RateLimited))
 	}
 
 	p95q := fmt.Sprintf("histogram_quantile(0.95, sum by (%s, le) (rate(%s_bucket%s[%s])))", m.JourneyLabel, m.Duration, e.selector(), window)
@@ -310,35 +364,64 @@ func sortedKeys(m map[string]bool) []string {
 	return keys
 }
 
-// capacity is the highest step reached by passing every step before it. A pass after a failed step
-// does not count: it would be a noisy run, not more capacity.
+// capacity is the highest passing step before the first step that failed, was invalid or did not
+// run. Inconclusive steps (too few requests to judge) are passed over, not counted: they neither
+// confirm nor refute the SLOs. A pass after the end of the search does not count either: it would
+// be a noisy run, not more capacity.
 type capacity struct {
-	Max          *int // 1-based index of the highest sustained step
-	FirstNotPass *int
+	Max          *int // 1-based index of the highest passing step
+	FirstNotPass *int // the step that ended the search
 	Warnings     []string
 }
 
 func findCapacity(results []stepResult) capacity {
 	var c capacity
+	var skipped []int // inconclusive steps since the last pass
 	for i := range results {
-		if results[i].Status != statusPass {
-			first := results[i].Index
-			c.FirstNotPass = &first
-			for _, later := range results[i+1:] {
-				if later.Status == statusPass {
-					c.Warnings = append(c.Warnings, fmt.Sprintf("step %d passed after step %d did not: the run is noisy; repeat it before trusting the result", later.Index, first))
-					break
-				}
-			}
-			return c
+		switch results[i].Status {
+		case statusPass:
+			idx := results[i].Index
+			c.Max, skipped = &idx, nil
+			continue
+		case statusInconclusive:
+			skipped = append(skipped, results[i].Index)
+			continue
 		}
-		idx := results[i].Index
-		c.Max = &idx
+		end := results[i].Index
+		c.FirstNotPass = &end
+		switch {
+		case c.Max != nil && len(skipped) > 0:
+			c.Warnings = append(c.Warnings, fmt.Sprintf("%s inconclusive: the limit lies between step %d and step %d", stepsWere(skipped), *c.Max, end))
+		case c.Max == nil && len(skipped) > 0:
+			c.Warnings = append(c.Warnings, fmt.Sprintf("%s inconclusive and step %d did not pass: no step confirmed every SLO; lengthen STEP_DURATION for more requests per step", stepsWere(skipped), end))
+		}
+		for _, later := range results[i+1:] {
+			if later.Status == statusPass {
+				c.Warnings = append(c.Warnings, fmt.Sprintf("step %d passed after step %d did not: the run is noisy; repeat it before trusting the result", later.Index, end))
+				break
+			}
+		}
+		return c
 	}
-	if c.Max != nil {
-		c.Warnings = append(c.Warnings, "every step held its SLOs: the limit is above the last step; run again with higher STEPS")
+	switch {
+	case c.Max != nil:
+		c.Warnings = append(c.Warnings, "no step failed: the limit is above the highest step that passed; run again with higher STEPS")
+	case len(skipped) > 0:
+		c.Warnings = append(c.Warnings, "no step confirmed every SLO: lengthen STEP_DURATION or raise STEPS for more requests per step")
 	}
 	return c
+}
+
+// stepsWere writes "step 3 was" or "steps 3 and 4 were".
+func stepsWere(v []int) string {
+	parts := make([]string, len(v))
+	for i, x := range v {
+		parts[i] = strconv.Itoa(x)
+	}
+	if len(parts) == 1 {
+		return "step " + parts[0] + " was"
+	}
+	return "steps " + strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1] + " were"
 }
 
 // pct writes a ratio as a percentage, e.g. pct(0.995, 1) = "99.5 %".
